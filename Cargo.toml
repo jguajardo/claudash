@@ -1,0 +1,25 @@
+[package]
+name = "claudash"
+version = "0.1.0"
+edition = "2024"
+description = "Unofficial terminal dashboard for Claude Code: sessions, MCP server health and context usage"
+authors = ["Jorge Guajardo <jguajardo87@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jguajardo/claudash"
+homepage = "https://github.com/jguajardo/claudash"
+readme = "README.md"
+keywords = ["claude", "claude-code", "tui", "dashboard", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["/.github", "/assets", "dist-workspace.toml"]
+
+[dependencies]
+crossterm = "0.29.0"
+dirs = "7.0.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
