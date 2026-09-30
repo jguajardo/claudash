@@ -17,10 +17,11 @@ use ratatui::{
 use crate::{
     app::{App, EcoTab, Focus, Input, McpSnapshot, Popup, View},
     ecosystem::Item,
+    hooks::Activity,
     mcp::McpStatus,
     paths,
     sessions::{self, Usage, human_tokens},
-    statusline::Window,
+    statusline::{self, Forecast, Window},
 };
 
 const HIGHLIGHT: Color = Color::Rgb(60, 40, 70);
@@ -114,7 +115,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 // ---- Dashboard ---------------------------------------------------------------
 
 fn draw_dashboard(frame: &mut Frame, app: &mut App, area: Rect) {
-    let [top, tokens] = Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).areas(area);
+    let [top, tokens] = Layout::vertical([Constraint::Min(8), Constraint::Length(8)]).areas(area);
     let [sessions, right] =
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
     let project_lines = project_lines(app);
@@ -140,6 +141,11 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut block =
         panel("Sessions", Color::LightMagenta).title_bottom(Line::from(count).right_aligned());
     block = focused(block, app.focus == Focus::Sessions);
+    if !app.hooks_configured || !app.statusline.configured {
+        block = block.title_bottom(
+            Line::from(" run `claudash setup` for alerts and plan usage ").dark_gray(),
+        );
+    }
     if !app.filter.is_empty() {
         block = block.title(Line::from(format!(" filter: {} ", app.filter)).fg(Color::Yellow));
     }
@@ -160,12 +166,14 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|&i| &app.sessions[i])
         .map(|s| {
             let mut title = vec![Span::styled(s.title.as_str(), Style::new().bold())];
-            match app.live.get(&s.id).map(String::as_str) {
-                Some("busy") => {
-                    title.push(Span::styled("  ● working", Style::new().fg(Color::Green)))
-                }
-                Some(_) => title.push(Span::styled("  ● open", Style::new().fg(Color::Cyan))),
-                None => {}
+            let marker = match app.activity(&s.id) {
+                Some(Activity::NeedsYou) => Some(("  ▲ needs you", Color::Yellow)),
+                Some(Activity::Working) => Some(("  ● working", Color::Green)),
+                Some(Activity::Waiting) => Some(("  ● waiting", Color::Cyan)),
+                Some(Activity::Ended) | None => None,
+            };
+            if let Some((text, color)) = marker {
+                title.push(Span::styled(text, Style::new().fg(color).bold()));
             }
             let mut detail = vec![Span::styled(
                 format!("  {}", s.project_path),
@@ -364,9 +372,10 @@ fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [gauge_area, stats_area, plan_area] = Layout::vertical([
+    let [gauge_area, stats_area, cache_area, plan_area] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
@@ -431,6 +440,7 @@ fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
         ),
     ]);
     frame.render_widget(Paragraph::new(vec![Line::from(stats), model]), stats_area);
+    frame.render_widget(Paragraph::new(cache_line(app, session)), cache_area);
     frame.render_widget(Paragraph::new(plan_line(app)), plan_area);
 }
 
@@ -446,7 +456,12 @@ fn plan_windows(app: &App) -> Vec<(&'static str, Window)> {
 }
 
 fn reset_time(window: &Window) -> String {
-    let Some(at) = Local.timestamp_opt(window.resets_at, 0).single() else {
+    local_time(window.resets_at)
+}
+
+/// "14:20" today, "Sat 09:00" on another day.
+fn local_time(epoch: i64) -> String {
+    let Some(at) = Local.timestamp_opt(epoch, 0).single() else {
         return String::new();
     };
     if at.date_naive() == Local::now().date_naive() {
@@ -456,13 +471,100 @@ fn reset_time(window: &Window) -> String {
     }
 }
 
+/// "limit ~15:40" when the current pace reaches 100% before the reset.
+fn forecast_span(app: &App, label: &str) -> Option<Span<'static>> {
+    let (pick, lookback): (statusline::Pick, i64) = match label {
+        "5h" => (|s| s.five_hour, 3_600),
+        _ => (|s| s.seven_day, 24 * 3_600),
+    };
+    let now = chrono::Utc::now().timestamp();
+    match statusline::forecast(&app.statusline.samples, pick, lookback, now)? {
+        Forecast::LimitAt(at) => Some(Span::styled(
+            format!(" · limit ~{} at this pace", local_time(at)),
+            Style::new().fg(Color::Red).bold(),
+        )),
+        Forecast::Safe => Some(Span::styled(" · on pace", Style::new().fg(Color::Green))),
+    }
+}
+
+/// Cache reuse for the session, plus Claude Code's live cache diagnostics when
+/// the status line has reported them.
+fn cache_line(app: &App, session: &sessions::Session) -> Line<'static> {
+    let t = &session.tokens.total;
+    let total = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens;
+    let mut spans = vec![Span::styled("cache ", dim())];
+    if total == 0 {
+        spans.push(Span::styled("no data", dim()));
+        return Line::from(spans);
+    }
+    let snapshot_cache = app
+        .statusline
+        .sessions
+        .get(&session.id)
+        .and_then(|s| s.prompt_cache.as_ref());
+    // Claude Code's own figure when the status line reported it.
+    let hit = snapshot_cache
+        .and_then(|c| c.hit_ratio)
+        .unwrap_or(t.cache_read_input_tokens as f64 / total as f64);
+    let color = match hit {
+        h if h >= 0.8 => Color::Green,
+        h if h >= 0.5 => Color::Yellow,
+        _ => Color::Red,
+    };
+    spans.push(Span::styled(
+        format!("hit {:.0}%", hit * 100.0),
+        Style::new().fg(color).bold(),
+    ));
+    if hit < 0.5 && t.cache_creation_input_tokens > 100_000 {
+        spans.push(Span::styled(
+            "  low reuse: cache writes cost more than reads",
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    let Some(cache) = snapshot_cache else {
+        return Line::from(spans);
+    };
+    let now = chrono::Utc::now().timestamp();
+    match cache.expires_at {
+        Some(at) if at > now => spans.push(Span::styled(
+            format!("  · warm until {}", local_time(at)),
+            Style::new().fg(Color::Green),
+        )),
+        _ => {
+            spans.push(Span::styled("  · cold", Style::new().fg(Color::Yellow)));
+            if let Some(tokens) = cache.recache_tokens_if_cold.filter(|&t| t > 0) {
+                spans.push(Span::styled(
+                    format!(" (next reply re-caches {})", human_tokens(tokens)),
+                    dim(),
+                ));
+            }
+        }
+    }
+    if let Some(ttl) = &cache.ttl {
+        spans.push(Span::styled(format!(" · ttl {ttl}"), dim()));
+    }
+    if let Some(misses) = cache.misses.filter(|&m| m > 0) {
+        let cause = cache
+            .last_miss_cause
+            .as_ref()
+            .and_then(|c| c.causes.first())
+            .map(|c| format!(", last: {c}"))
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            format!(" · {misses} miss(es){cause}"),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    Line::from(spans)
+}
+
 fn plan_line(app: &App) -> Line<'static> {
     let windows = plan_windows(app);
     if windows.is_empty() {
         let hint = if app.statusline.configured {
             "plan usage: not reported yet (Pro/Max only, after a session's first reply)"
         } else {
-            "plan usage: run `claudash statusline --setup` to enable"
+            "plan usage: run `claudash setup` to enable"
         };
         return Line::from(Span::styled(hint, dim().italic()));
     }
@@ -474,10 +576,9 @@ fn plan_line(app: &App) -> Line<'static> {
             format!("{:.0}%", w.used_percentage),
             Style::new().fg(color).bold(),
         ));
-        spans.push(Span::styled(
-            format!(" (resets {})   ", reset_time(&w)),
-            dim(),
-        ));
+        spans.push(Span::styled(format!(" (resets {})", reset_time(&w)), dim()));
+        spans.extend(forecast_span(app, label));
+        spans.push(Span::raw("   "));
     }
     Line::from(spans)
 }
@@ -863,7 +964,7 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
             "Claude Code hasn't reported plan usage yet. It's only sent to Pro and Max \
              subscribers, after the first reply of a session."
         } else {
-            "Plan usage comes from Claude Code's status line. Run `claudash statusline --setup` \
+            "Plan usage comes from Claude Code's status line. Run `claudash setup` \
              for the one-line settings change."
         };
         frame.render_widget(message(text, block), area);
@@ -888,7 +989,14 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
                 reset_time(w)
             ))
             .use_unicode(true);
-        frame.render_widget(gauge, *row);
+        // Gauge on the left, the forecast next to it.
+        let [bar, note] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(*row);
+        frame.render_widget(gauge, bar);
+        if let Some(span) = forecast_span(app, label) {
+            frame.render_widget(Paragraph::new(Line::from(span)), note);
+        }
     }
 }
 

@@ -32,6 +32,11 @@ pub fn managed_dir() -> PathBuf {
     }
 }
 
+/// claudash's own cache (status line snapshots, hook state): safe to delete.
+pub fn claudash_cache() -> Option<PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join("claudash"))
+}
+
 /// Path for display, with the home directory shortened to `~`.
 pub fn display(path: &Path) -> String {
     match dirs::home_dir() {

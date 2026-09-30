@@ -30,14 +30,16 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 
 ### 1 · Dashboard
 
-- **Sessions**: every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity. Sessions open right now in Claude Code are marked `● working` or `● open`. The list refreshes every 5 seconds.
+- **Sessions**: every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity. Sessions open right now in Claude Code are marked `▲ needs you` (waiting for a permission decision or other input), `● working` or `● waiting` (finished, waiting for your next prompt), and claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes. The list refreshes every 5 seconds.
   - `Enter` resumes the session with `claude --resume` in its project folder and returns to the dashboard when you exit.
   - `/` filters by title, path or branch.
   - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
   - `d` deletes the session, after asking.
 - **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
 - **MCP Status**: `claude mcp list` run in the selected project's folder, so project-scoped servers show up too, cached per project. Press `Tab` to move into the list and `Enter` to read a server's latest log, which usually says why it failed.
-- **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost and model, plus your plan usage (5-hour and 7-day limits) when the status line is set up.
+- **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost and model.
+  - **Cache diagnostics**: how much of the input was read from cache, flagged when cache writes dominate; with the status line, whether the cache is still warm and until when, its TTL, cache misses and their cause (such as `tools_changed` or `ttl_expired_5m`), and how many tokens the next reply re-caches once it goes cold.
+  - **Plan usage**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
 
 ### 2 · Ecosystem
 
@@ -74,31 +76,30 @@ cd claudash
 cargo install --path .
 ```
 
-## Setup: plan usage and the real context window
+## Setup: alerts, plan usage and the real context window
 
-Claude Code only exposes plan usage and the real context window size through its [status line](https://code.claude.com/docs/en/statusline). To let claudash see them, make `claudash statusline` your status line command in `~/.claude/settings.json`:
+Some data is only available from Claude Code while a session runs: plan usage and the real context window size come through the [status line](https://code.claude.com/docs/en/statusline), and knowing that a session is waiting for your permission needs [hooks](https://code.claude.com/docs/en/hooks). One command connects both:
 
-```json
-"statusLine": {
-  "type": "command",
-  "command": "claudash statusline"
-}
+```sh
+claudash setup           # shows what it would change in ~/.claude/settings.json
+claudash setup --apply   # makes the changes, after backing the file up
+claudash setup --remove  # undoes them
 ```
 
-It records what Claude Code reports and prints a compact status line (`Opus · ctx 23% · 5h 41% · 7d 12% · $6.41`). To keep a status line you already have, pass its command after `--` and claudash prints that command's output instead:
+It registers `claudash statusline` as the status line and `claudash hook` as an asynchronous hook for `UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop` and `SessionEnd`. Running it twice changes nothing, and your own hooks are left alone. If you already have a status line, claudash wraps it and prints that command's output, so it looks the same as before; `--remove` restores it.
 
-```json
-"command": "claudash statusline -- ~/.claude/my-statusline.sh"
-```
+- `claudash statusline` saves what Claude Code reports and, on its own, prints a compact line (`Opus · ctx 23% · 5h 41% · 7d 12% · $6.41`).
+- `claudash hook` records only the event type and time for each session. It never stores your prompts or Claude's replies, and prints nothing.
 
-Claude Code only sends plan usage to Pro and Max subscribers, after the first reply of a session. Without this setup everything else works; the context gauge uses `--context-limit` instead.
+Claude Code only sends plan usage to Pro and Max subscribers, after the first reply of a session. Without the setup everything else works: sessions show `working`/`waiting` from `claude agents --json`, and the context gauge uses `--context-limit`.
 
 ## Usage
 
 ```sh
 claudash                       # open the dashboard
+claudash --no-notify           # no desktop notifications or bell
 claudash --context-limit 200k  # context window to assume when the status line hasn't reported one
-claudash statusline --setup    # print the status line setup instructions
+claudash setup                 # connect the status line and hooks (see above)
 claudash --help
 ```
 
@@ -125,6 +126,7 @@ claudash --help
 | --- | --- | --- | --- |
 | Context window when the status line hasn't reported one | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Claude Code's config directory | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
+| Desktop notifications and bell | `--no-notify` to turn off | | on |
 
 Token values accept suffixes: `1M`, `200k`, `1.5m`, `500000`.
 
@@ -134,7 +136,8 @@ claudash makes no network requests of its own. It reads local files and runs the
 
 | Data | Source | Kind |
 | --- | --- | --- |
-| Plan usage, context window size | [Status line](https://code.claude.com/docs/en/statusline) JSON saved by `claudash statusline` | Documented |
+| Plan usage, context window size, prompt cache | [Status line](https://code.claude.com/docs/en/statusline) JSON saved by `claudash statusline` to `~/.cache/claudash/statusline/` | Documented |
+| Needs you / working / waiting | [Hook](https://code.claude.com/docs/en/hooks) events saved by `claudash hook` to `~/.cache/claudash/state/` | Documented |
 | Open sessions | `claude agents --json` | Documented |
 | MCP servers | `claude mcp list`, run in the project folder. Only names and statuses are shown, never commands or URLs, which may contain credentials | Documented |
 | Plugins | `claude plugin list --json`, `claude plugin details` | Documented |
@@ -147,6 +150,7 @@ Claude Code [documents the transcript format as internal](https://code.claude.co
 
 These actions change things, and only run when you ask:
 
+- **`claudash setup --apply` / `--remove`**: edits `~/.claude/settings.json` (status line and hooks), after saving a timestamped backup next to it.
 - **Delete a session** (`d`, then `y`): removes its transcript, subagent transcripts and tool results, and its `file-history` checkpoints and `session-env` under Claude Code's config directory. It can't be undone.
 - **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.

@@ -1,7 +1,7 @@
 //! Application state, key handling and background work.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -18,9 +18,10 @@ use ratatui::{
 use crate::{
     claude_cli::{self, PromptReply},
     ecosystem::{self, Ecosystem},
+    hooks::{self, Activity},
     instructions::{self, Instructions},
     mcp::{self, McpResult, McpStatus},
-    paths,
+    notify, paths,
     sessions::{self, Session},
     statusline, ui,
 };
@@ -34,6 +35,8 @@ const REFRESH_EVERY: Duration = Duration::from_secs(5);
 const MCP_DEBOUNCE: Duration = Duration::from_millis(600);
 /// How long a footer notice stays visible.
 const FLASH_DURATION: Duration = Duration::from_secs(4);
+/// Plan usage percentages that trigger an alert, once per window.
+const PLAN_ALERTS: [f64; 2] = [80.0, 95.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -141,6 +144,8 @@ impl<T: Send + 'static> Job<T> {
 pub struct App {
     /// Context window size used when the status line hasn't reported one.
     pub context_limit: u64,
+    /// Desktop notifications and bell for sessions that need you and plan alerts.
+    notify: bool,
     pub view: View,
     pub focus: Focus,
     pub popup: Option<Popup>,
@@ -166,6 +171,14 @@ pub struct App {
     pub live: HashMap<String, String>,
     live_job: Option<Job<Result<HashMap<String, String>, String>>>,
     pub statusline: statusline::Store,
+    /// Last hook event per session, from `claudash hook`.
+    pub hook_states: HashMap<String, hooks::State>,
+    /// `true` once any hook has run, i.e. `claudash setup --apply` was used.
+    pub hooks_configured: bool,
+    /// Activity seen at the previous check, to notify on changes only.
+    seen_activity: Option<HashMap<String, Activity>>,
+    /// Plan alerts already sent: (window label, resets_at, threshold).
+    plan_alerts_sent: HashSet<(&'static str, i64, u64)>,
 
     // Project context.
     /// Project folder of the selected session and the instructions Claude loads there.
@@ -193,9 +206,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(context_limit: u64) -> Self {
+    pub fn new(context_limit: u64, notify: bool) -> Self {
         let mut app = Self {
             context_limit,
+            notify,
             view: View::Dashboard,
             focus: Focus::Sessions,
             popup: None,
@@ -213,6 +227,10 @@ impl App {
             live: HashMap::new(),
             live_job: None,
             statusline: statusline::Store::default(),
+            hook_states: HashMap::new(),
+            hooks_configured: false,
+            seen_activity: None,
+            plan_alerts_sent: HashSet::new(),
             project: None,
             project_since: Instant::now(),
             mcp_cache: HashMap::new(),
@@ -268,6 +286,10 @@ impl App {
         }
         if self.refreshed_at.elapsed() >= REFRESH_EVERY {
             self.refresh();
+        } else if self.ticks.is_multiple_of(4) {
+            // Hook state is a few tiny files: check it every second so
+            // "needs you" shows up (and notifies) right away.
+            self.reload_hook_states();
         }
         self.poll_jobs();
         self.maybe_start_mcp_check();
@@ -292,10 +314,96 @@ impl App {
     fn refresh(&mut self) {
         self.reload_sessions();
         self.statusline = statusline::load();
+        self.check_plan_alerts();
+        self.reload_hook_states();
         if self.live_job.is_none() {
             self.live_job = Some(Job::spawn(claude_cli::live_sessions));
         }
         self.refreshed_at = Instant::now();
+    }
+
+    fn reload_hook_states(&mut self) {
+        (self.hook_states, self.hooks_configured) = hooks::load();
+        self.check_activity_changes();
+    }
+
+    /// What an open session is doing: from its hooks when set up, otherwise
+    /// from `claude agents --json`. `None` for sessions that aren't open.
+    pub fn activity(&self, id: &str) -> Option<Activity> {
+        let live = self.live.get(id)?;
+        match self.hook_states.get(id).map(hooks::State::activity) {
+            Some(Activity::Ended) | None => Some(match live.as_str() {
+                "busy" => Activity::Working,
+                _ => Activity::Waiting,
+            }),
+            Some(activity) => Some(activity),
+        }
+    }
+
+    /// Notifies when an open session starts needing you or finishes a reply.
+    fn check_activity_changes(&mut self) {
+        let now: HashMap<String, Activity> = self
+            .live
+            .keys()
+            .filter_map(|id| self.activity(id).map(|a| (id.clone(), a)))
+            .collect();
+        // The first check only records the starting point.
+        let Some(before) = self.seen_activity.replace(now.clone()) else {
+            return;
+        };
+        for (id, activity) in now {
+            // Only changes are news: a session seen for the first time (for
+            // instance when claudash starts) doesn't notify.
+            let Some(previous) = before.get(&id).copied() else {
+                continue;
+            };
+            let message = match (previous, activity) {
+                (p, Activity::NeedsYou) if p != Activity::NeedsYou => "needs you",
+                (Activity::Working, Activity::Waiting) => "finished",
+                _ => continue,
+            };
+            let title = self
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "A session".into());
+            self.alert(&format!("Claude Code {message}"), &title);
+        }
+    }
+
+    /// Alerts once per window when plan usage crosses a threshold.
+    fn check_plan_alerts(&mut self) {
+        let Some((limits, _)) = self.statusline.rate_limits.clone() else {
+            return;
+        };
+        for (label, window) in [("5-hour", limits.five_hour), ("7-day", limits.seven_day)] {
+            let Some(w) = window.filter(statusline::Window::is_current) else {
+                continue;
+            };
+            let crossed = PLAN_ALERTS
+                .iter()
+                .rev()
+                .find(|&&t| w.used_percentage >= t)
+                .copied();
+            if let Some(threshold) = crossed
+                && self
+                    .plan_alerts_sent
+                    .insert((label, w.resets_at, threshold as u64))
+            {
+                self.alert(
+                    &format!("Claude plan: {label} limit at {:.0}%", w.used_percentage),
+                    "Usage is getting close to the limit",
+                );
+            }
+        }
+    }
+
+    fn alert(&mut self, title: &str, body: &str) {
+        self.show_flash(format!("{title}: {body}"), false);
+        if self.notify {
+            notify::send(title, body);
+        }
     }
 
     fn reload_sessions(&mut self) {
@@ -699,6 +807,7 @@ impl App {
             // If `claude agents` fails (older Claude Code), just show no live marks.
             self.live = result.ok().and_then(Result::ok).unwrap_or_default();
             self.live_job = None;
+            self.check_activity_changes();
         }
 
         if let Some((project, job)) = &self.eco_job
@@ -1023,7 +1132,7 @@ fn help_popup() -> Popup {
         "  ↑/↓ PgUp/PgDn  scroll     Esc  close",
         "",
         "Plan usage and the real context window come from Claude Code's",
-        "status line: run `claudash statusline --setup` to enable them.",
+        "status line and hooks: run `claudash setup` to enable them.",
     ];
     Popup::Text {
         title: " Keys ".into(),
@@ -1051,7 +1160,7 @@ mod tests {
     fn renders_at_any_size_without_panicking() {
         use ratatui::{Terminal, backend::TestBackend};
 
-        let mut app = App::new(1_000_000);
+        let mut app = App::new(1_000_000, false);
         app.eco = Some((None, Ecosystem::default()));
         for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
             for view in [View::Dashboard, View::Ecosystem, View::Usage] {
@@ -1073,5 +1182,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn notifies_only_on_changes_of_known_sessions() {
+        let mut app = App::new(1_000_000, false);
+        let id = "11111111-2222-3333-4444-555555555555".to_string();
+        let state = |event: &str, kind: Option<&str>| hooks::State {
+            event: event.into(),
+            notification_type: kind.map(Into::into),
+            at: 0,
+        };
+        app.flash = None;
+        app.seen_activity = Some(HashMap::new());
+        app.live = HashMap::from([(id.clone(), "busy".into())]);
+        app.hook_states =
+            HashMap::from([(id.clone(), state("Notification", Some("permission_prompt")))]);
+        // First time this session is seen: no alert, even though it needs you.
+        app.check_activity_changes();
+        assert!(app.flash.is_none());
+
+        app.hook_states
+            .insert(id.clone(), state("PostToolUse", None));
+        app.check_activity_changes();
+        assert!(app.flash.is_none());
+        app.hook_states
+            .insert(id.clone(), state("Notification", Some("permission_prompt")));
+        app.check_activity_changes();
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.0.contains("needs you"))
+        );
+
+        app.flash = None;
+        app.hook_states
+            .insert(id.clone(), state("UserPromptSubmit", None));
+        app.check_activity_changes();
+        app.hook_states.insert(id, state("Stop", None));
+        app.check_activity_changes();
+        assert!(app.flash.as_ref().is_some_and(|f| f.0.contains("finished")));
     }
 }

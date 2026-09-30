@@ -8,35 +8,25 @@
 //! context window size. This command saves it to
 //! `<cache dir>/claudash/statusline/<session_id>.json` and prints a short status
 //! line, or the output of another status line command given after `--`.
+//!
+//! Plan usage is also appended to `history.jsonl` in the same directory, one
+//! sample per change, so the dashboard can tell how fast usage is growing and
+//! forecast when a limit will be reached.
 
 use std::{
-    fs,
-    io::{self, Read, Write},
-    path::PathBuf,
+    fs::{self, OpenOptions},
+    io::{self, BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Files older than this are deleted when a new one is written.
 const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
-
-pub const SETUP_HELP: &str = r#"Add this to ~/.claude/settings.json to let claudash show plan usage and
-the real context window size:
-
-  "statusLine": {
-    "type": "command",
-    "command": "claudash statusline"
-  }
-
-To keep an existing status line, pass its command after `--`; claudash
-records the data and prints that command's output instead of its own:
-
-  "command": "claudash statusline -- ~/.claude/my-statusline.sh"
-
-Claude Code only sends plan usage (rate_limits) to Pro and Max subscribers,
-after the first response of a session."#;
+/// Plan usage history is trimmed to its newer half past this size.
+const HISTORY_MAX_BYTES: u64 = 512 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Snapshot {
@@ -48,6 +38,27 @@ pub struct Snapshot {
     #[serde(default)]
     pub cost: Cost,
     pub rate_limits: Option<RateLimits>,
+    pub prompt_cache: Option<PromptCache>,
+}
+
+/// Prompt cache statistics for the main conversation (Claude Code v2.1.251+).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PromptCache {
+    pub ttl: Option<String>,
+    /// Epoch seconds when the cached prefix goes cold.
+    pub expires_at: Option<i64>,
+    /// Cache reads as a fraction of all input tokens, main conversation only.
+    pub hit_ratio: Option<f64>,
+    pub misses: Option<u64>,
+    pub last_miss_cause: Option<MissCause>,
+    /// Tokens the next request re-caches if the cache has gone cold by then.
+    pub recache_tokens_if_cold: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MissCause {
+    #[serde(default)]
+    pub causes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -87,7 +98,31 @@ impl Window {
 }
 
 fn store_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|dir| dir.join("claudash").join("statusline"))
+    crate::paths::claudash_cache().map(|dir| dir.join("statusline"))
+}
+
+/// One plan usage reading, as stored in `history.jsonl`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    /// Epoch seconds when the reading was taken.
+    pub at: i64,
+    pub five_hour: Option<(f64, i64)>,
+    pub seven_day: Option<(f64, i64)>,
+}
+
+impl Sample {
+    fn from_limits(limits: &RateLimits, at: i64) -> Self {
+        let pair = |w: Option<Window>| w.map(|w| (w.used_percentage, w.resets_at));
+        Sample {
+            at,
+            five_hour: pair(limits.five_hour),
+            seven_day: pair(limits.seven_day),
+        }
+    }
+
+    fn same_reading(&self, other: &Sample) -> bool {
+        self.five_hour == other.five_hour && self.seven_day == other.seven_day
+    }
 }
 
 /// Entry point for `claudash statusline [-- <command> [args...]]`.
@@ -126,8 +161,105 @@ fn save(snapshot: &Snapshot, raw: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!(".{id}.{}.tmp", std::process::id()));
     fs::write(&tmp, raw)?;
     fs::rename(&tmp, dir.join(format!("{id}.json")))?;
+    if let Some(limits) = &snapshot.rate_limits {
+        append_sample(
+            &dir.join("history.jsonl"),
+            Sample::from_limits(limits, now()),
+        )?;
+    }
     prune(&dir);
     Ok(())
+}
+
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Appends a reading unless it repeats the last one; trims the file when big.
+fn append_sample(file: &Path, sample: Sample) -> io::Result<()> {
+    if read_samples(file)
+        .last()
+        .is_some_and(|last| last.same_reading(&sample))
+    {
+        return Ok(());
+    }
+    let mut line = serde_json::to_string(&sample).map_err(io::Error::other)?;
+    line.push('\n');
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)?
+        .write_all(line.as_bytes())?;
+    if fs::metadata(file)?.len() > HISTORY_MAX_BYTES {
+        let samples = read_samples(file);
+        let keep = &samples[samples.len() / 2..];
+        let text: String = keep
+            .iter()
+            .filter_map(|s| serde_json::to_string(s).ok())
+            .map(|l| l + "\n")
+            .collect();
+        fs::write(file, text)?;
+    }
+    Ok(())
+}
+
+fn read_samples(file: &Path) -> Vec<Sample> {
+    let Ok(f) = fs::File::open(file) else {
+        return Vec::new();
+    };
+    BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect()
+}
+
+/// When a limit will be reached at the current pace.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Forecast {
+    /// Reaches 100% at this epoch second, before the window resets.
+    LimitAt(i64),
+    /// Won't reach 100% before the window resets.
+    Safe,
+}
+
+/// Selects one window's `(used_percentage, resets_at)` from a sample.
+pub type Pick = fn(&Sample) -> Option<(f64, i64)>;
+
+/// Forecasts one window from the readings taken during it. `pick` selects the
+/// window from a sample; `lookback` is how far back the pace is measured.
+pub fn forecast(samples: &[Sample], pick: Pick, lookback: i64, now: i64) -> Option<Forecast> {
+    let (current, resets_at) = samples.last().and_then(pick)?;
+    if resets_at <= now {
+        return None;
+    }
+    // Readings from this same window (same reset time) inside the lookback.
+    let window: Vec<(i64, f64)> = samples
+        .iter()
+        .filter_map(|s| {
+            pick(s)
+                .filter(|(_, r)| *r == resets_at)
+                .map(|(p, _)| (s.at, p))
+        })
+        .filter(|(at, _)| now - at <= lookback)
+        .collect();
+    let (first_at, first_pct) = *window.first()?;
+    let (last_at, _) = *window.last()?;
+    let elapsed = (last_at - first_at) as f64;
+    // Too little data to call a pace: less than 5 minutes of readings.
+    if elapsed < 300.0 {
+        return None;
+    }
+    let per_second = (current - first_pct) / elapsed;
+    if per_second <= 0.0 {
+        return Some(Forecast::Safe);
+    }
+    let at = now + ((100.0 - current).max(0.0) / per_second) as i64;
+    Some(if at < resets_at {
+        Forecast::LimitAt(at)
+    } else {
+        Forecast::Safe
+    })
 }
 
 fn prune(dir: &PathBuf) {
@@ -192,6 +324,8 @@ pub struct Store {
     pub rate_limits: Option<(RateLimits, SystemTime)>,
     /// `true` once any snapshot has been found, i.e. the status line is set up.
     pub configured: bool,
+    /// Plan usage readings, oldest first.
+    pub samples: Vec<Sample>,
 }
 
 /// Reads every saved snapshot. Cheap: one small JSON file per recent session.
@@ -200,6 +334,7 @@ pub fn load() -> Store {
     let Some(dir) = store_dir() else {
         return store;
     };
+    store.samples = read_samples(&dir.join("history.jsonl"));
     let Ok(entries) = fs::read_dir(dir) else {
         return store;
     };
@@ -264,5 +399,73 @@ mod tests {
         let s: Snapshot = serde_json::from_str(r#"{"session_id":"x"}"#).unwrap();
         assert!(s.rate_limits.is_none());
         assert_eq!(render(&s), "");
+    }
+
+    fn sample(at: i64, five: f64) -> Sample {
+        Sample {
+            at,
+            five_hour: Some((five, 20_000)),
+            seven_day: None,
+        }
+    }
+
+    #[test]
+    fn forecasts_the_limit_from_the_pace_in_the_current_window() {
+        let five = |s: &Sample| s.five_hour;
+        // 10% -> 40% in 1500 s: 60% left at 0.02%/s takes 3000 s.
+        let samples = [sample(1_000, 10.0), sample(2_500, 40.0)];
+        assert_eq!(
+            forecast(&samples, five, 3_600, 2_500),
+            Some(Forecast::LimitAt(5_500))
+        );
+        // Same pace, but the window resets first.
+        let early = [
+            Sample {
+                five_hour: Some((10.0, 4_000)),
+                ..samples[0]
+            },
+            Sample {
+                five_hour: Some((40.0, 4_000)),
+                ..samples[1]
+            },
+        ];
+        assert_eq!(forecast(&early, five, 3_600, 2_500), Some(Forecast::Safe));
+        // Not enough data yet.
+        assert_eq!(forecast(&samples[..1], five, 3_600, 2_500), None);
+        // Readings from an earlier window (different reset) are ignored.
+        let mixed = [
+            Sample {
+                five_hour: Some((90.0, 900)),
+                ..sample(100, 0.0)
+            },
+            sample(2_400, 40.0),
+            sample(2_500, 40.0),
+        ];
+        assert_eq!(forecast(&mixed, five, 3_600, 2_500), None);
+    }
+
+    #[test]
+    fn history_skips_repeated_readings() {
+        let file =
+            std::env::temp_dir().join(format!("claudash-history-{}.jsonl", std::process::id()));
+        let _ = fs::remove_file(&file);
+        append_sample(&file, sample(1, 10.0)).unwrap();
+        append_sample(&file, sample(2, 10.0)).unwrap();
+        append_sample(&file, sample(3, 11.0)).unwrap();
+        let samples = read_samples(&file);
+        fs::remove_file(&file).unwrap();
+        assert_eq!(samples.iter().map(|s| s.at).collect::<Vec<_>>(), [1, 3]);
+    }
+
+    #[test]
+    fn parses_prompt_cache_fields() {
+        let s: Snapshot = serde_json::from_str(
+            r#"{"prompt_cache":{"ttl":"1h","expires_at":100,"hit_ratio":0.93,
+                "misses":2,"last_miss_cause":{"causes":["ttl_expired_5m"]},"recache_tokens_if_cold":5000}}"#,
+        )
+        .unwrap();
+        let cache = s.prompt_cache.unwrap();
+        assert_eq!(cache.hit_ratio, Some(0.93));
+        assert_eq!(cache.last_miss_cause.unwrap().causes, ["ttl_expired_5m"]);
     }
 }
