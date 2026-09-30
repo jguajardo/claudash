@@ -15,13 +15,14 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, EcoTab, Focus, Input, McpSnapshot, Popup, View},
+    app::{App, EcoTab, Focus, Input, McpSnapshot, Popup, TranscriptRow, TranscriptView, View},
     ecosystem::Item,
     hooks::Activity,
     mcp::McpStatus,
     paths,
     sessions::{self, Usage, human_tokens},
     statusline::{self, Forecast, Window},
+    transcript::{self, Kind},
 };
 
 const HIGHLIGHT: Color = Color::Rgb(60, 40, 70);
@@ -39,14 +40,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Dashboard => draw_dashboard(frame, app, body),
         View::Ecosystem => draw_ecosystem(frame, app, body),
         View::Usage => draw_usage(frame, app, body),
+        View::Transcript => draw_transcript(frame, app, body),
     }
     draw_footer(frame, app, footer);
     draw_popup(frame, app);
 }
 
+/// A bordered panel; an empty `title` leaves room for a custom `.title(...)`.
 fn panel(title: &str, accent: Color) -> Block<'_> {
-    Block::default()
-        .title(Line::from(format!(" {title} ")).bold().fg(accent))
+    let block = Block::default();
+    let block = if title.is_empty() {
+        block
+    } else {
+        block.title(Line::from(format!(" {title} ")).bold().fg(accent))
+    };
+    block
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(accent))
@@ -104,6 +112,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         };
         spans.push(Span::styled(format!(" {label} "), style));
         spans.push(Span::raw(" "));
+    }
+    if app.view == View::Transcript {
+        spans.push(Span::styled(
+            " conversation ",
+            Style::new().fg(Color::White).bg(HIGHLIGHT).bold(),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), left);
     frame.render_widget(
@@ -1000,6 +1014,200 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+// ---- Conversation ------------------------------------------------------------
+
+/// Builds the screen rows for a conversation at `width` columns.
+fn transcript_rows(view: &TranscriptView, width: u16) -> Vec<TranscriptRow> {
+    let width = width.max(10) as usize;
+    let mut rows = Vec::new();
+    let needle = view.query.as_ref().map(|q| q.to_lowercase());
+    let mut push =
+        |entry: usize, text: String, style: Style| rows.push(TranscriptRow { entry, text, style });
+    // Word-wrap, then hard-wrap anything still too long (paths, URLs).
+    let wrap = |text: &str, indent: usize| -> Vec<String> {
+        crate::app::textwrap(text, width.saturating_sub(indent).max(1))
+            .into_iter()
+            .flat_map(|l| hard_wrap(&l, width.saturating_sub(indent).max(1)))
+            .map(|l| format!("{}{l}", " ".repeat(indent)))
+            .collect()
+    };
+    let time = |e: &transcript::Entry| {
+        e.at.map(|t| t.format(" · %b %d %H:%M").to_string())
+            .unwrap_or_default()
+    };
+
+    for (i, e) in view.entries.iter().enumerate() {
+        let hit = needle.as_ref().is_some_and(|n| {
+            transcript::searchable(e).is_some_and(|t| t.to_lowercase().contains(n))
+        });
+        let mark = |style: Style| {
+            if hit {
+                style.bg(Color::Rgb(70, 60, 20))
+            } else {
+                style
+            }
+        };
+        match &e.kind {
+            Kind::User | Kind::Assistant => {
+                let (who, color) = if e.kind == Kind::User {
+                    ("You", Color::LightMagenta)
+                } else {
+                    ("Claude", Color::Cyan)
+                };
+                push(i, String::new(), Style::new());
+                push(
+                    i,
+                    format!("▌ {who}{}", time(e)),
+                    Style::new().fg(color).bold(),
+                );
+                for line in wrap(&e.text, 2) {
+                    push(i, line, mark(Style::new()));
+                }
+            }
+            Kind::Thinking => push(i, "  ✻ thinking".into(), dim().italic()),
+            Kind::ToolUse { name } => {
+                let line = format!("  ⚙ {name}  {}", e.text);
+                let line = if line.chars().count() > width {
+                    let cut: String = line.chars().take(width.saturating_sub(1)).collect();
+                    format!("{cut}…")
+                } else {
+                    line
+                };
+                push(i, line, mark(Style::new().fg(Color::Yellow)));
+            }
+            Kind::ToolResult { is_error } => {
+                if e.text.is_empty() {
+                    continue;
+                }
+                let color = if *is_error {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                };
+                if view.show_output {
+                    let (lines, extra) = transcript::clip_lines(&e.text);
+                    for line in lines {
+                        for l in hard_wrap(&format!("    {line}"), width) {
+                            push(i, l, mark(Style::new().fg(color)));
+                        }
+                    }
+                    if extra > 0 {
+                        push(i, format!("    … {extra} more lines"), dim());
+                    }
+                } else {
+                    let count = e.text.lines().count();
+                    let summary = if *is_error {
+                        format!("    ↳ error: {}", e.text.lines().next().unwrap_or_default())
+                    } else {
+                        format!("    ↳ {count} line(s) of output")
+                    };
+                    let summary: String = summary.chars().take(width).collect();
+                    push(i, summary, mark(Style::new().fg(color)));
+                }
+            }
+            Kind::Compaction { pre_tokens } => {
+                let size = pre_tokens
+                    .map(|t| format!(" · {} tokens before", human_tokens(t)))
+                    .unwrap_or_default();
+                push(i, String::new(), Style::new());
+                push(
+                    i,
+                    format!("──── conversation compacted{size}{} ────", time(e)),
+                    Style::new().fg(Color::Yellow).bold(),
+                );
+            }
+            Kind::CompactSummary => {
+                if view.show_output {
+                    push(
+                        i,
+                        "  ▾ compaction summary".into(),
+                        Style::new().fg(Color::Yellow),
+                    );
+                    for line in wrap(&e.text, 4) {
+                        push(i, line, mark(dim()));
+                    }
+                } else {
+                    let n = e.text.lines().count();
+                    push(
+                        i,
+                        format!("  ▸ compaction summary ({n} lines, o to show)"),
+                        mark(Style::new().fg(Color::Yellow)),
+                    );
+                }
+            }
+            Kind::Notice => {
+                for line in wrap(&format!("※ {}", e.text), 2) {
+                    push(i, line, mark(dim().italic()));
+                }
+            }
+        }
+    }
+    rows
+}
+
+fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(view) = &mut app.transcript else {
+        return;
+    };
+    let mut block = panel("", Color::Cyan).title(
+        Line::from(format!(" {} ", view.title))
+            .bold()
+            .fg(Color::Cyan),
+    );
+    let meta = match &view.branch {
+        Some(branch) => format!(" {}  {branch} ", view.project),
+        None => format!(" {} ", view.project),
+    };
+    block = block.title(Line::from(meta).fg(Color::DarkGray).right_aligned());
+    let inner = block.inner(area);
+
+    let key = (inner.width, view.show_output, view.query.clone());
+    if view.rows_key.as_ref() != Some(&key) {
+        view.rows = transcript_rows(view, inner.width);
+        view.rows_key = Some(key);
+    }
+    let visible = inner.height as usize;
+    let last_page = view.rows.len().saturating_sub(visible);
+    if let Some(entry) = view.jump_to.take() {
+        view.scroll = if entry == usize::MAX {
+            last_page
+        } else {
+            // A little context above the target.
+            view.rows
+                .iter()
+                .position(|r| r.entry >= entry)
+                .unwrap_or(last_page)
+                .saturating_sub(2)
+        };
+    }
+    view.scroll = view.scroll.min(last_page);
+    view.at_end = view.scroll == last_page;
+
+    let mut position = format!(
+        " {}-{} of {} ",
+        (view.scroll + 1).min(view.rows.len()),
+        (view.scroll + visible).min(view.rows.len()),
+        view.rows.len()
+    );
+    if let Some(query) = &view.query {
+        position = format!(
+            " \"{query}\" {}/{} ·{position}",
+            if view.matches.is_empty() {
+                0
+            } else {
+                view.match_pos + 1
+            },
+            view.matches.len()
+        );
+    }
+    let block = block.title_bottom(Line::from(position).right_aligned());
+    let lines: Vec<Line> = view.rows[view.scroll..(view.scroll + visible).min(view.rows.len())]
+        .iter()
+        .map(|r| Line::from(Span::styled(r.text.clone(), r.style)))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 // ---- Footer and popups ----------------------------------------------------------
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -1013,6 +1221,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("▌", Style::new().fg(Color::Yellow)),
             hint("   Enter keep · Esc clear"),
         ]),
+        Some(Input::TranscriptSearch { text }) => Line::from(vec![
+            Span::styled(" / ", Style::new().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Yellow)),
+            hint("   Enter search this conversation · Esc cancel"),
+        ]),
+        Some(Input::FindAll { text }) => Line::from(vec![
+            Span::styled(" find ", Style::new().fg(Color::Black).bg(Color::Magenta)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Magenta)),
+            hint("   Enter search every conversation · Esc cancel"),
+        ]),
         Some(Input::Prompt { text, .. }) => Line::from(vec![
             Span::styled(" prompt ", Style::new().fg(Color::Black).bg(Color::Cyan)),
             Span::raw(format!(" {text}")),
@@ -1025,6 +1245,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(Span::styled(
                     format!(" {msg}"),
                     Style::new().fg(color).bold(),
+                ))
+            } else if let Some(query) = app.finding() {
+                Line::from(Span::styled(
+                    format!(
+                        " {} searching every conversation for \"{query}\"…",
+                        app.spinner()
+                    ),
+                    Style::new().fg(Color::Magenta),
                 ))
             } else if app.prompt_running() {
                 Line::from(Span::styled(
@@ -1040,6 +1268,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         hint(" search  "),
                         key(" p "),
                         hint(" prompt  "),
+                        key(" v "),
+                        hint(" read  "),
+                        key(" f "),
+                        hint(" find  "),
                         key(" d "),
                         hint(" delete  "),
                         key(" Tab "),
@@ -1060,6 +1292,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         hint(" toggle plugin  "),
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
+                    (View::Transcript, _) => vec![
+                        key(" / "),
+                        hint(" search  "),
+                        key(" n/N "),
+                        hint(" next/prev  "),
+                        key(" o "),
+                        hint(" tool output  "),
+                        key(" e "),
+                        hint(" export .md  "),
+                        key(" Esc "),
+                        hint(" back  "),
+                    ],
                 };
                 spans.extend([key(" r "), hint(" reload  "), key(" q "), hint(" quit")]);
                 Line::from(spans)
@@ -1124,6 +1368,54 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             let text: Vec<Line> = rows.into_iter().map(Line::from).collect();
             let paragraph = Paragraph::new(text).block(block).scroll((*scroll, 0));
             frame.render_widget(paragraph, area);
+        }
+        Some(Popup::Results { query, hits, state }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(85),
+                Constraint::Percentage(80),
+            );
+            frame.render_widget(Clear, area);
+            let items: Vec<ListItem> = hits
+                .iter()
+                .map(|hit| {
+                    let when = hit
+                        .at
+                        .map(|t| t.format("%b %d %H:%M").to_string())
+                        .unwrap_or_default();
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(hit.title.clone(), Style::new().bold()),
+                            Span::styled(format!("  {when}"), dim()),
+                        ]),
+                        Line::from(Span::styled(
+                            format!("  {}", hit.snippet),
+                            Style::new().fg(Color::Gray),
+                        )),
+                    ])
+                })
+                .collect();
+            let more = if hits.len() >= 300 { "300+" } else { "" };
+            let block = panel("", Color::Magenta)
+                .title(
+                    Line::from(format!(
+                        " \"{query}\" · {}{more} matches ",
+                        if more.is_empty() {
+                            hits.len().to_string()
+                        } else {
+                            String::new()
+                        }
+                    ))
+                    .bold()
+                    .fg(Color::Magenta),
+                )
+                .title_bottom(Line::from(" Enter open at the match · Esc close ").right_aligned());
+            let list = List::new(items)
+                .block(block)
+                .highlight_style(Style::new().bg(HIGHLIGHT))
+                .highlight_symbol("▶ ")
+                .highlight_spacing(HighlightSpacing::Always);
+            frame.render_stateful_widget(list, area, state);
         }
         Some(Popup::ConfirmDelete { title, .. }) => {
             let area = centered(frame.area(), Constraint::Length(64), Constraint::Length(8));

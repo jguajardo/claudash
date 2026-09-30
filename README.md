@@ -14,7 +14,8 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 
 - **Sessions**: every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity. Sessions open right now in Claude Code are marked `▲ needs you` (waiting for a permission decision or other input), `● working` or `● waiting` (finished, waiting for your next prompt), and claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes. The list refreshes every 5 seconds.
   - `Enter` resumes the session with `claude --resume` in its project folder and returns to the dashboard when you exit.
-  - `/` filters by title, path or branch.
+  - `/` filters by title, path or branch; `f` searches the content of every conversation and opens the one you pick at the match.
+  - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
   - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
   - `d` deletes the session, after asking.
 - **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
@@ -26,6 +27,13 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 ### 2 · Ecosystem
 
 Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin. Plugins show their projected always-on token cost per session from `claude plugin details`, and `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
+
+### Export from the command line
+
+```sh
+claudash export 6b1f3c2e > session.md       # by session ID or its first characters
+claudash export 6b1f3c2e -o session.md
+```
 
 ### 3 · Usage
 
@@ -82,6 +90,7 @@ claudash                       # open the dashboard
 claudash --no-notify           # no desktop notifications or bell
 claudash --context-limit 200k  # context window to assume when the status line hasn't reported one
 claudash setup                 # connect the status line and hooks (see above)
+claudash export <ID> [-o FILE] # a conversation as Markdown
 claudash --help
 ```
 
@@ -92,7 +101,10 @@ claudash --help
 | `1` `2` `3` | Dashboard, Ecosystem, Usage |
 | `↑` `↓` / `j` `k` | Move |
 | `Enter` | Resume the session · open the MCP server's log · show details |
-| `/` | Search sessions (`Enter` keeps the filter, `Esc` clears it) |
+| `/` | Search sessions (`Enter` keeps the filter, `Esc` clears it) · search inside the open conversation |
+| `f` | Search the content of every conversation |
+| `v` | Read the selected session's conversation |
+| `o` · `n`/`N` · `e` | In a conversation: show tool output · next/previous match · export to Markdown |
 | `p` | Send a one-off prompt to the selected session |
 | `d` / `Delete` | Delete the selected session (asks first) |
 | `Tab` | Switch between the session list and the MCP list · next ecosystem tab |
@@ -125,7 +137,7 @@ claudash makes no network requests of its own. It reads local files and runs the
 | Plugins | `claude plugin list --json`, `claude plugin details` | Documented |
 | Instruction files | The [memory docs](https://code.claude.com/docs/en/memory) rules; the *Project instructions* setting from user and managed settings | Documented |
 | Skills, agents, commands, hooks | `SKILL.md` and Markdown frontmatter, `hooks` in settings files and plugins' `hooks/hooks.json` | Documented |
-| Sessions, tokens, cost | `~/.claude/projects/<project>/<session-id>.jsonl` | Internal |
+| Sessions, conversations, tokens, cost | `~/.claude/projects/<project>/<session-id>.jsonl` | Internal |
 | MCP server logs | `~/.cache/claude-cli-nodejs/<project>/mcp-logs-<server>/` | Internal |
 
 Claude Code [documents the transcript format as internal](https://code.claude.com/docs/en/sessions#where-transcripts-are-stored) and it can change between versions, so a Claude Code update may break the Sessions, Token Usage and Usage views until claudash catches up. claudash parses these files leniently and skips anything it doesn't recognize.

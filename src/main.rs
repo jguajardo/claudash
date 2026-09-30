@@ -9,6 +9,7 @@ mod paths;
 mod sessions;
 mod setup;
 mod statusline;
+mod transcript;
 mod ui;
 
 /// Context window used when the status line hasn't reported one; override with
@@ -25,6 +26,8 @@ Usage:
                                          line + hooks); shows the changes first
   claudash statusline [-- <COMMAND>...]  status line command for Claude Code
   claudash hook                          hook command for Claude Code
+  claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
+                                         without -o)
 
 Options:
   --context-limit <TOKENS>  Context window size used when Claude Code's status
@@ -42,6 +45,7 @@ enum Cli {
     Setup(setup::Mode),
     Statusline { wrapped: Vec<String> },
     Hook,
+    Export { id: String, output: Option<String> },
 }
 
 /// Accepts "1M", "200k", "500000" (any case, optional '_' separators).
@@ -81,6 +85,22 @@ fn parse_args(args: impl IntoIterator<Item = String>, env: Option<String>) -> Re
                 };
             }
             "hook" => return Ok(Cli::Hook),
+            "export" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [id] => Ok(Cli::Export {
+                        id: id.to_string(),
+                        output: None,
+                    }),
+                    [id, "-o", file] | ["-o", file, id] => Ok(Cli::Export {
+                        id: id.to_string(),
+                        output: Some(file.to_string()),
+                    }),
+                    _ => Err(format!(
+                        "usage: claudash export <SESSION-ID> [-o FILE]\n\n{HELP}"
+                    )),
+                };
+            }
             "statusline" => {
                 let rest: Vec<String> = args.collect();
                 return match rest.split_first() {
@@ -130,11 +150,12 @@ fn main() -> std::io::Result<()> {
             println!("{HELP}");
             return Ok(());
         }
-        Ok(Cli::Setup(mode)) => {
-            return setup::run(mode).inspect_err(|e| eprintln!("claudash setup: {e}"));
-        }
+        Ok(Cli::Setup(mode)) => return exit_on_error("setup", setup::run(mode)),
         Ok(Cli::Statusline { wrapped }) => return statusline::run(&wrapped),
         Ok(Cli::Hook) => return hooks::run(),
+        Ok(Cli::Export { id, output }) => {
+            return exit_on_error("export", export(&id, output.as_deref()));
+        }
         Err(msg) => {
             eprintln!("claudash: {msg}");
             std::process::exit(2);
@@ -147,6 +168,44 @@ fn main() -> std::io::Result<()> {
     let result = app::App::new(context_limit, notify).run(&mut terminal);
     ratatui::restore();
     result
+}
+
+/// Prints a subcommand's error once, plainly, and exits with status 1.
+fn exit_on_error(command: &str, result: std::io::Result<()>) -> std::io::Result<()> {
+    if let Err(e) = result {
+        eprintln!("claudash {command}: {e}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `claudash export`: finds the session by ID (or ID prefix) and writes it.
+fn export(id: &str, output: Option<&str>) -> std::io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| std::io::Error::other("could not find Claude Code's config directory"))?;
+    let all = sessions::load_sessions(&dir, &[])?;
+    let matches: Vec<&sessions::Session> = all.iter().filter(|s| s.id.starts_with(id)).collect();
+    let session = match matches[..] {
+        [one] => one,
+        [] => return Err(std::io::Error::other(format!("no session with ID {id}"))),
+        _ => {
+            return Err(std::io::Error::other(format!(
+                "{id} matches several sessions"
+            )));
+        }
+    };
+    let markdown = app::session_markdown(session)?;
+    match output {
+        Some(file) => {
+            std::fs::write(file, markdown)?;
+            eprintln!("Wrote {file}");
+            Ok(())
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(markdown.as_bytes())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +268,21 @@ mod tests {
         );
         assert!(parse(&["setup", "--bogus"]).is_err());
         assert_eq!(parse(&["hook"]), Ok(Cli::Hook));
+        assert_eq!(
+            parse(&["export", "abc"]),
+            Ok(Cli::Export {
+                id: "abc".into(),
+                output: None
+            })
+        );
+        assert_eq!(
+            parse(&["export", "abc", "-o", "x.md"]),
+            Ok(Cli::Export {
+                id: "abc".into(),
+                output: Some("x.md".into())
+            })
+        );
+        assert!(parse(&["export"]).is_err());
         assert_eq!(
             parse(&["statusline"]),
             Ok(Cli::Statusline { wrapped: vec![] })

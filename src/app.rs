@@ -23,7 +23,9 @@ use crate::{
     mcp::{self, McpResult, McpStatus},
     notify, paths,
     sessions::{self, Session},
-    statusline, ui,
+    statusline,
+    transcript::{self, Entry, Hit},
+    ui,
 };
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -43,6 +45,8 @@ pub enum View {
     Dashboard,
     Ecosystem,
     Usage,
+    /// A session's conversation, full screen.
+    Transcript,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,16 +99,94 @@ pub enum Popup {
         id: String,
         title: String,
     },
+    /// Matches of a search through every session's conversation.
+    Results {
+        query: String,
+        hits: Vec<Hit>,
+        state: ListState,
+    },
 }
 
 /// A line being typed in the footer.
 pub enum Input {
     Search,
+    /// Search inside the open conversation.
+    TranscriptSearch {
+        text: String,
+    },
+    /// Search through every session's conversation.
+    FindAll {
+        text: String,
+    },
     Prompt {
         id: String,
         cwd: PathBuf,
         text: String,
     },
+}
+
+/// One screen row of the conversation view.
+pub struct TranscriptRow {
+    /// Index of the entry the row belongs to.
+    pub entry: usize,
+    pub text: String,
+    pub style: ratatui::style::Style,
+}
+
+/// The conversation view's state.
+pub struct TranscriptView {
+    pub session_id: String,
+    pub title: String,
+    pub path: PathBuf,
+    pub project: String,
+    pub branch: Option<String>,
+    pub entries: Vec<Entry>,
+    /// Show tool output and compaction summaries in full.
+    pub show_output: bool,
+    /// Last search inside the conversation, and the entries that match it.
+    pub query: Option<String>,
+    pub matches: Vec<usize>,
+    pub match_pos: usize,
+    /// First visible row.
+    pub scroll: usize,
+    /// Whether the last draw showed the end of the conversation.
+    pub at_end: bool,
+    /// Entry to bring into view on the next draw.
+    pub jump_to: Option<usize>,
+    /// Rows for (width, show_output, query); rebuilt when that changes.
+    pub rows: Vec<TranscriptRow>,
+    pub rows_key: Option<(u16, bool, Option<String>)>,
+}
+
+impl TranscriptView {
+    fn search(&mut self, query: &str) {
+        let needle = query.to_lowercase();
+        self.matches = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                transcript::searchable(e).is_some_and(|t| t.to_lowercase().contains(&needle))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.query = (!query.is_empty()).then(|| query.to_string());
+        self.match_pos = 0;
+        self.jump_to = self.matches.first().copied();
+    }
+
+    fn step_match(&mut self, forward: bool) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let n = self.matches.len();
+        self.match_pos = if forward {
+            (self.match_pos + 1) % n
+        } else {
+            (self.match_pos + n - 1) % n
+        };
+        self.jump_to = Some(self.matches[self.match_pos]);
+    }
 }
 
 pub struct Project {
@@ -203,6 +285,10 @@ pub struct App {
 
     // Quick prompt.
     prompt_job: Option<(String, Job<Result<PromptReply, String>>)>,
+
+    // Conversations.
+    pub transcript: Option<TranscriptView>,
+    find_job: Option<(String, Job<Vec<Hit>>)>,
 }
 
 impl App {
@@ -244,6 +330,8 @@ impl App {
             details_job: None,
             toggle_job: None,
             prompt_job: None,
+            transcript: None,
+            find_job: None,
         };
         app.refresh();
         app.update_project();
@@ -567,6 +655,92 @@ impl App {
         self.prompt_job = Some((title, job));
     }
 
+    /// Opens the conversation of session `id`, optionally at an entry and
+    /// with a search already applied.
+    fn open_transcript(&mut self, id: &str, jump: Option<usize>, query: Option<&str>) {
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+            return;
+        };
+        let entries = match transcript::load(&session.path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                return self.show_flash(format!("Could not read the conversation: {e}"), true);
+            }
+        };
+        let mut view = TranscriptView {
+            session_id: session.id.clone(),
+            title: session.title.clone(),
+            path: session.path.clone(),
+            project: session.project_path.clone(),
+            branch: session.git_branch.clone(),
+            entries,
+            show_output: false,
+            query: None,
+            matches: Vec::new(),
+            match_pos: 0,
+            scroll: 0,
+            at_end: false,
+            jump_to: None,
+            rows: Vec::new(),
+            rows_key: None,
+        };
+        // A match inside tool output or a compaction summary needs them shown.
+        if jump.and_then(|i| view.entries.get(i)).is_some_and(|e| {
+            matches!(
+                e.kind,
+                transcript::Kind::ToolResult { .. } | transcript::Kind::CompactSummary
+            )
+        }) {
+            view.show_output = true;
+        }
+        if let Some(query) = query {
+            view.search(query);
+            if let Some(entry) = jump {
+                view.match_pos = view.matches.iter().position(|&m| m == entry).unwrap_or(0);
+            }
+        }
+        // Without a target, start at the end: the latest turns are the usual interest.
+        view.jump_to = jump.or(view.jump_to).or(Some(usize::MAX));
+        self.transcript = Some(view);
+        self.view = View::Transcript;
+    }
+
+    fn start_find_all(&mut self, query: String) {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        if self.find_job.is_some() {
+            return self.show_flash("A search is already running", true);
+        }
+        let targets: Vec<(String, String, PathBuf)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.id.clone(), s.title.clone(), s.path.clone()))
+            .collect();
+        let job_query = query.clone();
+        self.find_job = Some((
+            query,
+            Job::spawn(move || transcript::search(&targets, &job_query)),
+        ));
+    }
+
+    pub fn finding(&self) -> Option<&str> {
+        self.find_job.as_ref().map(|(q, _)| q.as_str())
+    }
+
+    /// Writes the open conversation as Markdown to the exports folder.
+    fn export_transcript(&mut self) {
+        let Some(view) = &self.transcript else {
+            return;
+        };
+        let result = export_markdown(view);
+        match result {
+            Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
+            Err(e) => self.show_flash(format!("Could not export: {e}"), true),
+        }
+    }
+
     pub fn prompt_running(&self) -> bool {
         self.prompt_job.is_some()
     }
@@ -783,6 +957,21 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some((query, job)) = &self.find_job
+            && let Some(result) = job.poll()
+        {
+            let query = query.clone();
+            let hits = result.unwrap_or_default();
+            self.find_job = None;
+            if hits.is_empty() {
+                self.show_flash(format!("No conversation mentions \"{query}\""), true);
+            } else {
+                let mut state = ListState::default();
+                state.select(Some(0));
+                self.popup = Some(Popup::Results { query, hits, state });
+            }
+        }
+
         if let Some((cwd, job)) = &self.mcp_job
             && let Some(result) = job.poll()
         {
@@ -894,6 +1083,16 @@ impl App {
         self.skip_mcp_debounce();
         self.eco = None;
         self.plugin_details.clear();
+        // Re-read an open conversation, so `r` follows a session that's running.
+        if let Some(view) = &mut self.transcript
+            && let Ok(entries) = transcript::load(&view.path)
+        {
+            view.entries = entries;
+            view.rows_key = None;
+            if view.at_end {
+                view.jump_to = Some(usize::MAX);
+            }
+        }
     }
 
     // ---- Keys ---------------------------------------------------------------
@@ -929,6 +1128,52 @@ impl App {
                     self.view = View::Dashboard;
                 }
             }
+            View::Transcript => self.handle_transcript_key(key.code),
+        }
+    }
+
+    fn handle_transcript_key(&mut self, code: KeyCode) {
+        if code == KeyCode::Char('e') {
+            return self.export_transcript();
+        }
+        let Some(view) = &mut self.transcript else {
+            self.view = View::Dashboard;
+            return;
+        };
+        // Scrolling by hand wins over a jump still waiting for the next draw.
+        if matches!(
+            code,
+            KeyCode::Down
+                | KeyCode::Up
+                | KeyCode::PageDown
+                | KeyCode::PageUp
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j' | 'k' | 'g' | 'G' | ' ')
+        ) {
+            view.jump_to = None;
+        }
+        match code {
+            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => view.scroll = view.scroll.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => view.scroll = view.scroll.saturating_add(20),
+            KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(20),
+            KeyCode::Home | KeyCode::Char('g') => view.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => view.scroll = usize::MAX,
+            KeyCode::Char('o') => {
+                // Keep the same entry at the top when rows change.
+                let top = view.rows.get(view.scroll).map(|r| r.entry);
+                view.show_output = !view.show_output;
+                view.jump_to = top;
+            }
+            KeyCode::Char('/') => {
+                let text = view.query.clone().unwrap_or_default();
+                self.input = Some(Input::TranscriptSearch { text });
+            }
+            KeyCode::Char('n') => view.step_match(true),
+            KeyCode::Char('N') => view.step_match(false),
+            _ => {}
         }
     }
 
@@ -941,6 +1186,16 @@ impl App {
             KeyCode::Enter => self.request_resume(),
             KeyCode::Char('d') | KeyCode::Delete => self.request_delete(),
             KeyCode::Char('p') => self.start_prompt_input(),
+            KeyCode::Char('v') => {
+                if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
+                    self.open_transcript(&id, None, None);
+                }
+            }
+            KeyCode::Char('f') => {
+                self.input = Some(Input::FindAll {
+                    text: String::new(),
+                })
+            }
             KeyCode::Tab => {
                 if self.project_servers().is_some_and(|s| !s.is_empty()) {
                     self.focus = Focus::Mcp;
@@ -1001,6 +1256,23 @@ impl App {
 
     fn handle_popup_key(&mut self, code: KeyCode) {
         match &mut self.popup {
+            Some(Popup::Results { query, hits, state }) => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let next = state.selected().map_or(0, |i| (i + 1).min(hits.len() - 1));
+                    state.select(Some(next));
+                }
+                KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
+                KeyCode::Enter => {
+                    let (Some(i), query) = (state.selected(), query.clone()) else {
+                        return;
+                    };
+                    let hit = hits[i].clone();
+                    self.popup = None;
+                    self.open_transcript(&hit.session_id, Some(hit.entry), Some(&query));
+                }
+                _ => {}
+            },
             Some(Popup::ConfirmDelete { id, .. }) => {
                 let id = id.clone();
                 if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
@@ -1046,6 +1318,40 @@ impl App {
                 }
                 self.input = Some(Input::Search);
             }
+            Some(Input::TranscriptSearch { mut text }) => match code {
+                KeyCode::Enter => {
+                    if let Some(view) = &mut self.transcript {
+                        view.search(text.trim());
+                        if view.matches.is_empty() && !text.trim().is_empty() {
+                            let msg = format!("No matches for \"{}\"", text.trim());
+                            self.show_flash(msg, true);
+                        }
+                    }
+                }
+                KeyCode::Esc => {}
+                KeyCode::Backspace => {
+                    text.pop();
+                    self.input = Some(Input::TranscriptSearch { text });
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.input = Some(Input::TranscriptSearch { text });
+                }
+                _ => self.input = Some(Input::TranscriptSearch { text }),
+            },
+            Some(Input::FindAll { mut text }) => match code {
+                KeyCode::Enter => self.start_find_all(text),
+                KeyCode::Esc => {}
+                KeyCode::Backspace => {
+                    text.pop();
+                    self.input = Some(Input::FindAll { text });
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.input = Some(Input::FindAll { text });
+                }
+                _ => self.input = Some(Input::FindAll { text }),
+            },
             Some(Input::Prompt { id, cwd, mut text }) => match code {
                 KeyCode::Enter => self.send_prompt(id, cwd, text),
                 KeyCode::Esc => {}
@@ -1062,6 +1368,79 @@ impl App {
             None => {}
         }
     }
+}
+
+/// Writes `view` as Markdown to `<documents>/claudash-exports/` (or
+/// `~/claudash-exports/`) and returns the file.
+fn export_markdown(view: &TranscriptView) -> io::Result<PathBuf> {
+    let dir = dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| io::Error::other("no documents or home folder"))?
+        .join("claudash-exports");
+    std::fs::create_dir_all(&dir)?;
+    let slug: String = view
+        .title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    let date = chrono::Local::now().format("%Y-%m-%d");
+    let path = dir.join(format!("{date}-{slug}.md"));
+    std::fs::write(&path, markdown_for(view))?;
+    Ok(path)
+}
+
+pub fn markdown_for(view: &TranscriptView) -> String {
+    markdown(
+        &view.title,
+        &view.project,
+        &view.session_id,
+        view.branch.as_deref(),
+        &view.entries,
+    )
+}
+
+/// Markdown for a session straight from its transcript (`claudash export`).
+pub fn session_markdown(session: &Session) -> io::Result<String> {
+    let entries = transcript::load(&session.path)?;
+    Ok(markdown(
+        &session.title,
+        &session.project_path,
+        &session.id,
+        session.git_branch.as_deref(),
+        &entries,
+    ))
+}
+
+fn markdown(
+    title: &str,
+    project: &str,
+    id: &str,
+    branch: Option<&str>,
+    entries: &[Entry],
+) -> String {
+    let mut meta = vec![
+        ("Project", project.to_string()),
+        ("Session", id.to_string()),
+    ];
+    if let Some(branch) = branch {
+        meta.push(("Branch", branch.to_string()));
+    }
+    meta.push((
+        "Exported",
+        chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+    ));
+    transcript::to_markdown(title, &meta, entries)
 }
 
 /// Case-insensitive match on title, path and branch.
@@ -1118,6 +1497,7 @@ fn help_popup() -> Popup {
         "  Enter     resume in Claude Code",
         "  p         send a one-off prompt (claude -p --resume)",
         "  d         delete the session (asks first)",
+        "  v         read the conversation      f  search all conversations",
         "  Tab       move to the MCP list",
         "",
         "Dashboard · MCP",
@@ -1127,6 +1507,10 @@ fn help_popup() -> Popup {
         "Ecosystem",
         "  ←/→ Tab   switch tab (Skills, Agents, Commands, Hooks, Plugins)",
         "  Enter     details           Space  enable/disable plugin",
+        "",
+        "Conversation (v)",
+        "  ↑/↓ PgUp/PgDn g/G  scroll    o  show/hide tool output",
+        "  /  search   n/N  next/previous match   e  export to Markdown",
         "",
         "Popups",
         "  ↑/↓ PgUp/PgDn  scroll     Esc  close",
