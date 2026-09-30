@@ -1,6 +1,6 @@
 [package]
 name = "claudash"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Unofficial terminal dashboard for Claude Code: sessions and attention alerts, plan and context usage, prompt cache, MCP health, instructions, skills and plugins"
 authors = ["Jorge Guajardo <jguajardo87@gmail.com>"]
