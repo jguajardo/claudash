@@ -445,18 +445,27 @@ mod tests {
         let skills = scan_skills(&dir, "user");
         fs::remove_dir_all(&dir).unwrap();
 
-        let found: Vec<(String, &str)> = skills
+        // Compare paths, not strings: the separator differs on Windows.
+        let found: Vec<(PathBuf, &str)> = skills
             .iter()
             .map(|s| {
-                let rel = s.path.strip_prefix(&dir).unwrap().display().to_string();
-                (rel, s.source.as_str())
+                (
+                    s.path.strip_prefix(&dir).unwrap().to_path_buf(),
+                    s.source.as_str(),
+                )
             })
             .collect();
         assert_eq!(
             found,
             [
-                ("deploy/SKILL.md".to_string(), "user"),
-                ("synced/org-1/brand/SKILL.md".to_string(), "claude.ai"),
+                (Path::new("deploy").join("SKILL.md"), "user"),
+                (
+                    Path::new("synced")
+                        .join("org-1")
+                        .join("brand")
+                        .join("SKILL.md"),
+                    "claude.ai"
+                ),
             ]
         );
     }
