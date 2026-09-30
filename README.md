@@ -38,9 +38,13 @@ On top, a **Problems** panel collects what can go wrong with several sessions at
 - worktrees with uncommitted or unpushed work that no open session is using;
 - worktrees whose directory is gone.
 
+`x` removes the selected worktree with `git worktree remove` (never `--force`, so git refuses when it holds uncommitted changes), and `p` prunes the records of worktrees whose directory is gone.
+
 ### 3 · Activity
 
 What open sessions are doing right now, the ones that need you first: their state and why they wait (for example "permission prompt"), their last tool call, how full their context is and how many subagents are running. Below, a live feed of every tool call from sessions active in the last hour, with failures in red. It refreshes every 2 seconds while it's open, re-reading only the transcripts that changed.
+
+Background sessions (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)) are listed too, with their state, including finished ones. `Tab` moves to them: `l` shows their output, `a` attaches to one in this terminal (`claude attach`), `S` stops it after asking and `R` respawns it. To dispatch new ones, use Claude Code's own `claude agents`.
 
 In the inspector (`i`), `s` selects a subagent and `Enter` opens its own conversation.
 
@@ -60,6 +64,10 @@ claudash export 6b1f3c2e -o session.md
 Plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Subagents are included.
 
 Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers: the charts keep your history after the transcripts are gone.
+
+### 6 · Logs
+
+Logs in one place: every MCP server of the selected project and every background session's output. It follows new lines every 2 seconds; `/` filters lines, `x` shows errors only.
 
 ## Installation
 
@@ -121,7 +129,7 @@ claudash --help
 
 | Key | Action |
 | --- | --- |
-| `1`–`5` | Dashboard, Projects, Activity, Ecosystem, Usage |
+| `1`–`6` | Dashboard, Projects, Activity, Ecosystem, Usage, Logs |
 | `↑` `↓` / `j` `k` | Move |
 | `Enter` | Resume the session · open the MCP server's log · show details |
 | `/` | Search sessions (`Enter` keeps the filter, `Esc` clears it) · search inside the open conversation |
@@ -175,6 +183,8 @@ These actions change things, and only run when you ask:
 - **`claudash setup --apply` / `--remove`**: edits `~/.claude/settings.json` (status line and hooks), after saving a timestamped backup next to it.
 - **Move a session to the trash** (`d` then `y`, or `C`): moves its transcript, subagent transcripts and tool results, and its `file-history` checkpoints and `session-env`, out of Claude Code's directories into claudash's trash. `T` puts them back; they're deleted for good after 30 days or when you delete them from the trash (`x` twice).
 - **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
+- **Stop, respawn or attach to a background session** (`S`, `R`, `a` in Activity): runs `claude stop`, `claude respawn` or `claude attach`.
+- **Remove or prune worktrees** (`x`, `p` in Projects): runs `git worktree remove` (without `--force`) or `git worktree prune`.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 
 Resuming, prompting and trashing are refused while the session is open in Claude Code, because two processes writing one transcript interleave their messages.

@@ -127,6 +127,30 @@ fn parse_worktrees(porcelain: &str) -> Vec<Worktree> {
     list
 }
 
+/// Removes a worktree the safe way: git refuses when it has changes or
+/// untracked files, or is locked.
+pub fn remove_worktree(main_checkout: &Path, worktree: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(main_checkout)
+        .args(["worktree", "remove"])
+        .arg(worktree)
+        .output()
+        .map_err(|e| format!("Could not run git: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Drops the records of worktrees whose directory is gone (`git worktree prune`).
+pub fn prune_worktrees(main_checkout: &Path) -> Result<(), String> {
+    git(main_checkout, &["worktree", "prune"])
+        .map(|_| ())
+        .ok_or_else(|| "git worktree prune failed".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +186,41 @@ mod tests {
             assert!(!s.linked_worktree || s.root != s.common_dir);
             assert!(!worktrees(here).is_empty());
         }
+    }
+
+    #[test]
+    fn removes_clean_worktrees_and_refuses_dirty_ones() {
+        let root = std::env::temp_dir().join(format!("claudash-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !run(&["init", "-q"]) {
+            return; // No git on this machine.
+        }
+        assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"]));
+        assert!(run(&["worktree", "add", "-q", "clean", "-b", "a"]));
+        assert!(run(&["worktree", "add", "-q", "dirty", "-b", "b"]));
+        std::fs::write(root.join("dirty/file.txt"), "work").unwrap();
+
+        assert!(remove_worktree(&root, &root.join("dirty")).is_err());
+        assert!(root.join("dirty/file.txt").exists());
+        assert!(remove_worktree(&root, &root.join("clean")).is_ok());
+        assert!(!root.join("clean").exists());
+
+        // A worktree whose directory vanished is pruned from git's records.
+        std::fs::remove_dir_all(root.join("dirty")).unwrap();
+        assert!(worktrees(&root).iter().any(|w| w.prunable));
+        prune_worktrees(&root).unwrap();
+        assert_eq!(worktrees(&root).len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

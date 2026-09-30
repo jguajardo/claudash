@@ -131,10 +131,35 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// Every MCP server with logs for project `cwd`: (server as named on disk, directory).
+pub fn log_dirs(cwd: &Path) -> Vec<(String, PathBuf)> {
+    let Some(project) = log_dir(cwd, "").and_then(|d| d.parent().map(Path::to_path_buf)) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(String, PathBuf)> = fs::read_dir(project)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let server = name.strip_prefix("mcp-logs-")?.to_string();
+            Some((server, e.path()))
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
 /// The last lines of the newest log for `full_name` in project `cwd`,
 /// formatted as `HH:MM:SS  level  message`. Returns the log file and its lines.
 pub fn read_log(cwd: &Path, full_name: &str) -> Result<(PathBuf, Vec<String>), String> {
     let dir = log_dir(cwd, full_name).ok_or("Could not find the cache directory")?;
+    read_log_dir(&dir)
+}
+
+/// Like [`read_log`], for a server's log directory.
+pub fn read_log_dir(dir: &Path) -> Result<(PathBuf, Vec<String>), String> {
+    let dir = dir.to_path_buf();
     let newest = fs::read_dir(&dir)
         .map_err(|_| {
             format!(

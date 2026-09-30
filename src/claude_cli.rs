@@ -75,6 +75,11 @@ impl LiveSession {
     pub fn is_background(&self) -> bool {
         self.kind == "background"
     }
+
+    /// A process is running for it; finished background sessions have none.
+    pub fn is_running(&self) -> bool {
+        self.pid.is_some() || matches!(self.state.as_deref(), Some("working") | Some("blocked"))
+    }
 }
 
 /// Sessions Claude Code reports as open (and, with `all`, finished background
@@ -101,6 +106,29 @@ fn parse_live(json: &[u8]) -> Result<HashMap<String, LiveSession>, String> {
         .filter(|s| !s.session_id.is_empty())
         .map(|s| (s.session_id.clone(), s))
         .collect())
+}
+
+/// Runs `claude <command> <id>` for a background session (`logs`, `stop`,
+/// `respawn`) and returns its output.
+pub fn background(command: &str, id: &str) -> Result<String, String> {
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("unexpected session ID".into());
+    }
+    let output = self::command()
+        .args([command, id])
+        .output()
+        .map_err(|e| format!("Could not run `claude {command}`: {e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.status.success() {
+        Ok(text)
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("`claude {command}` failed")
+        } else {
+            err
+        })
+    }
 }
 
 /// `claude --version`, e.g. "2.1.285".

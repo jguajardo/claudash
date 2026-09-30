@@ -108,6 +108,11 @@ const VIEWS: &[ViewHelp] = &[
                 "Enter",
                 "show that folder's sessions in the Dashboard (Esc there shows all again)",
             ),
+            (
+                "x",
+                "remove the selected worktree (git worktree remove, refuses if it has work)",
+            ),
+            ("p", "prune records of worktrees whose directory is gone"),
         ],
     },
     ViewHelp {
@@ -115,10 +120,32 @@ const VIEWS: &[ViewHelp] = &[
         shows: "What open sessions are doing right now, the ones that need you first: their state and \
                 why they wait, their last tool call, how full their context is and how many subagents \
                 are running. Below, a live feed of every tool call from sessions active in the last \
-                hour, failures in red. Refreshes every 2 seconds while open.",
+                hour, failures in red. Refreshes every 2 seconds while open. \
+                Background sessions (claude --bg) are listed with their state, finished ones included.",
         keys: &[
             ("↑/↓", "move between open sessions"),
             ("v · i", "read · inspect the selected session"),
+            ("Tab", "switch to background sessions"),
+            (
+                "l · a",
+                "their log · attach in this terminal (claude attach)",
+            ),
+            (
+                "S · R",
+                "stop (asks first) · respawn (claude stop / respawn)",
+            ),
+        ],
+    },
+    ViewHelp {
+        name: "6 · Logs",
+        shows: "Logs in one place: every MCP server of the selected project (what Claude Code wrote \
+                when it connected) and every background session's output. Follows new lines every 2 \
+                seconds.",
+        keys: &[
+            ("↑/↓", "choose a log"),
+            ("/", "show only lines containing some text"),
+            ("x", "errors only"),
+            ("f · PgUp/PgDn", "follow on/off · scroll"),
         ],
     },
     ViewHelp {
@@ -214,7 +241,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     }
 
     out.push(heading("Everywhere"));
-    out.push(key("1 2 3 4 5", "switch view"));
+    out.push(key("1 … 6", "switch view"));
     out.push(key(
         "r",
         "reload sessions, re-check MCP servers and the ecosystem",
@@ -228,6 +255,8 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         "Resume and prompt run Claude Code on the session (a prompt adds to its conversation).",
         "Trash moves the session's files out of ~/.claude into claudash's trash; T restores them.",
         "Plugin toggles run `claude plugin enable/disable`.",
+        "Background session actions run `claude stop`, `respawn` and `attach`.",
+        "Worktree removal runs `git worktree remove` without --force; prune runs `git worktree prune`.",
         "`claudash setup --apply` edits ~/.claude/settings.json after backing it up.",
         "Tags, notes, stars and the usage history are claudash's own files; Claude's are untouched.",
         "Resume, prompt and trash are refused while the session is open elsewhere.",

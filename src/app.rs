@@ -58,6 +58,8 @@ pub enum View {
     Projects,
     /// What open sessions are doing right now.
     Activity,
+    /// MCP server and background session logs.
+    Logs,
     Ecosystem,
     Usage,
     /// A session's conversation, full screen.
@@ -114,9 +116,13 @@ pub enum Popup {
         lines: Vec<String>,
         scroll: u16,
     },
-    ConfirmDelete {
-        id: String,
+    /// A yes/no question before something that changes things.
+    Confirm {
         title: String,
+        lines: Vec<String>,
+        /// What `y` does.
+        yes: String,
+        action: Confirm,
     },
     /// Trashed sessions. `purge` holds the ID awaiting a second `x`.
     Trash {
@@ -125,15 +131,22 @@ pub enum Popup {
         purge: Option<String>,
     },
     /// Bulk cleanup: move every session matching a preset to the trash.
-    Cleanup {
-        preset: usize,
-    },
+    Cleanup { preset: usize },
     /// Matches of a search through every session's conversation.
     Results {
         query: String,
         hits: Vec<Hit>,
         state: ListState,
     },
+}
+
+/// Actions that ask first.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Confirm {
+    Trash(String),
+    StopBackground(String),
+    RemoveWorktree { main: PathBuf, path: PathBuf },
+    PruneWorktrees(PathBuf),
 }
 
 /// A line being typed in the footer.
@@ -155,6 +168,10 @@ pub enum Input {
     /// A note for a session.
     Note {
         id: String,
+        text: String,
+    },
+    /// Show only log lines containing this text.
+    LogFilter {
         text: String,
     },
     Prompt {
@@ -225,6 +242,70 @@ impl TranscriptView {
             (self.match_pos + n - 1) % n
         };
         self.jump_to = Some(self.matches[self.match_pos]);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActivityFocus {
+    #[default]
+    Open,
+    Background,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogKind {
+    /// An MCP server's log directory.
+    Mcp(PathBuf),
+    /// A background session, by short ID.
+    Background(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogSource {
+    pub label: String,
+    pub group: String,
+    pub kind: LogKind,
+}
+
+/// A log's lines, or why it couldn't be read.
+pub type LogLines = Result<Vec<String>, String>;
+
+/// The Logs view's state.
+pub struct LogsView {
+    pub sources: Vec<LogSource>,
+    pub state: ListState,
+    pub lines: LogLines,
+    /// Which source `lines` belong to.
+    pub loaded: Option<LogKind>,
+    loaded_at: Option<Instant>,
+    job: Option<(LogKind, Job<LogLines>)>,
+    pub filter: String,
+    pub errors_only: bool,
+    /// Keep the view at the end and reload every 2 seconds.
+    pub follow: bool,
+    pub scroll: usize,
+}
+
+impl Default for LogsView {
+    fn default() -> Self {
+        LogsView {
+            sources: Vec::new(),
+            state: ListState::default(),
+            lines: Ok(Vec::new()),
+            loaded: None,
+            loaded_at: None,
+            job: None,
+            filter: String::new(),
+            errors_only: false,
+            follow: true,
+            scroll: usize::MAX,
+        }
+    }
+}
+
+impl LogsView {
+    pub fn loading(&self) -> bool {
+        self.job.is_some()
     }
 }
 
@@ -394,9 +475,15 @@ pub struct App {
     pub sessions_error: Option<String>,
     refreshed_at: Instant,
     /// Session to resume; handled by `run`, which owns the terminal.
-    pending_resume: Option<(String, PathBuf)>,
+    pending_command: Option<(Vec<String>, PathBuf)>,
     /// Open sessions (ID -> "busy"/"idle") from `claude agents --json`.
     pub live: HashMap<String, LiveSession>,
+    /// Background sessions, finished ones included (`claude agents --json --all`).
+    pub background: Vec<LiveSession>,
+    pub activity_focus: ActivityFocus,
+    pub background_state: ListState,
+    background_job: Option<(String, Job<Result<String, String>>)>,
+    pub logs: LogsView,
     live_job: Option<Job<Result<HashMap<String, LiveSession>, String>>>,
     pub statusline: statusline::Store,
     /// Last hook event per session, from `claudash hook`.
@@ -484,8 +571,13 @@ impl App {
             filter: String::new(),
             sessions_error: None,
             refreshed_at: Instant::now(),
-            pending_resume: None,
+            pending_command: None,
             live: HashMap::new(),
+            background: Vec::new(),
+            activity_focus: ActivityFocus::Open,
+            background_state: ListState::default(),
+            background_job: None,
+            logs: LogsView::default(),
             live_job: None,
             statusline: statusline::Store::default(),
             hook_states: HashMap::new(),
@@ -557,8 +649,8 @@ impl App {
             {
                 self.handle_key(key);
             }
-            if let Some((id, cwd)) = self.pending_resume.take() {
-                self.resume_session(terminal, &id, &cwd)?;
+            if let Some((args, cwd)) = self.pending_command.take() {
+                self.run_claude(terminal, &args, &cwd)?;
             }
             if last_tick.elapsed() >= TICK_RATE {
                 self.on_tick();
@@ -579,6 +671,8 @@ impl App {
         }
         if self.refreshed_at.elapsed() >= REFRESH_EVERY {
             self.refresh();
+        } else if self.view == View::Logs && self.logs.follow && self.ticks.is_multiple_of(8) {
+            self.load_log();
         } else if self.view == View::Activity && self.ticks.is_multiple_of(8) {
             // Every 2 seconds: re-read what open sessions did.
             self.start_analysis();
@@ -620,7 +714,7 @@ impl App {
             self.start_git();
         }
         if self.live_job.is_none() {
-            self.live_job = Some(Job::spawn(|| claude_cli::live_sessions(false)));
+            self.live_job = Some(Job::spawn(|| claude_cli::live_sessions(true)));
         }
         self.refreshed_at = Instant::now();
     }
@@ -718,6 +812,34 @@ impl App {
     }
 
     fn handle_activity_key(&mut self, code: KeyCode) {
+        if code == KeyCode::Tab {
+            self.activity_focus = match self.activity_focus {
+                ActivityFocus::Open if !self.background.is_empty() => {
+                    if self.background_state.selected().is_none() {
+                        self.background_state.select(Some(0));
+                    }
+                    ActivityFocus::Background
+                }
+                _ => ActivityFocus::Open,
+            };
+            return;
+        }
+        if self.activity_focus == ActivityFocus::Background {
+            match code {
+                KeyCode::Esc => self.activity_focus = ActivityFocus::Open,
+                KeyCode::Down | KeyCode::Char('j') if !self.background.is_empty() => {
+                    let n = self.background.len();
+                    let next = self
+                        .background_state
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(n - 1));
+                    self.background_state.select(Some(next));
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.background_state.select_previous(),
+                _ => self.handle_background_key(code),
+            }
+            return;
+        }
         let open: Vec<String> = self.open_sessions().iter().map(|s| s.id.clone()).collect();
         let selected = self
             .activity_state
@@ -791,6 +913,187 @@ impl App {
             rows_key: None,
         });
         self.view = View::Transcript;
+    }
+
+    /// Carries out a confirmed action.
+    fn confirmed(&mut self, action: Confirm) {
+        match action {
+            Confirm::Trash(id) => self.delete_session(&id),
+            Confirm::StopBackground(id) => self.start_background_command("stop", &id),
+            Confirm::RemoveWorktree { main, path } => {
+                match git::remove_worktree(&main, &path) {
+                    Ok(()) => self
+                        .show_flash(format!("Removed worktree {}", paths::display(&path)), false),
+                    Err(e) => self.show_flash(format!("git refused: {e}"), true),
+                }
+                self.git_at = None;
+            }
+            Confirm::PruneWorktrees(main) => {
+                match git::prune_worktrees(&main) {
+                    Ok(()) => self.show_flash("Pruned worktrees whose directory is gone", false),
+                    Err(e) => self.show_flash(e, true),
+                }
+                self.git_at = None;
+            }
+        }
+    }
+
+    /// `claude stop|respawn <id>` in the background; the result shows as a notice.
+    fn start_background_command(&mut self, command: &'static str, id: &str) {
+        if self.background_job.is_some() {
+            return self.show_flash("Another background command is running", true);
+        }
+        let job_id = id.to_string();
+        self.background_job = Some((
+            format!("{command} {id}"),
+            Job::spawn(move || claude_cli::background(command, &job_id)),
+        ));
+    }
+
+    pub fn selected_background(&self) -> Option<&LiveSession> {
+        self.background_state
+            .selected()
+            .and_then(|i| self.background.get(i))
+    }
+
+    fn handle_background_key(&mut self, code: KeyCode) {
+        let Some(bg) = self.selected_background().cloned() else {
+            return;
+        };
+        let Some(id) = bg.id.clone() else {
+            return self.show_flash("This background session has no short ID", true);
+        };
+        match code {
+            KeyCode::Char('l') => {
+                self.open_logs(Some(LogKind::Background(id)));
+            }
+            KeyCode::Char('S') => {
+                self.popup = Some(Popup::Confirm {
+                    title: "Stop background session".into(),
+                    lines: vec![
+                        format!("Stop \"{}\"?", bg.name.clone().unwrap_or(id.clone())),
+                        String::new(),
+                        "Its conversation is kept; resume it later with".into(),
+                        format!("claude attach {id}."),
+                    ],
+                    yes: "stop it".into(),
+                    action: Confirm::StopBackground(id),
+                });
+            }
+            KeyCode::Char('R') => self.start_background_command("respawn", &id),
+            KeyCode::Char('a') => {
+                let cwd = bg
+                    .cwd
+                    .map(PathBuf::from)
+                    .filter(|d| d.is_dir())
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                self.pending_command = Some((vec!["attach".into(), id], cwd));
+            }
+            _ => {}
+        }
+    }
+
+    /// Log sources: the selected project's MCP servers and every background session.
+    fn log_sources(&self) -> Vec<LogSource> {
+        let mut sources = Vec::new();
+        if let Some(project) = &self.project {
+            for (server, dir) in mcp::log_dirs(&project.cwd) {
+                sources.push(LogSource {
+                    label: format!("MCP · {server}"),
+                    group: paths::display(&project.cwd),
+                    kind: LogKind::Mcp(dir),
+                });
+            }
+        }
+        for bg in &self.background {
+            if let Some(id) = &bg.id {
+                sources.push(LogSource {
+                    label: format!(
+                        "{} · {id}",
+                        bg.name.clone().unwrap_or_else(|| "background".into())
+                    ),
+                    group: "background sessions".into(),
+                    kind: LogKind::Background(id.clone()),
+                });
+            }
+        }
+        sources
+    }
+
+    /// Opens the Logs view, optionally on a given source.
+    fn open_logs(&mut self, select: Option<LogKind>) {
+        self.logs.sources = self.log_sources();
+        let index = select
+            .and_then(|k| self.logs.sources.iter().position(|s| s.kind == k))
+            .or((!self.logs.sources.is_empty()).then_some(0));
+        self.logs.state.select(index);
+        self.logs.loaded = None;
+        self.view = View::Logs;
+        self.load_log();
+    }
+
+    /// Reads the selected log source in the background.
+    fn load_log(&mut self) {
+        if self.logs.job.is_some() {
+            return;
+        }
+        let Some(source) = self
+            .logs
+            .state
+            .selected()
+            .and_then(|i| self.logs.sources.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        let kind = source.kind.clone();
+        self.logs.job = Some((
+            kind.clone(),
+            Job::spawn(move || match kind {
+                LogKind::Mcp(dir) => mcp::read_log_dir(&dir).map(|(_, lines)| lines),
+                LogKind::Background(id) => claude_cli::background("logs", &id)
+                    .map(|text| text.lines().map(str::to_owned).collect()),
+            }),
+        ));
+        self.logs.loaded_at = Some(Instant::now());
+    }
+
+    fn handle_logs_key(&mut self, code: KeyCode) {
+        let n = self.logs.sources.len();
+        match code {
+            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                let next = self.logs.state.selected().map_or(0, |i| (i + 1).min(n - 1));
+                self.logs.state.select(Some(next));
+                self.logs.loaded = None;
+                self.logs.scroll = usize::MAX;
+                self.load_log();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.logs.state.select_previous();
+                self.logs.loaded = None;
+                self.logs.scroll = usize::MAX;
+                self.load_log();
+            }
+            KeyCode::PageUp => {
+                self.logs.follow = false;
+                self.logs.scroll = self.logs.scroll.saturating_sub(15);
+            }
+            KeyCode::PageDown => self.logs.scroll = self.logs.scroll.saturating_add(15),
+            KeyCode::Char('f') => {
+                self.logs.follow = !self.logs.follow;
+                if self.logs.follow {
+                    self.logs.scroll = usize::MAX;
+                }
+            }
+            KeyCode::Char('x') => self.logs.errors_only = !self.logs.errors_only,
+            KeyCode::Char('/') => {
+                let text = self.logs.filter.clone();
+                self.input = Some(Input::LogFilter { text });
+            }
+            _ => {}
+        }
     }
 
     /// Rows of the Projects view: each repository followed by its checkouts,
@@ -895,7 +1198,67 @@ impl App {
 
     fn handle_projects_key(&mut self, code: KeyCode) {
         let rows = self.project_rows();
+        let row = self
+            .projects_state
+            .selected()
+            .and_then(|i| rows.get(i))
+            .copied();
         match code {
+            KeyCode::Char('x') => {
+                let Some(ProjectRow::Checkout(r, c)) = row else {
+                    return;
+                };
+                let repo = &self.projects.repos[r];
+                let co = &repo.checkouts[c];
+                if co.main {
+                    return self.show_flash("That's the main checkout, not a worktree", true);
+                }
+                if self.open_in_folder(&co.path) > 0 {
+                    return self
+                        .show_flash("A session is open in this worktree; close it first", true);
+                }
+                let mut lines = vec![
+                    format!("Remove the worktree {}?", paths::display(&co.path)),
+                    String::new(),
+                    "This runs `git worktree remove` without --force: git refuses when".into(),
+                    "it has uncommitted changes or untracked files, or is locked.".into(),
+                ];
+                if co.status.as_ref().is_some_and(|s| s.ahead > 0) {
+                    lines.push(String::new());
+                    lines
+                        .push("Its branch has unpushed commits; the branch itself is kept.".into());
+                }
+                self.popup = Some(Popup::Confirm {
+                    title: "Remove worktree".into(),
+                    lines,
+                    yes: "remove".into(),
+                    action: Confirm::RemoveWorktree {
+                        main: repo.checkouts[0].path.clone(),
+                        path: co.path.clone(),
+                    },
+                });
+            }
+            KeyCode::Char('p') => {
+                let r = match row {
+                    Some(ProjectRow::Repo(r) | ProjectRow::Checkout(r, _)) => r,
+                    _ => return,
+                };
+                let repo = &self.projects.repos[r];
+                let missing = repo.checkouts.iter().filter(|c| c.prunable).count();
+                if missing == 0 {
+                    return self.show_flash("No missing worktrees in this repository", false);
+                }
+                self.popup = Some(Popup::Confirm {
+                    title: "Prune worktrees".into(),
+                    lines: vec![
+                        format!("Drop {missing} worktree record(s) whose directory is gone?"),
+                        String::new(),
+                        "This runs `git worktree prune`; no files are touched.".into(),
+                    ],
+                    yes: "prune".into(),
+                    action: Confirm::PruneWorktrees(repo.checkouts[0].path.clone()),
+                });
+            }
             KeyCode::Esc => self.view = View::Dashboard,
             KeyCode::Down | KeyCode::Char('j') if !rows.is_empty() => {
                 let next = self
@@ -1157,24 +1520,23 @@ impl App {
             Some((s, None)) => (s.id.clone(), self.selected_project_dir()),
         };
         match cwd {
-            Ok(cwd) => self.pending_resume = Some((id, cwd.to_path_buf())),
+            Ok(cwd) => {
+                self.pending_command = Some((vec!["--resume".into(), id], cwd.to_path_buf()))
+            }
             Err(msg) => self.show_flash(msg, true),
         }
     }
 
-    /// Suspends the TUI, runs `claude --resume <id>` in the project folder and
-    /// returns to the dashboard when Claude Code exits.
-    fn resume_session(
+    /// Suspends the TUI, runs `claude <args>` (resume, attach) in `cwd` and
+    /// returns to the dashboard when it exits.
+    fn run_claude(
         &mut self,
         terminal: &mut DefaultTerminal,
-        id: &str,
+        args: &[String],
         cwd: &Path,
     ) -> io::Result<()> {
         ratatui::restore();
-        let status = claude_cli::command()
-            .args(["--resume", id])
-            .current_dir(cwd)
-            .status();
+        let status = claude_cli::command().args(args).current_dir(cwd).status();
         // A fresh terminal instead of `terminal.clear()`: clear() queries the cursor
         // position, which not every terminal answers, and a new one redraws everything.
         *terminal = ratatui::try_init()?;
@@ -1195,9 +1557,16 @@ impl App {
         if let Some(msg) = self.open_elsewhere(session, "delete it") {
             return self.show_flash(msg, true);
         }
-        self.popup = Some(Popup::ConfirmDelete {
-            id: session.id.clone(),
-            title: session.title.clone(),
+        self.popup = Some(Popup::Confirm {
+            title: "Move to trash".into(),
+            lines: vec![
+                format!("Move \"{}\" to the trash?", session.title),
+                String::new(),
+                "It moves with its subagents and checkpoints;".into(),
+                "press T to restore it within 30 days.".into(),
+            ],
+            yes: "move to trash".into(),
+            action: Confirm::Trash(session.id.clone()),
         });
     }
 
@@ -1668,6 +2037,34 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some((what, job)) = &self.background_job
+            && let Some(result) = job.poll()
+        {
+            let what = what.clone();
+            self.background_job = None;
+            match result.unwrap_or_else(|()| Err("No result".into())) {
+                Ok(_) => self.show_flash(format!("claude {what}: done"), false),
+                Err(e) => self.show_flash(format!("claude {what}: {e}"), true),
+            }
+            self.live_job = None;
+            self.refreshed_at = Instant::now() - REFRESH_EVERY;
+        }
+        if let Some((kind, job)) = &self.logs.job
+            && let Some(result) = job.poll()
+        {
+            let kind = kind.clone();
+            self.logs.job = None;
+            let selected = self
+                .logs
+                .state
+                .selected()
+                .and_then(|i| self.logs.sources.get(i));
+            if selected.is_some_and(|s| s.kind == kind) {
+                self.logs.lines = result.unwrap_or_else(|()| Err("No result".into()));
+                self.logs.loaded = Some(kind);
+            }
+        }
+
         if let Some(job) = &self.analysis_job
             && let Some(result) = job.poll()
         {
@@ -1734,7 +2131,16 @@ impl App {
             && let Some(result) = job.poll()
         {
             // If `claude agents` fails (older Claude Code), just show no live marks.
-            self.live = result.ok().and_then(Result::ok).unwrap_or_default();
+            let all = result.ok().and_then(Result::ok).unwrap_or_default();
+            let mut background: Vec<LiveSession> = all
+                .values()
+                .filter(|s| s.is_background())
+                .cloned()
+                .collect();
+            background.sort_by(|a, b| a.name.cmp(&b.name));
+            self.background = background;
+            // Open means a process is running (finished background sessions have none).
+            self.live = all.into_iter().filter(|(_, s)| s.is_running()).collect();
             self.live_job = None;
             self.check_activity_changes();
         }
@@ -1863,6 +2269,7 @@ impl App {
             }
             KeyCode::Char('4') => return self.view = View::Ecosystem,
             KeyCode::Char('5') => return self.view = View::Usage,
+            KeyCode::Char('6') => return self.open_logs(None),
             KeyCode::Char('r') => return self.refresh_all(),
             KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
@@ -1881,6 +2288,7 @@ impl App {
             View::Transcript => self.handle_transcript_key(key.code),
             View::Projects => self.handle_projects_key(key.code),
             View::Activity => self.handle_activity_key(key.code),
+            View::Logs => self.handle_logs_key(key.code),
             View::Inspect => match key.code {
                 KeyCode::Esc => self.view = View::Dashboard,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -2175,11 +2583,11 @@ impl App {
                 }
                 _ => {}
             },
-            Some(Popup::ConfirmDelete { id, .. }) => {
-                let id = id.clone();
+            Some(Popup::Confirm { action, .. }) => {
+                let action = action.clone();
                 if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                     self.popup = None;
-                    self.delete_session(&id);
+                    self.confirmed(action);
                 } else if matches!(code, KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q')) {
                     self.popup = None;
                 }
@@ -2253,6 +2661,19 @@ impl App {
                     self.input = Some(Input::FindAll { text });
                 }
                 _ => self.input = Some(Input::FindAll { text }),
+            },
+            Some(Input::LogFilter { mut text }) => match code {
+                KeyCode::Enter => self.logs.filter = text.trim().to_string(),
+                KeyCode::Esc => self.logs.filter.clear(),
+                KeyCode::Backspace => {
+                    text.pop();
+                    self.input = Some(Input::LogFilter { text });
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.input = Some(Input::LogFilter { text });
+                }
+                _ => self.input = Some(Input::LogFilter { text }),
             },
             Some(Input::Tags { id, mut text }) => match code {
                 KeyCode::Enter => {
@@ -2500,6 +2921,7 @@ mod tests {
                 View::Dashboard,
                 View::Projects,
                 View::Activity,
+                View::Logs,
                 View::Ecosystem,
                 View::Usage,
                 View::Transcript,
@@ -2529,9 +2951,11 @@ mod tests {
                                 hits: vec![hit.clone()],
                                 state: ListState::default(),
                             }),
-                            _ => Some(Popup::ConfirmDelete {
-                                id: "x".into(),
-                                title: "A session title far too long to fit".into(),
+                            _ => Some(Popup::Confirm {
+                                title: "Move to trash".into(),
+                                lines: vec!["A question far too long to fit anywhere".into()],
+                                yes: "do it".into(),
+                                action: Confirm::Trash("x".into()),
                             }),
                         };
                         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

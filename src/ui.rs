@@ -43,6 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Dashboard => draw_dashboard(frame, app, body),
         View::Projects => draw_projects(frame, app, body),
         View::Activity => draw_activity(frame, app, body),
+        View::Logs => draw_logs(frame, app, body),
         View::Ecosystem => draw_ecosystem(frame, app, body),
         View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
@@ -135,6 +136,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         (View::Activity, "3 Activity"),
         (View::Ecosystem, "4 Ecosystem"),
         (View::Usage, "5 Usage"),
+        (View::Logs, "6 Logs"),
     ];
     let mut spans = vec![
         Span::styled(
@@ -1300,11 +1302,23 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
     let open_height = ((open.len().max(1) * 2) as u16 + 2)
         .min(area.height / 2)
         .max(4);
-    let [open_area, feed_area] =
-        Layout::vertical([Constraint::Length(open_height), Constraint::Min(4)]).areas(area);
+    let bg_height = if app.background.is_empty() {
+        0
+    } else {
+        (app.background.len() as u16 + 2).min(8)
+    };
+    let [open_area, bg_area, feed_area] = Layout::vertical([
+        Constraint::Length(open_height),
+        Constraint::Length(bg_height),
+        Constraint::Min(4),
+    ])
+    .areas(area);
 
-    let block = panel("Open sessions", Color::Green)
-        .title_bottom(Line::from(format!(" {} open ", open.len())).right_aligned());
+    let block = focused(
+        panel("Open sessions", Color::Green)
+            .title_bottom(Line::from(format!(" {} open ", open.len())).right_aligned()),
+        app.activity_focus == crate::app::ActivityFocus::Open,
+    );
     if open.is_empty() {
         frame.render_widget(
             message("No Claude Code session is open right now.", block),
@@ -1388,6 +1402,10 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
         render_list(frame, items, block, open_area, &mut app.activity_state);
     }
 
+    if bg_height > 0 {
+        draw_background(frame, app, bg_area);
+    }
+
     // Live feed of tool calls.
     let rows = feed_area.height.saturating_sub(2) as usize;
     let feed = app.feed(rows.max(1));
@@ -1441,6 +1459,167 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).block(block), feed_area);
+}
+
+fn draw_background(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .background
+        .iter()
+        .map(|bg| {
+            let state = bg.state.clone().unwrap_or_else(|| bg.status.clone());
+            let color = match state.as_str() {
+                "working" | "busy" => Color::Green,
+                "blocked" | "waiting" => Color::Yellow,
+                "done" | "idle" => Color::Cyan,
+                "failed" => Color::Red,
+                _ => Color::DarkGray,
+            };
+            let mut spans = vec![
+                Span::styled(format!("{state:<8}"), Style::new().fg(color).bold()),
+                Span::styled(
+                    bg.name
+                        .clone()
+                        .unwrap_or_else(|| "background session".into()),
+                    Style::new().bold(),
+                ),
+            ];
+            if let Some(id) = &bg.id {
+                spans.push(Span::styled(format!("  {id}"), dim()));
+            }
+            if let Some(why) = &bg.waiting_for {
+                spans.push(Span::styled(
+                    format!("  ({why})"),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            if let Some(cwd) = &bg.cwd {
+                spans.push(Span::styled(
+                    format!("  · {}", paths::display(std::path::Path::new(cwd))),
+                    dim(),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let block = focused(
+        panel("Background sessions", Color::Magenta).title_bottom(
+            Line::from(" Tab to select · l logs · a attach · S stop · R respawn ").right_aligned(),
+        ),
+        app.activity_focus == crate::app::ActivityFocus::Background,
+    );
+    let mut list = List::new(items).block(block);
+    if app.activity_focus == crate::app::ActivityFocus::Background {
+        list = list
+            .highlight_style(Style::new().bg(HIGHLIGHT))
+            .highlight_symbol("▶ ")
+            .highlight_spacing(HighlightSpacing::Always);
+    }
+    frame.render_stateful_widget(list, area, &mut app.background_state);
+}
+
+// ---- Logs --------------------------------------------------------------------
+
+fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let [list_area, content_area] =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(area);
+    let logs = &mut app.logs;
+    if logs.sources.is_empty() {
+        let text = "No logs yet: MCP server logs appear once Claude Code has started the selected \
+                    project's servers, and background sessions once you run one (claude --bg).";
+        frame.render_widget(message(text, panel("Sources", Color::Cyan)), list_area);
+        frame.render_widget(panel("Log", Color::Cyan), content_area);
+        return;
+    }
+    let items: Vec<ListItem> = logs
+        .sources
+        .iter()
+        .map(|s| {
+            ListItem::new(vec![
+                Line::from(Span::styled(s.label.clone(), Style::new().bold())),
+                Line::from(Span::styled(format!("  {}", s.group), dim())),
+            ])
+        })
+        .collect();
+    render_list(
+        frame,
+        items,
+        panel("Sources", Color::Cyan),
+        list_area,
+        &mut logs.state,
+    );
+
+    let source = logs.state.selected().and_then(|i| logs.sources.get(i));
+    let mut block = panel("", Color::Cyan).title(
+        Line::from(format!(
+            " {} ",
+            source.map(|s| s.label.as_str()).unwrap_or("Log")
+        ))
+        .bold()
+        .fg(Color::Cyan),
+    );
+    let mut flags = Vec::new();
+    if !logs.filter.is_empty() {
+        flags.push(format!("filter \"{}\"", logs.filter));
+    }
+    if logs.errors_only {
+        flags.push("errors only".into());
+    }
+    flags.push(if logs.follow {
+        "following".into()
+    } else {
+        "paused".into()
+    });
+    if logs.loading() {
+        flags.push("loading…".into());
+    }
+    block = block.title(
+        Line::from(format!(" {} ", flags.join(" · ")))
+            .fg(Color::DarkGray)
+            .right_aligned(),
+    );
+
+    let lines = match &logs.lines {
+        Err(e) => {
+            frame.render_widget(message(e.clone(), block), content_area);
+            return;
+        }
+        Ok(lines) => lines,
+    };
+    let needle = logs.filter.to_lowercase();
+    let shown: Vec<&String> = lines
+        .iter()
+        .filter(|l| needle.is_empty() || l.to_lowercase().contains(&needle))
+        .filter(|l| !logs.errors_only || l.to_lowercase().contains("error") || l.contains("✘"))
+        .collect();
+    let inner = block.inner(content_area);
+    let width = inner.width.max(1) as usize;
+    let rows: Vec<(String, bool)> = shown
+        .iter()
+        .flat_map(|l| {
+            let error = l.to_lowercase().contains("error");
+            hard_wrap(l, width).into_iter().map(move |r| (r, error))
+        })
+        .collect();
+    let visible = inner.height as usize;
+    let last_page = rows.len().saturating_sub(visible);
+    if logs.follow {
+        logs.scroll = last_page;
+    }
+    logs.scroll = logs.scroll.min(last_page);
+    let text: Vec<Line> = rows[logs.scroll..(logs.scroll + visible).min(rows.len())]
+        .iter()
+        .map(|(r, error)| {
+            if *error {
+                Line::from(Span::styled(r.clone(), Style::new().fg(Color::Red)))
+            } else {
+                Line::from(r.clone())
+            }
+        })
+        .collect();
+    let block = block.title_bottom(
+        Line::from(format!(" {} of {} lines ", shown.len(), lines.len())).right_aligned(),
+    );
+    frame.render_widget(Paragraph::new(text).block(block), content_area);
 }
 
 // ---- Projects ----------------------------------------------------------------
@@ -2200,6 +2379,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("▌", Style::new().fg(Color::Magenta)),
             hint("   Enter search every conversation · Esc cancel"),
         ]),
+        Some(Input::LogFilter { text }) => Line::from(vec![
+            Span::styled(" / ", Style::new().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Yellow)),
+            hint("   show only lines containing this · Enter apply · Esc clear"),
+        ]),
         Some(Input::Tags { text, .. }) => Line::from(vec![
             Span::styled(" tags ", Style::new().fg(Color::Black).bg(Color::Magenta)),
             Span::raw(format!(" {text}")),
@@ -2272,6 +2457,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
                     (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
+                    (View::Activity, _)
+                        if app.activity_focus == crate::app::ActivityFocus::Background =>
+                    {
+                        vec![
+                            key(" l "),
+                            hint(" logs  "),
+                            key(" a "),
+                            hint(" attach  "),
+                            key(" S "),
+                            hint(" stop  "),
+                            key(" R "),
+                            hint(" respawn  "),
+                            key(" Tab "),
+                            hint(" open sessions  "),
+                        ]
+                    }
                     (View::Activity, _) => vec![
                         key(" ↑/↓ "),
                         hint(" move  "),
@@ -2279,12 +2480,30 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         hint(" read  "),
                         key(" i "),
                         hint(" inspect  "),
+                        key(" Tab "),
+                        hint(" background  "),
+                    ],
+                    (View::Logs, _) => vec![
+                        key(" ↑/↓ "),
+                        hint(" source  "),
+                        key(" / "),
+                        hint(" filter  "),
+                        key(" x "),
+                        hint(" errors only  "),
+                        key(" f "),
+                        hint(" follow  "),
+                        key(" PgUp/PgDn "),
+                        hint(" scroll  "),
                     ],
                     (View::Projects, _) => vec![
                         key(" ↑/↓ "),
                         hint(" move  "),
                         key(" Enter "),
                         hint(" sessions of this folder  "),
+                        key(" x "),
+                        hint(" remove worktree  "),
+                        key(" p "),
+                        hint(" prune missing  "),
                     ],
                     (View::Inspect, _) => vec![
                         key(" v "),
@@ -2520,29 +2739,37 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 .highlight_spacing(HighlightSpacing::Always);
             frame.render_stateful_widget(list, area, state);
         }
-        Some(Popup::ConfirmDelete { title, .. }) => {
-            let area = centered(frame.area(), Constraint::Length(64), Constraint::Length(8));
+        Some(Popup::Confirm {
+            title, lines, yes, ..
+        }) => {
+            let height = lines.len() as u16 + 5;
+            let area = centered(
+                frame.area(),
+                Constraint::Length(72),
+                Constraint::Length(height),
+            );
             frame.render_widget(Clear, area);
-            let lines = vec![
-                Line::from(vec![
-                    Span::raw("Delete "),
-                    Span::styled(format!("\"{title}\""), Style::new().bold()),
-                    Span::raw("?"),
-                ]),
-                Line::default(),
-                Line::from("It moves to the trash with its subagents and checkpoints;").dark_gray(),
-                Line::from("press T to restore it within 30 days.").dark_gray(),
-                Line::default(),
-                Line::from(vec![
-                    Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red)),
-                    Span::raw(" move to trash   "),
-                    Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
-                    Span::raw(" cancel"),
-                ]),
-            ];
-            let paragraph = Paragraph::new(lines)
+            let mut text: Vec<Line> = lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if i == 0 {
+                        Line::from(Span::styled(l.clone(), Style::new().bold()))
+                    } else {
+                        Line::from(l.clone()).dark_gray()
+                    }
+                })
+                .collect();
+            text.push(Line::default());
+            text.push(Line::from(vec![
+                Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red)),
+                Span::raw(format!(" {yes}   ")),
+                Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
+                Span::raw(" cancel"),
+            ]));
+            let paragraph = Paragraph::new(text)
                 .wrap(Wrap { trim: true })
-                .block(panel("Move to trash", Color::Red));
+                .block(panel(title, Color::Red));
             frame.render_widget(paragraph, area);
         }
     }
