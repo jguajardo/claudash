@@ -18,8 +18,10 @@ use ratatui::{
 use crate::{
     claude_cli::{self, PromptReply},
     ecosystem::{self, Ecosystem},
+    history::History,
     hooks::{self, Activity},
     instructions::{self, Instructions},
+    library::{self, Library, Trashed},
     mcp::{self, McpResult, McpStatus},
     notify, paths,
     sessions::{self, Session},
@@ -99,6 +101,16 @@ pub enum Popup {
         id: String,
         title: String,
     },
+    /// Trashed sessions. `purge` holds the ID awaiting a second `x`.
+    Trash {
+        items: Vec<Trashed>,
+        state: ListState,
+        purge: Option<String>,
+    },
+    /// Bulk cleanup: move every session matching a preset to the trash.
+    Cleanup {
+        preset: usize,
+    },
     /// Matches of a search through every session's conversation.
     Results {
         query: String,
@@ -116,6 +128,16 @@ pub enum Input {
     },
     /// Search through every session's conversation.
     FindAll {
+        text: String,
+    },
+    /// Tags for a session, comma or space separated.
+    Tags {
+        id: String,
+        text: String,
+    },
+    /// A note for a session.
+    Note {
+        id: String,
         text: String,
     },
     Prompt {
@@ -186,6 +208,40 @@ impl TranscriptView {
             (self.match_pos + n - 1) % n
         };
         self.jump_to = Some(self.matches[self.match_pos]);
+    }
+}
+
+/// Bulk cleanup presets: which sessions to move to the trash.
+#[derive(Clone, Copy)]
+pub enum Preset {
+    OlderThanDays(u64),
+    LargerThanMb(u64),
+}
+
+pub const CLEANUP_PRESETS: [Preset; 5] = [
+    Preset::OlderThanDays(7),
+    Preset::OlderThanDays(14),
+    Preset::OlderThanDays(21),
+    Preset::LargerThanMb(5),
+    Preset::LargerThanMb(20),
+];
+
+impl Preset {
+    pub fn label(self) -> String {
+        match self {
+            Preset::OlderThanDays(d) => format!("not used for {d} days"),
+            Preset::LargerThanMb(mb) => format!("larger than {mb} MB"),
+        }
+    }
+
+    fn matches(self, session: &Session) -> bool {
+        match self {
+            Preset::OlderThanDays(days) => session
+                .modified
+                .elapsed()
+                .is_ok_and(|age| age.as_secs() > days * 86_400),
+            Preset::LargerThanMb(mb) => session.size > mb * 1_000_000,
+        }
     }
 }
 
@@ -289,6 +345,12 @@ pub struct App {
     // Conversations.
     pub transcript: Option<TranscriptView>,
     find_job: Option<(String, Job<Vec<Hit>>)>,
+
+    // Organization.
+    pub library: Library,
+    pub history: History,
+    /// Usage view shows months instead of days.
+    pub monthly: bool,
 }
 
 impl App {
@@ -332,7 +394,20 @@ impl App {
             prompt_job: None,
             transcript: None,
             find_job: None,
+            library: Library::load(),
+            history: History::load(),
+            monthly: false,
         };
+        let expired = library::purge_expired();
+        if expired > 0 {
+            app.show_flash(
+                format!(
+                    "Emptied {expired} session(s) older than {} days from the trash",
+                    library::TRASH_DAYS
+                ),
+                false,
+            );
+        }
         app.refresh();
         app.update_project();
         app.skip_mcp_debounce();
@@ -401,6 +476,8 @@ impl App {
     /// Reloads sessions and status line data, and asks which sessions are open.
     fn refresh(&mut self) {
         self.reload_sessions();
+        // Best effort: a failed write only means the chart misses this refresh.
+        let _ = self.history.merge(&self.sessions);
         self.statusline = statusline::load();
         self.check_plan_alerts();
         self.reload_hook_states();
@@ -522,7 +599,14 @@ impl App {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| query.is_empty() || session_matches(s, &query))
+            .filter(|(_, s)| {
+                query.is_empty()
+                    || session_matches(s, &query)
+                    || self
+                        .library
+                        .get(&s.id)
+                        .is_some_and(|m| meta_matches(m, &query))
+            })
             .map(|(i, _)| i)
             .collect();
         let index = keep_id
@@ -611,9 +695,15 @@ impl App {
         let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };
-        match sessions::delete(session) {
-            Ok(()) => self.show_flash(format!("Deleted \"{}\"", session.title), false),
-            Err(e) => self.show_flash(format!("Could not delete the session: {e}"), true),
+        match library::trash(session) {
+            Ok(()) => self.show_flash(
+                format!("Moved \"{}\" to the trash (T to restore)", session.title),
+                false,
+            ),
+            Err(e) => self.show_flash(
+                format!("Could not move the session to the trash: {e}"),
+                true,
+            ),
         }
         self.reload_sessions();
     }
@@ -738,6 +828,67 @@ impl App {
         match result {
             Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
             Err(e) => self.show_flash(format!("Could not export: {e}"), true),
+        }
+    }
+
+    /// Sessions a cleanup preset would move to the trash: never open or starred ones.
+    pub fn cleanup_candidates(&self, preset: Preset) -> Vec<&Session> {
+        self.sessions
+            .iter()
+            .filter(|s| preset.matches(s))
+            .filter(|s| !self.live.contains_key(&s.id))
+            .filter(|s| !self.library.get(&s.id).is_some_and(|m| m.starred))
+            .collect()
+    }
+
+    fn run_cleanup(&mut self, preset: Preset) {
+        let ids: Vec<String> = self
+            .cleanup_candidates(preset)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        let (mut moved, mut bytes, mut failed) = (0, 0, 0);
+        for id in ids {
+            let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+                continue;
+            };
+            let size = session.size;
+            match library::trash(session) {
+                Ok(()) => {
+                    moved += 1;
+                    bytes += size;
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        let mut msg = format!(
+            "Moved {moved} session(s) to the trash, {:.1} MB (T to restore)",
+            bytes as f64 / 1e6
+        );
+        if failed > 0 {
+            msg.push_str(&format!("; {failed} could not be moved"));
+        }
+        self.show_flash(msg, failed > 0);
+        self.reload_sessions();
+    }
+
+    fn open_trash(&mut self) {
+        let items = library::list_trash();
+        let mut state = ListState::default();
+        state.select((!items.is_empty()).then_some(0));
+        self.popup = Some(Popup::Trash {
+            items,
+            state,
+            purge: None,
+        });
+    }
+
+    fn toggle_star(&mut self) {
+        let Some(id) = self.selected_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        if let Err(e) = self.library.update(&id, |m| m.starred = !m.starred) {
+            self.show_flash(format!("Could not save: {e}"), true);
         }
     }
 
@@ -1123,11 +1274,11 @@ impl App {
                 Focus::Mcp => self.handle_mcp_key(key.code),
             },
             View::Ecosystem => self.handle_eco_key(key.code),
-            View::Usage => {
-                if key.code == KeyCode::Esc {
-                    self.view = View::Dashboard;
-                }
-            }
+            View::Usage => match key.code {
+                KeyCode::Esc => self.view = View::Dashboard,
+                KeyCode::Char('m') => self.monthly = !self.monthly,
+                _ => {}
+            },
             View::Transcript => self.handle_transcript_key(key.code),
         }
     }
@@ -1196,6 +1347,29 @@ impl App {
                     text: String::new(),
                 })
             }
+            KeyCode::Char('*') => self.toggle_star(),
+            KeyCode::Char('t') => {
+                if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
+                    let text = self
+                        .library
+                        .get(&id)
+                        .map(|m| m.tags.join(", "))
+                        .unwrap_or_default();
+                    self.input = Some(Input::Tags { id, text });
+                }
+            }
+            KeyCode::Char('n') => {
+                if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
+                    let text = self
+                        .library
+                        .get(&id)
+                        .map(|m| m.note.clone())
+                        .unwrap_or_default();
+                    self.input = Some(Input::Note { id, text });
+                }
+            }
+            KeyCode::Char('T') => self.open_trash(),
+            KeyCode::Char('C') => self.popup = Some(Popup::Cleanup { preset: 0 }),
             KeyCode::Tab => {
                 if self.project_servers().is_some_and(|s| !s.is_empty()) {
                     self.focus = Focus::Mcp;
@@ -1256,6 +1430,70 @@ impl App {
 
     fn handle_popup_key(&mut self, code: KeyCode) {
         match &mut self.popup {
+            Some(Popup::Trash {
+                items,
+                state,
+                purge,
+            }) => {
+                let selected = state.selected().and_then(|i| items.get(i)).cloned();
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                    KeyCode::Down | KeyCode::Char('j') if !items.is_empty() => {
+                        let next = state.selected().map_or(0, |i| (i + 1).min(items.len() - 1));
+                        state.select(Some(next));
+                        *purge = None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        state.select_previous();
+                        *purge = None;
+                    }
+                    KeyCode::Char('u') | KeyCode::Enter => {
+                        if let Some(item) = selected {
+                            match library::restore(&item) {
+                                Ok(()) => {
+                                    self.show_flash(format!("Restored \"{}\"", item.title), false)
+                                }
+                                Err(e) => self.show_flash(format!("Could not restore: {e}"), true),
+                            }
+                            self.reload_sessions();
+                            self.open_trash();
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        let Some(item) = selected else {
+                            return;
+                        };
+                        if purge.as_deref() == Some(item.id.as_str()) {
+                            match library::purge(&item) {
+                                Ok(()) => self.show_flash(
+                                    format!("Deleted \"{}\" for good", item.title),
+                                    false,
+                                ),
+                                Err(e) => self.show_flash(format!("Could not delete: {e}"), true),
+                            }
+                            self.open_trash();
+                        } else {
+                            *purge = Some(item.id.clone());
+                        }
+                    }
+                    _ => *purge = None,
+                }
+            }
+            Some(Popup::Cleanup { preset }) => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    *preset = (*preset + 1) % CLEANUP_PRESETS.len();
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    *preset = (*preset + CLEANUP_PRESETS.len() - 1) % CLEANUP_PRESETS.len();
+                }
+                KeyCode::Enter => {
+                    let chosen = CLEANUP_PRESETS[*preset];
+                    self.popup = None;
+                    self.run_cleanup(chosen);
+                }
+                _ => {}
+            },
             Some(Popup::Results { query, hits, state }) => match code {
                 KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1351,6 +1589,42 @@ impl App {
                     self.input = Some(Input::FindAll { text });
                 }
                 _ => self.input = Some(Input::FindAll { text }),
+            },
+            Some(Input::Tags { id, mut text }) => match code {
+                KeyCode::Enter => {
+                    let tags = library::parse_tags(&text);
+                    if let Err(e) = self.library.update(&id, |m| m.tags = tags) {
+                        self.show_flash(format!("Could not save the tags: {e}"), true);
+                    }
+                }
+                KeyCode::Esc => {}
+                KeyCode::Backspace => {
+                    text.pop();
+                    self.input = Some(Input::Tags { id, text });
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.input = Some(Input::Tags { id, text });
+                }
+                _ => self.input = Some(Input::Tags { id, text }),
+            },
+            Some(Input::Note { id, mut text }) => match code {
+                KeyCode::Enter => {
+                    let note = text.trim().to_string();
+                    if let Err(e) = self.library.update(&id, |m| m.note = note) {
+                        self.show_flash(format!("Could not save the note: {e}"), true);
+                    }
+                }
+                KeyCode::Esc => {}
+                KeyCode::Backspace => {
+                    text.pop();
+                    self.input = Some(Input::Note { id, text });
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.input = Some(Input::Note { id, text });
+                }
+                _ => self.input = Some(Input::Note { id, text }),
             },
             Some(Input::Prompt { id, cwd, mut text }) => match code {
                 KeyCode::Enter => self.send_prompt(id, cwd, text),
@@ -1454,6 +1728,12 @@ fn session_matches(session: &Session, query: &str) -> bool {
             .is_some_and(|b| b.to_lowercase().contains(query))
 }
 
+/// Match on tags (with or without `#`) and the note. `query` is lowercase.
+fn meta_matches(meta: &library::Meta, query: &str) -> bool {
+    let tag_query = query.trim_start_matches('#');
+    meta.tags.iter().any(|t| t.contains(tag_query)) || meta.note.to_lowercase().contains(query)
+}
+
 fn status_rank(status: &McpStatus) -> u8 {
     match status {
         McpStatus::Connected => 0,
@@ -1496,7 +1776,9 @@ fn help_popup() -> Popup {
         "  ↑/↓ j/k   move                 /      search",
         "  Enter     resume in Claude Code",
         "  p         send a one-off prompt (claude -p --resume)",
-        "  d         delete the session (asks first)",
+        "  d         move the session to the trash (asks first)",
+        "  t / n / * tags · note · star (search finds tags and notes)",
+        "  T / C     trash (restore or delete for good) · bulk cleanup",
         "  v         read the conversation      f  search all conversations",
         "  Tab       move to the MCP list",
         "",
@@ -1511,6 +1793,9 @@ fn help_popup() -> Popup {
         "Conversation (v)",
         "  ↑/↓ PgUp/PgDn g/G  scroll    o  show/hide tool output",
         "  /  search   n/N  next/previous match   e  export to Markdown",
+        "",
+        "Usage",
+        "  m         days / months",
         "",
         "Popups",
         "  ↑/↓ PgUp/PgDn  scroll     Esc  close",
@@ -1546,15 +1831,79 @@ mod tests {
 
         let mut app = App::new(1_000_000, false);
         app.eco = Some((None, Ecosystem::default()));
+        let entry = |kind, text: &str| Entry {
+            kind,
+            at: None,
+            text: text.into(),
+        };
+        app.transcript = Some(TranscriptView {
+            session_id: "x".into(),
+            title: "A conversation".into(),
+            path: PathBuf::new(),
+            project: "~/p".into(),
+            branch: Some("main".into()),
+            entries: vec![
+                entry(transcript::Kind::User, "a long prompt ".repeat(40).as_str()),
+                entry(
+                    transcript::Kind::ToolUse {
+                        name: "Bash".into(),
+                    },
+                    "cargo test",
+                ),
+                entry(
+                    transcript::Kind::ToolResult { is_error: true },
+                    "failed\nhere",
+                ),
+                entry(
+                    transcript::Kind::Compaction {
+                        pre_tokens: Some(1000),
+                    },
+                    "",
+                ),
+            ],
+            show_output: true,
+            query: Some("prompt".into()),
+            matches: vec![0],
+            match_pos: 0,
+            scroll: 0,
+            at_end: false,
+            jump_to: Some(usize::MAX),
+            rows: Vec::new(),
+            rows_key: None,
+        });
+        let hit = Hit {
+            session_id: "x".into(),
+            title: "t".into(),
+            entry: 0,
+            snippet: "…a snippet…".into(),
+            at: None,
+        };
         for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
-            for view in [View::Dashboard, View::Ecosystem, View::Usage] {
+            for view in [
+                View::Dashboard,
+                View::Ecosystem,
+                View::Usage,
+                View::Transcript,
+            ] {
                 for tab in EcoTab::ALL {
-                    for popup in 0..3 {
+                    for popup in 0..6 {
                         app.view = view;
                         app.eco_tab = tab;
+                        app.monthly = popup % 2 == 0;
                         app.popup = match popup {
                             0 => None,
                             1 => Some(help_popup()),
+                            2 => Some(Popup::Trash {
+                                items: Vec::new(),
+                                state: ListState::default(),
+                                purge: None,
+                            }),
+                            3 => Some(Popup::Cleanup { preset: 4 }),
+                            4 => Some(Popup::Results {
+                                query: "q".into(),
+                                hits: vec![hit.clone()],
+                                state: ListState::default(),
+                            }),
                             _ => Some(Popup::ConfirmDelete {
                                 id: "x".into(),
                                 title: "A session title far too long to fit".into(),

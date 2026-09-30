@@ -1,8 +1,10 @@
 mod app;
 mod claude_cli;
 mod ecosystem;
+mod history;
 mod hooks;
 mod instructions;
+mod library;
 mod mcp;
 mod notify;
 mod paths;

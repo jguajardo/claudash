@@ -17,10 +17,11 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
   - `/` filters by title, path or branch; `f` searches the content of every conversation and opens the one you pick at the match.
   - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
   - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
-  - `d` deletes the session, after asking.
+  - `t` tags a session, `n` adds a note and `*` stars it. Tags and notes show in the list and `/` finds them (`#tag` works too). They're kept by claudash, not in Claude Code's files.
+  - `d` moves the session to claudash's trash, after asking; `T` opens the trash to restore sessions or delete them for good, and anything left there is deleted after 30 days. `C` cleans up in bulk: pick a criterion (not used for 7/14/21 days, larger than 5/20 MB), check the list and move them all to the trash. Open and starred sessions are never included.
 - **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
 - **MCP Status**: `claude mcp list` run in the selected project's folder, so project-scoped servers show up too, cached per project. Press `Tab` to move into the list and `Enter` to read a server's latest log, which usually says why it failed.
-- **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost and model.
+- **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost, model, and how many subagents it ran and what they used.
   - **Cache diagnostics**: how much of the input was read from cache, flagged when cache writes dominate; with the status line, whether the cache is still warm and until when, its TTL, cache misses and their cause (such as `tools_changed` or `ttl_expired_5m`), and how many tokens the next reply re-caches once it goes cold.
   - **Plan usage**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
 
@@ -37,7 +38,9 @@ claudash export 6b1f3c2e -o session.md
 
 ### 3 · Usage
 
-Plan usage gauges, a chart of tokens per day for the last 30 days (subagents included), totals for today, 7 and 30 days, and your most active projects this week.
+Plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Subagents are included.
+
+Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers: the charts keep your history after the transcripts are gone.
 
 ## Installation
 
@@ -106,7 +109,10 @@ claudash --help
 | `v` | Read the selected session's conversation |
 | `o` · `n`/`N` · `e` | In a conversation: show tool output · next/previous match · export to Markdown |
 | `p` | Send a one-off prompt to the selected session |
-| `d` / `Delete` | Delete the selected session (asks first) |
+| `d` / `Delete` | Move the selected session to the trash (asks first) |
+| `t` · `n` · `*` | Tag · note · star the selected session |
+| `T` · `C` | Trash (restore, delete for good) · bulk cleanup |
+| `m` | Usage view: days or months |
 | `Tab` | Switch between the session list and the MCP list · next ecosystem tab |
 | `←` `→` | Previous / next ecosystem tab |
 | `Space` | Enable or disable the selected plugin |
@@ -140,16 +146,18 @@ claudash makes no network requests of its own. It reads local files and runs the
 | Sessions, conversations, tokens, cost | `~/.claude/projects/<project>/<session-id>.jsonl` | Internal |
 | MCP server logs | `~/.cache/claude-cli-nodejs/<project>/mcp-logs-<server>/` | Internal |
 
+claudash's own files live in `~/.local/share/claudash/` (`~/Library/Application Support/claudash/` on macOS): `library.json` for tags, notes and stars, `usage-history.json` for the charts, and `trash/`.
+
 Claude Code [documents the transcript format as internal](https://code.claude.com/docs/en/sessions#where-transcripts-are-stored) and it can change between versions, so a Claude Code update may break the Sessions, Token Usage and Usage views until claudash catches up. claudash parses these files leniently and skips anything it doesn't recognize.
 
 These actions change things, and only run when you ask:
 
 - **`claudash setup --apply` / `--remove`**: edits `~/.claude/settings.json` (status line and hooks), after saving a timestamped backup next to it.
-- **Delete a session** (`d`, then `y`): removes its transcript, subagent transcripts and tool results, and its `file-history` checkpoints and `session-env` under Claude Code's config directory. It can't be undone.
+- **Move a session to the trash** (`d` then `y`, or `C`): moves its transcript, subagent transcripts and tool results, and its `file-history` checkpoints and `session-env`, out of Claude Code's directories into claudash's trash. `T` puts them back; they're deleted for good after 30 days or when you delete them from the trash (`x` twice).
 - **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 
-Resuming, prompting and deleting are refused while the session is open in Claude Code, because two processes writing one transcript interleave their messages.
+Resuming, prompting and trashing are refused while the session is open in Claude Code, because two processes writing one transcript interleave their messages.
 
 ## Limitations
 

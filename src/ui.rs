@@ -1,8 +1,8 @@
 //! Rendering.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use chrono::{Duration as Days, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -15,7 +15,10 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, EcoTab, Focus, Input, McpSnapshot, Popup, TranscriptRow, TranscriptView, View},
+    app::{
+        App, CLEANUP_PRESETS, EcoTab, Focus, Input, McpSnapshot, Popup, TranscriptRow,
+        TranscriptView, View,
+    },
     ecosystem::Item,
     hooks::Activity,
     mcp::McpStatus,
@@ -179,7 +182,18 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|&i| &app.sessions[i])
         .map(|s| {
-            let mut title = vec![Span::styled(s.title.as_str(), Style::new().bold())];
+            let meta = app.library.get(&s.id);
+            let mut title = Vec::new();
+            if meta.is_some_and(|m| m.starred) {
+                title.push(Span::styled("★ ", Style::new().fg(Color::Yellow)));
+            }
+            title.push(Span::styled(s.title.as_str(), Style::new().bold()));
+            for tag in meta.map(|m| m.tags.as_slice()).unwrap_or_default() {
+                title.push(Span::styled(
+                    format!("  #{tag}"),
+                    Style::new().fg(Color::Magenta),
+                ));
+            }
             let marker = match app.activity(&s.id) {
                 Some(Activity::NeedsYou) => Some(("  ▲ needs you", Color::Yellow)),
                 Some(Activity::Working) => Some(("  ● working", Color::Green)),
@@ -203,7 +217,14 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                 format!("  · {}", sessions::relative_age(s.modified)),
                 dim().italic(),
             ));
-            ListItem::new(vec![Line::from(title), Line::from(detail)])
+            let mut lines = vec![Line::from(title), Line::from(detail)];
+            if let Some(note) = meta.map(|m| m.note.as_str()).filter(|n| !n.is_empty()) {
+                lines.push(Line::from(Span::styled(
+                    format!("  ✎ {note}"),
+                    dim().italic(),
+                )));
+            }
+            ListItem::new(lines)
         })
         .collect();
 
@@ -446,13 +467,25 @@ fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
         stats.push(Span::styled("cost ", dim()));
         stats.push(Span::styled(format!("${cost:.2}"), value.fg(Color::Green)));
     }
-    let model = Line::from(vec![
+    let mut model_spans = vec![
         Span::styled("model ", dim()),
         Span::styled(
-            t.model.as_deref().unwrap_or("—"),
+            t.model.as_deref().unwrap_or("—").to_string(),
             Style::new().fg(Color::Cyan),
         ),
-    ]);
+    ];
+    if t.subagents > 0 {
+        model_spans.push(Span::styled("   subagents ", dim()));
+        model_spans.push(Span::styled(
+            format!(
+                "{} · {}",
+                t.subagents,
+                human_tokens(t.subagent_total.processed())
+            ),
+            value,
+        ));
+    }
+    let model = Line::from(model_spans);
     frame.render_widget(Paragraph::new(vec![Line::from(stats), model]), stats_area);
     frame.render_widget(Paragraph::new(cache_line(app, session)), cache_area);
     frame.render_widget(Paragraph::new(plan_line(app)), plan_area);
@@ -824,16 +857,6 @@ fn draw_plugin_details(frame: &mut Frame, app: &App, area: Rect) {
 
 // ---- Usage -------------------------------------------------------------------
 
-fn daily_totals(app: &App) -> BTreeMap<NaiveDate, Usage> {
-    let mut days: BTreeMap<NaiveDate, Usage> = BTreeMap::new();
-    for session in &app.sessions {
-        for (day, usage) in &session.tokens.daily {
-            days.entry(*day).or_default().add(usage);
-        }
-    }
-    days
-}
-
 fn sum_since(days: &BTreeMap<NaiveDate, Usage>, since: NaiveDate) -> Usage {
     let mut total = Usage::default();
     for usage in days.range(since..).map(|(_, u)| u) {
@@ -842,48 +865,91 @@ fn sum_since(days: &BTreeMap<NaiveDate, Usage>, since: NaiveDate) -> Usage {
     total
 }
 
+/// Bars for the last days (or months) that fit in `width` columns.
+fn usage_bars(
+    app: &App,
+    days: &BTreeMap<NaiveDate, Usage>,
+    width: u16,
+) -> (Vec<Bar<'static>>, String, u64) {
+    let today = Local::now().date_naive();
+    // Each bar takes 4 columns (3 wide + 1 gap) inside the borders.
+    let fit = ((width.saturating_sub(4)) / 4).max(1) as i64;
+    let mut peak = 0;
+    let mut bar = |label: String, tokens: u64, current: bool| {
+        peak = peak.max(tokens);
+        let color = if current { Color::Yellow } else { Color::Cyan };
+        Bar::default()
+            .value(tokens)
+            .text_value(String::new())
+            .label(Line::from(label))
+            .style(Style::new().fg(color))
+    };
+    if app.monthly {
+        let n = fit.min(12);
+        let mut months: BTreeMap<(i32, u32), u64> = BTreeMap::new();
+        for (day, usage) in days {
+            *months.entry((day.year(), day.month())).or_default() += usage.processed();
+        }
+        let (mut year, mut month) = (today.year(), today.month());
+        let mut bars = Vec::new();
+        for i in 0..n {
+            let tokens = months.get(&(year, month)).copied().unwrap_or(0);
+            let name = NaiveDate::from_ymd_opt(year, month, 1)
+                .map(|d| d.format("%b").to_string())
+                .unwrap_or_default();
+            bars.push(bar(name, tokens, i == 0));
+            (year, month) = if month == 1 {
+                (year - 1, 12)
+            } else {
+                (year, month - 1)
+            };
+        }
+        bars.reverse();
+        (bars, format!("last {n} months"), peak)
+    } else {
+        let n = fit.min(30);
+        let bars = (0..n)
+            .rev()
+            .map(|back| today - Days::days(back))
+            .map(|day| {
+                let tokens = days.get(&day).map_or(0, Usage::processed);
+                bar(day.format("%d").to_string(), tokens, day == today)
+            })
+            .collect();
+        (bars, format!("last {n} days"), peak)
+    }
+}
+
 fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
     let [plan_area, chart_area, bottom] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(8),
-        Constraint::Length(7),
+        Constraint::Length(8),
     ])
     .areas(area);
     draw_plan(frame, app, plan_area);
 
     let today = Local::now().date_naive();
-    let days = daily_totals(app);
-    // Each bar takes 4 columns (3 wide + 1 gap) inside the borders.
-    let n = ((chart_area.width.saturating_sub(4)) / 4).clamp(1, 30) as i64;
-    let bars: Vec<Bar> = (0..n)
-        .rev()
-        .map(|back| today - Days::days(back))
-        .map(|day| {
-            let tokens = days.get(&day).map_or(0, Usage::processed);
-            let style = if day == today {
-                Style::new().fg(Color::Yellow)
-            } else {
-                Style::new().fg(Color::Cyan)
-            };
-            Bar::default()
-                .value(tokens)
-                .text_value(String::new())
-                .label(Line::from(day.format("%d").to_string()))
-                .style(style)
-        })
-        .collect();
-    let peak = (0..n)
-        .map(|back| {
-            days.get(&(today - Days::days(back)))
-                .map_or(0, Usage::processed)
-        })
-        .max()
-        .unwrap_or(0);
+    let days = app.history.per_day();
+    let (bars, range, peak) = usage_bars(app, &days, chart_area.width);
+    let since = app
+        .history
+        .first_day()
+        .map(|d| format!(" · history since {}", d.format("%b %d")))
+        .unwrap_or_default();
     let chart = BarChart::default()
         .block(
-            panel("Tokens per day", Color::Cyan).title_bottom(
+            panel(
+                if app.monthly {
+                    "Tokens per month"
+                } else {
+                    "Tokens per day"
+                },
+                Color::Cyan,
+            )
+            .title_bottom(
                 Line::from(format!(
-                    " input + cache write + output · last {n} days · peak {} ",
+                    " input + cache write + output · {range} · peak {}{since} · m days/months ",
                     human_tokens(peak)
                 ))
                 .right_aligned(),
@@ -894,14 +960,19 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
         .data(BarGroup::default().bars(&bars));
     frame.render_widget(chart, chart_area);
 
-    let [totals_area, projects_area] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(bottom);
+    let [totals_area, models_area, projects_area] = Layout::horizontal([
+        Constraint::Percentage(40),
+        Constraint::Percentage(32),
+        Constraint::Percentage(28),
+    ])
+    .areas(bottom);
 
-    let header = Row::new(["", "input", "cache write", "cache read", "output"]).style(dim());
+    let header = Row::new(["", "input", "c.write", "c.read", "output"]).style(dim());
     let rows = [
         ("Today", today),
         ("7 days", today - Days::days(6)),
         ("30 days", today - Days::days(29)),
+        ("1 year", today - Days::days(364)),
     ]
     .map(|(label, since)| {
         let u = sum_since(&days, since);
@@ -917,45 +988,60 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
         rows,
         [
             Constraint::Length(8),
+            Constraint::Length(7),
             Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(11),
+            Constraint::Length(8),
             Constraint::Length(8),
         ],
     )
     .header(header)
     .block(
         panel("Totals", Color::Yellow)
-            .title_bottom(Line::from(" all sessions incl. subagents ").right_aligned()),
+            .title_bottom(Line::from(" incl. subagents ").right_aligned()),
     );
     frame.render_widget(table, totals_area);
 
-    // Top projects over the last 7 days.
-    let week = today - Days::days(6);
-    let mut per_project: HashMap<&str, u64> = HashMap::new();
-    for s in &app.sessions {
-        let tokens: u64 = s
-            .tokens
-            .daily
-            .range(week..)
-            .map(|(_, u)| u.processed())
-            .sum();
-        if tokens > 0 {
-            *per_project.entry(s.project_path.as_str()).or_default() += tokens;
-        }
-    }
-    let mut ranked: Vec<(&str, u64)> = per_project.into_iter().collect();
-    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
-    let lines: Vec<Line> = ranked
+    // By model over the last 30 days, with each model's share.
+    let models = app.history.per_model(today - Days::days(29));
+    let all: u64 = models.iter().map(|(_, u)| u.processed()).sum();
+    let lines: Vec<Line> = models
         .iter()
         .take(5)
+        .map(|(model, usage)| {
+            let share = if all > 0 {
+                usage.processed() as f64 / all as f64 * 100.0
+            } else {
+                0.0
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>7}  ", human_tokens(usage.processed())),
+                    Style::new().bold(),
+                ),
+                Span::styled(format!("{share:>3.0}%  "), dim()),
+                Span::raw(model.clone()),
+            ])
+        })
+        .collect();
+    let block = panel("By model · 30 days", Color::Magenta);
+    if lines.is_empty() {
+        frame.render_widget(message("No usage in the last 30 days.", block), models_area);
+    } else {
+        frame.render_widget(Paragraph::new(lines).block(block), models_area);
+    }
+
+    let lines: Vec<Line> = app
+        .history
+        .per_project(today - Days::days(6))
+        .into_iter()
+        .take(6)
         .map(|(project, tokens)| {
             Line::from(vec![
                 Span::styled(
-                    format!("{:>7}  ", human_tokens(*tokens)),
+                    format!("{:>7}  ", human_tokens(tokens)),
                     Style::new().bold(),
                 ),
-                Span::raw(project.to_string()),
+                Span::raw(project),
             ])
         })
         .collect();
@@ -1233,6 +1319,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("▌", Style::new().fg(Color::Magenta)),
             hint("   Enter search every conversation · Esc cancel"),
         ]),
+        Some(Input::Tags { text, .. }) => Line::from(vec![
+            Span::styled(" tags ", Style::new().fg(Color::Black).bg(Color::Magenta)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Magenta)),
+            hint("   comma or space separated · Enter save · Esc cancel"),
+        ]),
+        Some(Input::Note { text, .. }) => Line::from(vec![
+            Span::styled(" note ", Style::new().fg(Color::Black).bg(Color::Magenta)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Magenta)),
+            hint("   empty to remove · Enter save · Esc cancel"),
+        ]),
         Some(Input::Prompt { text, .. }) => Line::from(vec![
             Span::styled(" prompt ", Style::new().fg(Color::Black).bg(Color::Cyan)),
             Span::raw(format!(" {text}")),
@@ -1369,6 +1467,105 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             let paragraph = Paragraph::new(text).block(block).scroll((*scroll, 0));
             frame.render_widget(paragraph, area);
         }
+        Some(Popup::Trash {
+            items,
+            state,
+            purge,
+        }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(80),
+                Constraint::Percentage(70),
+            );
+            frame.render_widget(Clear, area);
+            let now = chrono::Utc::now().timestamp();
+            let items_view: Vec<ListItem> = items
+                .iter()
+                .map(|t| {
+                    let days_left = crate::library::TRASH_DAYS - (now - t.trashed_at) / 86_400;
+                    ListItem::new(vec![
+                        Line::from(Span::styled(t.title.clone(), Style::new().bold())),
+                        Line::from(Span::styled(
+                            format!(
+                                "  {}  · {:.1} MB · deleted for good in {} day(s)",
+                                t.project,
+                                t.size as f64 / 1e6,
+                                days_left.max(0)
+                            ),
+                            dim(),
+                        )),
+                    ])
+                })
+                .collect();
+            let hint_text = if purge.is_some() {
+                " press x again to delete for good · any other key cancels "
+            } else {
+                " u restore · x delete for good · Esc close "
+            };
+            let block =
+                panel("Trash", Color::Red).title_bottom(Line::from(hint_text).right_aligned());
+            if items_view.is_empty() {
+                frame.render_widget(message("The trash is empty.", block), area);
+            } else {
+                let list = List::new(items_view)
+                    .block(block)
+                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_symbol("▶ ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                frame.render_stateful_widget(list, area, state);
+            }
+        }
+        Some(Popup::Cleanup { preset }) => {
+            let chosen = CLEANUP_PRESETS[*preset];
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(80),
+                Constraint::Percentage(70),
+            );
+            frame.render_widget(Clear, area);
+            let candidates = app.cleanup_candidates(chosen);
+            let bytes: u64 = candidates.iter().map(|s| s.size).sum();
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("◀ ", dim()),
+                    Span::styled(format!("Sessions {}", chosen.label()), Style::new().bold()),
+                    Span::styled(" ▶", dim()),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "{} session(s), {:.1} MB. Open and starred sessions are never included.",
+                        candidates.len(),
+                        bytes as f64 / 1e6
+                    ),
+                    dim(),
+                )),
+                Line::default(),
+            ];
+            lines.extend(
+                candidates
+                    .iter()
+                    .take(area.height.saturating_sub(8) as usize)
+                    .map(|s| {
+                        Line::from(vec![
+                            Span::raw(format!("  {}", s.title)),
+                            Span::styled(
+                                format!(
+                                    "  {} · {} · {:.1} MB",
+                                    s.project_path,
+                                    sessions::relative_age(s.modified),
+                                    s.size as f64 / 1e6
+                                ),
+                                dim(),
+                            ),
+                        ])
+                    }),
+            );
+            let block = panel("Clean up", Color::Yellow).title_bottom(
+                Line::from(" ←/→ criteria · Enter move them to the trash · Esc cancel ")
+                    .right_aligned(),
+            );
+            frame.render_widget(Paragraph::new(lines).block(block), area);
+        }
         Some(Popup::Results { query, hits, state }) => {
             let area = centered(
                 frame.area(),
@@ -1427,19 +1624,19 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                     Span::raw("?"),
                 ]),
                 Line::default(),
-                Line::from("This removes its transcript, subagent transcripts and").dark_gray(),
-                Line::from("checkpoints. It can't be undone.").dark_gray(),
+                Line::from("It moves to the trash with its subagents and checkpoints;").dark_gray(),
+                Line::from("press T to restore it within 30 days.").dark_gray(),
                 Line::default(),
                 Line::from(vec![
                     Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red)),
-                    Span::raw(" delete   "),
+                    Span::raw(" move to trash   "),
                     Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
                     Span::raw(" cancel"),
                 ]),
             ];
             let paragraph = Paragraph::new(lines)
                 .wrap(Wrap { trim: true })
-                .block(panel("Delete session", Color::Red));
+                .block(panel("Move to trash", Color::Red));
             frame.render_widget(paragraph, area);
         }
     }

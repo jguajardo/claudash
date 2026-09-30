@@ -23,7 +23,7 @@ use std::{
 };
 
 use chrono::{DateTime, Local, NaiveDate};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct Session {
@@ -36,7 +36,8 @@ pub struct Session {
     pub cwd: Option<PathBuf>,
     pub git_branch: Option<String>,
     pub modified: SystemTime,
-    size: u64,
+    /// Transcript size in bytes.
+    pub size: u64,
     pub tokens: SessionTokens,
 }
 
@@ -49,11 +50,17 @@ pub struct SessionTokens {
     pub model: Option<String>,
     /// Accumulated cost from the last `cost-state` record, if any.
     pub cost_usd: Option<f64>,
-    /// Usage per local calendar day, subagents included.
-    pub daily: BTreeMap<NaiveDate, Usage>,
+    /// Usage per local calendar day and model, subagents included.
+    pub daily: Daily,
+    /// Subagent transcripts, and their combined usage.
+    pub subagents: usize,
+    pub subagent_total: Usage,
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+/// Usage per local calendar day, then per model.
+pub type Daily = BTreeMap<NaiveDate, BTreeMap<String, Usage>>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub input_tokens: u64,
@@ -158,8 +165,8 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     let mut last_prompt = None;
     let mut cwd = None;
     let mut git_branch = None;
-    // requestId -> (usage, day). Main conversation only.
-    let mut usage_by_request: HashMap<String, (Usage, Option<NaiveDate>)> = HashMap::new();
+    // Main conversation only.
+    let mut usage_by_request: HashMap<String, RequestUsage> = HashMap::new();
     let mut last_usage: Option<Usage> = None;
     let mut model = None;
     let mut cost_usd = None;
@@ -191,7 +198,8 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
                 {
                     if let Some(req) = record.request_id {
                         let day = record.timestamp.as_deref().and_then(local_day);
-                        usage_by_request.insert(req, (usage, day));
+                        let model_name = msg.model.clone().unwrap_or_default();
+                        usage_by_request.insert(req, (usage, day, model_name));
                     }
                     last_usage = Some(usage);
                     model = msg.model;
@@ -206,18 +214,28 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     }
 
     let mut total = Usage::default();
-    for (usage, _) in usage_by_request.values() {
+    for (usage, _, _) in usage_by_request.values() {
         total.add(usage);
     }
     // Daily usage adds the subagents, deduplicated against the main file.
+    let (sub_requests, subagents) = subagent_usage(&path.with_extension(""));
+    let mut subagent_total = Usage::default();
     let mut all_requests = usage_by_request;
-    for (req, entry) in subagent_usage(&path.with_extension("")) {
-        all_requests.entry(req).or_insert(entry);
+    for (req, entry) in sub_requests {
+        if let std::collections::hash_map::Entry::Vacant(slot) = all_requests.entry(req) {
+            subagent_total.add(&entry.0);
+            slot.insert(entry);
+        }
     }
-    let mut daily: BTreeMap<NaiveDate, Usage> = BTreeMap::new();
-    for (usage, day) in all_requests.values() {
+    let mut daily = Daily::new();
+    for (usage, day, model) in all_requests.values() {
         if let Some(day) = day {
-            daily.entry(*day).or_default().add(usage);
+            daily
+                .entry(*day)
+                .or_default()
+                .entry(model.clone())
+                .or_default()
+                .add(usage);
         }
     }
     let context_used = last_usage.map(|u| u.context()).unwrap_or(0);
@@ -244,21 +262,29 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             model,
             cost_usd,
             daily,
+            subagents,
+            subagent_total,
         },
     })
 }
 
-/// Usage of every response in `<session-dir>/subagents/*.jsonl`, by requestId.
-fn subagent_usage(session_dir: &Path) -> HashMap<String, (Usage, Option<NaiveDate>)> {
+/// One response's usage, its local day and its model.
+type RequestUsage = (Usage, Option<NaiveDate>, String);
+
+/// Usage of every response in `<session-dir>/subagents/*.jsonl`, by
+/// requestId, and how many subagent transcripts there are.
+fn subagent_usage(session_dir: &Path) -> (HashMap<String, RequestUsage>, usize) {
     let mut usage = HashMap::new();
+    let mut files = 0;
     let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else {
-        return usage;
+        return (usage, files);
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
+        files += 1;
         let Ok(file) = fs::File::open(&path) else {
             continue;
         };
@@ -274,11 +300,11 @@ fn subagent_usage(session_dir: &Path) -> HashMap<String, (Usage, Option<NaiveDat
                 && msg.model.as_deref() != Some("<synthetic>")
             {
                 let day = record.timestamp.as_deref().and_then(local_day);
-                usage.insert(req, (u, day));
+                usage.insert(req, (u, day, msg.model.unwrap_or_default()));
             }
         }
     }
-    usage
+    (usage, files)
 }
 
 /// Local calendar day of an RFC 3339 timestamp such as `2026-09-29T23:25:05.989Z`.
@@ -286,31 +312,6 @@ fn local_day(timestamp: &str) -> Option<NaiveDate> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|t| t.with_timezone(&Local).date_naive())
-}
-
-/// Deletes a session: its transcript, the sibling directory with subagent
-/// transcripts and tool results, and the per-session state Claude Code keeps
-/// under its config directory (`file-history/<id>` checkpoints and
-/// `session-env/<id>`). Removing the transcript is what takes it out of
-/// `claude --resume`.
-pub fn delete(session: &Session) -> io::Result<()> {
-    fs::remove_file(&session.path)?;
-    let mut dirs = vec![session.path.with_extension("")];
-    // Session IDs are UUIDs; never build a path from anything else.
-    if let Some(home) = crate::paths::claude_home()
-        && !session.id.is_empty()
-        && session
-            .id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
-        dirs.push(home.join("file-history").join(&session.id));
-        dirs.push(home.join("session-env").join(&session.id));
-    }
-    for dir in dirs.into_iter().filter(|d| d.is_dir()) {
-        fs::remove_dir_all(dir)?;
-    }
-    Ok(())
 }
 
 /// "5 min ago", "3 h ago", "yesterday", "4 days ago"...
@@ -399,8 +400,10 @@ mod tests {
         assert_eq!(s.tokens.cost_usd, Some(1.5));
 
         let day = local_day("2026-01-02T12:00:00Z").unwrap();
-        let daily = s.tokens.daily[&day];
+        let daily = s.tokens.daily[&day]["m"];
         assert_eq!(daily.input_tokens, 31);
         assert_eq!(daily.output_tokens, 14);
+        assert_eq!(s.tokens.subagents, 1);
+        assert_eq!(s.tokens.subagent_total.output_tokens, 2);
     }
 }

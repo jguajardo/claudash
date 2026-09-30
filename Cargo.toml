@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github", "/assets", "/demo", "dist-workspace.toml"]
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 crossterm = "0.29.0"
 dirs = "7.0.0"
 ratatui = "0.30.2"
