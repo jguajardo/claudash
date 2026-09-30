@@ -4,27 +4,9 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 
 > **Unofficial project.** claudash is not affiliated with, endorsed by or supported by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic.
 
-```
- ◆ claudash    1 Dashboard   2 Ecosystem   3 Usage                                         ? keys 
-╭ Sessions ────────────────────────────────────────╮╭ Project ──────────────── ~/code/api-server ╮
-│ ▶ Add OAuth login to the API  ● working          ││ ● CLAUDE.md  project                       │
-│     ~/code/api-server  feat/oauth  · just now    ││ ○ AGENTS.md  agents  (CLAUDE.md wins)      │
-│   Fix flaky integration tests                    │╰────────────────────────────────────────────╯
-│     ~/code/api-server  main  · 2 h ago           │╭ MCP Status ────────────────────────────────╮
-│   Landing page redesign                          ││ ● filesystem         ONLINE     local      │
-│     ~/code/website  · yesterday                  ││ ● context7           ONLINE     context7   │
-│                                                  ││ ◐ linear             AUTH       engineering│
-│                                                  ││ ✘ postgres           ERROR      local      │
-│                                                  ││ ○ gmail              NOT SET    engineering│
-╰────────────────────────────────────── 3 sessions ╯╰─────────────────────── 2/5 online · 4s ago ╯
-╭ Token Usage ─────────────────────────────────────────────────────── Add OAuth login to the API ╮
-│ ██████████████████████Context 23.4%  (234.1k / 1.0M, from status line)                         │
-│ input 1.2k   cache write 310.5k   cache read 4.8M   output 52.3k   cost $6.41                  │
-│ model claude-opus-5-5                                                                          │
-│ plan 5h 41% (resets 16:30)   7d 12% (resets Sat 09:00)                                         │
-╰────────────────────────────────────────────────────────────────────────────────────────────────╯
- Enter  resume   /  search   p  prompt   d  delete   Tab  MCP   r  reload   q  quit
-```
+![claudash demo: sessions with "needs you" and "working" markers, an MCP server log, the ecosystem view and the usage view](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/claudash.gif)
+
+<sub>Recorded from made-up data with [VHS](https://github.com/charmbracelet/vhs); see [demo/](demo/).</sub>
 
 ## Features
 

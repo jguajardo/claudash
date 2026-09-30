@@ -2,15 +2,15 @@
 name = "claudash"
 version = "0.2.0"
 edition = "2024"
-description = "Unofficial terminal dashboard for Claude Code: sessions, plan and context usage, MCP health, instructions, skills and plugins"
+description = "Unofficial terminal dashboard for Claude Code: sessions and attention alerts, plan and context usage, prompt cache, MCP health, instructions, skills and plugins"
 authors = ["Jorge Guajardo <jguajardo87@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jguajardo/claudash"
 homepage = "https://github.com/jguajardo/claudash"
 readme = "README.md"
-keywords = ["claude", "claude-code", "tui", "dashboard", "mcp"]
+keywords = ["claude-code", "claude", "tui", "dashboard", "usage"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github", "/assets", "dist-workspace.toml"]
+exclude = ["/.github", "/assets", "/demo", "dist-workspace.toml"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
