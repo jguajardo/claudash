@@ -17,6 +17,7 @@ mod paths;
 mod projects;
 mod prompts;
 mod report;
+mod review;
 mod sessions;
 mod setup;
 mod statusline;

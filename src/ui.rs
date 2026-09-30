@@ -1878,6 +1878,9 @@ fn draw_projects(frame: &mut Frame, app: &mut App, area: Rect) {
         if co.claude_created {
             flags.push("created by Claude Code");
         }
+        if co.review {
+            flags.push("branch review (claudash)");
+        }
         if co.locked {
             flags.push("locked");
         }
@@ -2422,6 +2425,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ),
                     Style::new().fg(Color::Magenta),
                 ))
+            } else if app.fetching_branches() {
+                Line::from(Span::styled(
+                    format!(" {} fetching branches…", app.spinner()),
+                    Style::new().fg(Color::LightMagenta),
+                ))
+            } else if let Some(branch) = app.reviewing()
+                && app.flash.is_none()
+            {
+                Line::from(Span::styled(
+                    format!(" {} Claude is reviewing {branch}…", app.spinner()),
+                    Style::new().fg(Color::LightMagenta),
+                ))
             } else if app.summarizing() {
                 Line::from(Span::styled(
                     format!(" {} building today's summary…", app.spinner()),
@@ -2706,6 +2721,315 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 Line::from(" e export to Markdown · ↑/↓ scroll · Esc close ").right_aligned(),
             );
             frame.render_widget(Paragraph::new(rows).block(block).scroll((*scroll, 0)), area);
+        }
+        Some(Popup::Branches {
+            listing,
+            reviewed,
+            query,
+            matches,
+            state,
+            repo_name,
+            ..
+        }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(85),
+                Constraint::Percentage(80),
+            );
+            frame.render_widget(Clear, area);
+            let now = chrono::Utc::now().timestamp();
+            let items: Vec<ListItem> = matches
+                .iter()
+                .map(|&i| {
+                    let b = &listing.branches[i];
+                    let mut first = vec![Span::styled(b.name.clone(), Style::new().bold())];
+                    if b.ahead > 0 {
+                        first.push(Span::styled(
+                            format!("  +{} commit(s)", b.ahead),
+                            Style::new().fg(Color::Cyan),
+                        ));
+                    }
+                    if let Some(at) = reviewed.get(&b.name) {
+                        first.push(Span::styled(
+                            format!("  ✓ reviewed {} ago", short_age(now - at)),
+                            Style::new().fg(Color::Green),
+                        ));
+                    }
+                    ListItem::new(vec![
+                        Line::from(first),
+                        Line::from(Span::styled(
+                            format!(
+                                "  {} · {} · {} ago",
+                                b.subject,
+                                b.author,
+                                short_age(now - b.when)
+                            ),
+                            dim(),
+                        )),
+                    ])
+                })
+                .collect();
+            let base = listing
+                .base
+                .as_deref()
+                .map_or("no develop, main or master".to_string(), |b| {
+                    format!("against {b}")
+                });
+            let block = panel("", Color::Magenta)
+                .title(
+                    Line::from(format!(
+                        " Review a branch · {repo_name} · {base} · {} of {} ",
+                        matches.len(),
+                        listing.branches.len()
+                    ))
+                    .bold()
+                    .fg(Color::Magenta),
+                )
+                .title(
+                    Line::from(format!(" search: {query}▌ "))
+                        .fg(Color::Yellow)
+                        .right_aligned(),
+                )
+                .title_bottom(
+                    Line::from(" type to search · Enter choose · Esc close ").right_aligned(),
+                );
+            if items.is_empty() {
+                let text = if listing.branches.is_empty() {
+                    "The remote has no other branches."
+                } else {
+                    "No branches match."
+                };
+                frame.render_widget(message(text, block), area);
+            } else {
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_symbol("▶ ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                frame.render_stateful_widget(list, area, state);
+            }
+        }
+        Some(Popup::ReviewSetup {
+            task,
+            stat,
+            last,
+            choice,
+        }) => {
+            let area = centered(frame.area(), Constraint::Max(90), Constraint::Max(26));
+            frame.render_widget(Clear, area);
+            let width = area.width.saturating_sub(8).max(20) as usize;
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(task.branch.clone(), Style::new().bold()),
+                    Span::styled(format!("  against {}", task.base), dim()),
+                ]),
+                match stat {
+                    Ok(st) => Line::from(format!(
+                        "{} · {} · +{} −{}",
+                        plural(st.commits as u64, "commit"),
+                        plural(st.files as u64, "file"),
+                        st.insertions,
+                        st.deletions
+                    )),
+                    Err(e) => Line::from(Span::styled(e.clone(), Style::new().fg(Color::Red))),
+                },
+                Line::from(Span::styled(
+                    "Checked out in a worktree of its own; your checkout isn't touched.",
+                    dim(),
+                )),
+                Line::default(),
+            ];
+            let mut options: Vec<(&str, &str)> = crate::review::Mode::ALL
+                .iter()
+                .map(|m| (m.title(), m.detail()))
+                .collect();
+            let last_label = last.as_ref().map(|r| {
+                format!(
+                    "Show the last review ({})",
+                    plural(r.result.findings.len() as u64, "finding")
+                )
+            });
+            if let Some(label) = &last_label {
+                options.push((
+                    label.as_str(),
+                    "Open the findings Claude gave last time, without reviewing again.",
+                ));
+            }
+            for (i, (title, detail)) in options.iter().enumerate() {
+                let selected = i == *choice;
+                lines.push(Line::from(vec![
+                    Span::raw(if selected { "▶ " } else { "  " }),
+                    Span::styled(
+                        title.to_string(),
+                        if selected {
+                            Style::new().fg(Color::Yellow).bold()
+                        } else {
+                            Style::new().bold()
+                        },
+                    ),
+                ]));
+                if selected {
+                    for chunk in crate::app::textwrap(detail, width) {
+                        lines.push(Line::from(Span::styled(format!("    {chunk}"), dim())));
+                    }
+                }
+            }
+            let block = panel("Review", Color::Magenta).title_bottom(
+                Line::from(" ↑/↓ choose · Enter start · Esc cancel ").right_aligned(),
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(block)
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        Some(Popup::Findings {
+            review,
+            state,
+            detail,
+        }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(90),
+                Constraint::Percentage(85),
+            );
+            frame.render_widget(Clear, area);
+            let severity_color = |s: &str| match s {
+                "high" => Color::Red,
+                "medium" => Color::Yellow,
+                _ => Color::Cyan,
+            };
+            let title = Line::from(format!(
+                " Review · {} against {} · {} ",
+                review.branch,
+                review.base,
+                plural(review.result.findings.len() as u64, "finding")
+            ))
+            .bold()
+            .fg(Color::Magenta);
+            let block = panel("", Color::Magenta).title(title);
+            let width = area.width.saturating_sub(4).max(10) as usize;
+            let selected = state.selected().unwrap_or(0);
+            match (detail, review.result.findings.get(selected)) {
+                (Some(scroll), Some(f)) => {
+                    let place = f.line.map_or(f.file.clone(), |l| format!("{}:{l}", f.file));
+                    let mut lines = vec![
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", f.severity),
+                                Style::new()
+                                    .fg(Color::Black)
+                                    .bg(severity_color(&f.severity)),
+                            ),
+                            Span::styled(format!("  {place}"), Style::new().bold()),
+                        ]),
+                        Line::default(),
+                    ];
+                    for chunk in crate::app::textwrap(&f.comment, width) {
+                        lines.push(Line::from(chunk));
+                    }
+                    if let Some(s) = f.suggestion.as_deref().filter(|s| !s.trim().is_empty()) {
+                        lines.push(Line::default());
+                        lines.push(Line::from(Span::styled(
+                            "Suggested change",
+                            Style::new().bold(),
+                        )));
+                        for l in s.lines() {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {l}"),
+                                Style::new().fg(Color::Green),
+                            )));
+                        }
+                    }
+                    if let Some(line) = f.line {
+                        let context = crate::review::context(&review.worktree, &f.file, line, 6);
+                        if !context.is_empty() {
+                            lines.push(Line::default());
+                            lines.push(Line::from(Span::styled(
+                                format!("{place} in the branch"),
+                                Style::new().bold(),
+                            )));
+                            for l in context {
+                                let style = if l.starts_with('▶') {
+                                    Style::new().fg(Color::Yellow)
+                                } else {
+                                    dim()
+                                };
+                                lines.push(Line::from(Span::styled(l, style)));
+                            }
+                        }
+                    }
+                    let max = (lines.len() as u16).saturating_sub(area.height.saturating_sub(2));
+                    *scroll = (*scroll).min(max);
+                    let block = block.title_bottom(
+                        Line::from(" Tab copy the comment · ↑/↓ scroll · Esc back to the list ")
+                            .right_aligned(),
+                    );
+                    frame.render_widget(
+                        Paragraph::new(lines)
+                            .block(block)
+                            .wrap(Wrap { trim: false })
+                            .scroll((*scroll, 0)),
+                        area,
+                    );
+                }
+                _ => {
+                    let [top, list_area] = Layout::vertical([
+                        Constraint::Length(
+                            (crate::app::textwrap(&review.result.summary, width).len() as u16 + 2)
+                                .min(8),
+                        ),
+                        Constraint::Min(3),
+                    ])
+                    .areas(block.inner(area));
+                    frame.render_widget(
+                        block.title_bottom(
+                            Line::from(
+                                " Enter details · Tab copy · e export · v read the session · D remove worktree · Esc close ",
+                            )
+                            .right_aligned(),
+                        ),
+                        area,
+                    );
+                    frame.render_widget(
+                        Paragraph::new(review.result.summary.clone()).wrap(Wrap { trim: true }),
+                        top,
+                    );
+                    if review.result.findings.is_empty() {
+                        frame.render_widget(
+                            Paragraph::new("Nothing worth a comment.").style(dim()),
+                            list_area,
+                        );
+                    } else {
+                        let items: Vec<ListItem> = review
+                            .result
+                            .findings
+                            .iter()
+                            .map(|f| {
+                                let place =
+                                    f.line.map_or(f.file.clone(), |l| format!("{}:{l}", f.file));
+                                let first = f.comment.lines().next().unwrap_or_default();
+                                ListItem::new(vec![
+                                    Line::from(vec![
+                                        Span::styled(
+                                            format!("{:<7}", f.severity),
+                                            Style::new().fg(severity_color(&f.severity)).bold(),
+                                        ),
+                                        Span::styled(place, Style::new().bold()),
+                                    ]),
+                                    Line::from(Span::styled(format!("       {first}"), dim())),
+                                ])
+                            })
+                            .collect();
+                        let list = List::new(items)
+                            .highlight_style(Style::new().bg(HIGHLIGHT))
+                            .highlight_symbol("▶ ")
+                            .highlight_spacing(HighlightSpacing::Always);
+                        frame.render_stateful_widget(list, list_area, state);
+                    }
+                }
+            }
         }
         Some(Popup::Palette {
             commands,

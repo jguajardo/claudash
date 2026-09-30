@@ -77,7 +77,9 @@ const VIEWS: &[ViewHelp] = &[
         shows: "Every repository your sessions ran in, with all its checkouts (the main one and its \
                 worktrees) and their git state, how many sessions each has and which are open. On \
                 top, problems: open sessions sharing a folder, the same file edited by two open \
-                sessions, worktrees with work but no session, and worktrees that no longer exist.",
+                sessions, worktrees with work but no session, and worktrees that no longer exist. \
+                From here, b reviews a branch: claudash fetches, checks it out in a worktree of its \
+                own and hands the review to Claude Code, then lists the findings by file and line.",
         contexts: &[Context::Projects],
     },
     ViewHelp {
@@ -197,6 +199,8 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         "Plugin toggles run `claude plugin enable/disable`.",
         "Background session actions run `claude attach`, `stop` and `respawn`.",
         "Worktree removal runs `git worktree remove` without --force; prune runs `git worktree prune`.",
+        "Branch reviews run `git fetch`, check the branch out in a worktree under claudash's cache \
+         (never in your checkout) and start Claude Code there. Nothing is posted anywhere.",
         "`claudash setup --apply` edits ~/.claude/settings.json after backing it up.",
         "Tags, notes, stars and the usage history are claudash's own files; Claude's are untouched.",
         "Resume, prompt and trash are refused while the session is open elsewhere.",

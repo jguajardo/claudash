@@ -54,6 +54,19 @@ On top, a **Problems** panel collects what can go wrong with several sessions at
 
 `D` removes the selected worktree with `git worktree remove` (never `--force`, so git refuses when it holds uncommitted changes), and `P` prunes the records of worktrees whose directory is gone. Both ask first.
 
+#### Review a branch
+
+`b` on a repository reviews one of its branches the way you'd review a pull request, with Claude Code doing the reviewing:
+
+1. claudash runs `git fetch` and lists the remote's branches, newest first, with their last commit, author, how many commits they add and whether you've reviewed them. Type to search.
+2. Pick one: it shows its size against the base (`develop`, or `main`, or `master`, whichever the remote has first) and asks how far to go:
+   - **Static review**: Claude Code reads the commits, the diff and the code around it, in the background. It can only read files and run `git log`, `git diff` and `git show`; nothing runs and nothing changes.
+   - **Review and run the tests** or **Review and start the project**: Claude Code opens in the terminal, reviews, then finds how to run the tests or start the project and does it, asking you before each command. The findings show when you exit.
+3. The branch is checked out, detached, in a worktree under claudash's cache (`~/.cache/claudash/reviews/`), so your checkout, your branch and your `git status` are never touched.
+4. The findings list each comment by file, line and severity, with a suggested change where it helps. `Enter` shows one with the code around that line, `Tab` copies it to paste into GitHub or Bitbucket, `e` exports the whole review to Markdown, `v` opens the review's Claude Code session to ask follow-up questions, and `D` removes the worktree. claudash never posts anything.
+
+Comments are written in the language of the branch's commit messages. A review uses your plan like any other Claude Code session.
+
 ### 4 · Logs
 
 Logs in one place: every MCP server of the selected project and every background session's output. It follows new lines every 2 seconds; scrolling up with `PgUp` pauses that and `End` resumes it. `/` filters lines, `x` shows errors only.
@@ -168,6 +181,7 @@ A letter means the same thing in every view where it works, `Enter` opens or run
 | `C` · `T` | sessions | Bulk cleanup · open the trash |
 | `S` · `R` | background | Stop · respawn |
 | `P` | projects | Prune missing worktrees |
+| `b` | projects | Review a branch with Claude Code |
 
 ### Configuration
 
@@ -210,6 +224,7 @@ These actions change things, and only run when you ask:
 - **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
 - **Stop, respawn or attach to a background session** (`S`, `R`, `Enter` in Activity): runs `claude stop`, `claude respawn` or `claude attach`.
 - **Remove or prune worktrees** (`D`, `P` in Projects): runs `git worktree remove` (without `--force`) or `git worktree prune`.
+- **Review a branch** (`b` in Projects): runs `git fetch`, adds a detached worktree under `~/.cache/claudash/reviews/` (or updates it for a second review), and runs Claude Code there: `claude -p` limited to reading files and `git log`/`diff`/`show` for a static review, or an interactive `claude` for the other modes. Reviews are saved in claudash's data directory.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 
 Resuming, prompting and trashing are refused while the session is open in Claude Code, because two processes writing one transcript interleave their messages.

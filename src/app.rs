@@ -30,6 +30,7 @@ use crate::{
     notify, paths,
     projects::{self, Model as ProjectsModel},
     prompts::{self, Prompt},
+    review::{self, Branch, DiffStat, Findings, Listing, Mode, Review},
     sessions::{self, Session},
     statusline,
     transcript::{self, Entry, Hit},
@@ -153,6 +154,31 @@ pub enum Popup {
     },
     /// Today's summary, exportable to Markdown.
     Summary { markdown: String, scroll: u16 },
+    /// A repository's remote branches, to pick one to review.
+    Branches {
+        repo: PathBuf,
+        repo_name: String,
+        listing: Listing,
+        /// When each branch was last reviewed (epoch seconds).
+        reviewed: HashMap<String, i64>,
+        query: String,
+        matches: Vec<usize>,
+        state: ListState,
+    },
+    /// How to review the chosen branch.
+    ReviewSetup {
+        task: ReviewTask,
+        stat: Result<DiffStat, String>,
+        last: Option<Review>,
+        /// Index into the options: the modes, then "show the last review".
+        choice: usize,
+    },
+    /// A review's findings; `detail` shows the selected one in full.
+    Findings {
+        review: Review,
+        state: ListState,
+        detail: Option<u16>,
+    },
     /// Every action, found by name and run by pressing its key.
     Palette {
         commands: Vec<&'static Binding>,
@@ -168,14 +194,41 @@ pub enum Popup {
     },
 }
 
+type BranchesJob = Job<Result<Listing, String>>;
+
+/// The worktree, and the findings when Claude ran headless.
+type ReviewJob = Job<Result<(PathBuf, Option<Findings>), String>>;
+
+/// A branch review being set up or running.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewTask {
+    /// The repository's main checkout.
+    pub repo: PathBuf,
+    pub repo_name: String,
+    pub branch: String,
+    /// `origin/<branch>`.
+    pub reference: String,
+    pub base: String,
+    pub mode: Mode,
+    pub session_id: String,
+}
+
 /// Actions that ask first.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Confirm {
     Trash(String),
     StopBackground(String),
     RespawnBackground(String),
-    RemoveWorktree { main: PathBuf, path: PathBuf },
+    RemoveWorktree {
+        main: PathBuf,
+        path: PathBuf,
+    },
     PruneWorktrees(PathBuf),
+    /// Remove a review's worktree.
+    RemoveReviewWorktree {
+        main: PathBuf,
+        path: PathBuf,
+    },
 }
 
 /// A line being typed in the footer.
@@ -575,6 +628,14 @@ pub struct App {
     /// View to return to when the help closes.
     help_from: View,
 
+    // Branch reviews.
+    /// Repository main checkout and name, and its branch listing.
+    branches_job: Option<(PathBuf, String, BranchesJob)>,
+    /// Preparing the worktree, then (static mode) Claude's review.
+    review_job: Option<(ReviewTask, ReviewJob)>,
+    /// An interactive review whose session is running in the terminal.
+    pending_review: Option<(ReviewTask, PathBuf)>,
+
     // Prompt history and daily summary.
     pub prompts: Vec<Prompt>,
     summary_job: Option<Job<String>>,
@@ -649,6 +710,9 @@ impl App {
             help_from: View::Sessions,
             prompts: Vec::new(),
             summary_job: None,
+            branches_job: None,
+            review_job: None,
+            pending_review: None,
             library: Library::load(),
             history: History::load(),
             monthly: false,
@@ -686,6 +750,7 @@ impl App {
             }
             if let Some((args, cwd)) = self.pending_command.take() {
                 self.run_claude(terminal, &args, &cwd)?;
+                self.finish_interactive_review();
             }
             if last_tick.elapsed() >= TICK_RATE {
                 self.on_tick();
@@ -960,6 +1025,13 @@ impl App {
                 match git::remove_worktree(&main, &path) {
                     Ok(()) => self
                         .show_flash(format!("Removed worktree {}", paths::display(&path)), false),
+                    Err(e) => self.show_flash(format!("git refused: {e}"), true),
+                }
+                self.git_at = None;
+            }
+            Confirm::RemoveReviewWorktree { main, path } => {
+                match git::remove_worktree(&main, &path) {
+                    Ok(()) => self.show_flash("Removed the review worktree", false),
                     Err(e) => self.show_flash(format!("git refused: {e}"), true),
                 }
                 self.git_at = None;
@@ -1250,6 +1322,13 @@ impl App {
             .and_then(|i| rows.get(i))
             .copied();
         match code {
+            KeyCode::Char('b') => {
+                let r = match row {
+                    Some(ProjectRow::Repo(r) | ProjectRow::Checkout(r, _)) => r,
+                    _ => return self.show_flash("Select a repository first", true),
+                };
+                self.open_branches(r);
+            }
             KeyCode::Char('D') => {
                 let Some(ProjectRow::Checkout(r, c)) = row else {
                     return;
@@ -1848,6 +1927,157 @@ impl App {
         let _ = std::fs::write(marker, "");
     }
 
+    // ---- Branch reviews ----------------------------------------------------
+
+    /// `b` in Projects: fetches and lists the repository's branches.
+    fn open_branches(&mut self, repo_index: usize) {
+        if self.branches_job.is_some() {
+            return;
+        }
+        let repo = &self.projects.repos[repo_index];
+        let main = repo.checkouts[0].path.clone();
+        let name = repo.name.clone();
+        let dir = main.clone();
+        self.branches_job = Some((main, name, Job::spawn(move || review::list(&dir))));
+    }
+
+    pub fn fetching_branches(&self) -> bool {
+        self.branches_job.is_some()
+    }
+
+    pub fn reviewing(&self) -> Option<&str> {
+        self.review_job
+            .as_ref()
+            .filter(|(task, _)| task.mode == Mode::Static)
+            .map(|(task, _)| task.branch.as_str())
+    }
+
+    /// Enter on a branch: its size against the base, and how to review it.
+    fn choose_branch(&mut self, repo: PathBuf, repo_name: String, base: String, branch: &Branch) {
+        let stat = review::diff_stat(&repo, &base, &branch.reference);
+        let last = review::saved(&repo)
+            .into_iter()
+            .find(|r| r.branch == branch.name);
+        self.popup = Some(Popup::ReviewSetup {
+            task: ReviewTask {
+                repo,
+                repo_name,
+                branch: branch.name.clone(),
+                reference: branch.reference.clone(),
+                base,
+                mode: Mode::Static,
+                session_id: uuid::Uuid::new_v4().to_string(),
+            },
+            stat,
+            last,
+            choice: 0,
+        });
+    }
+
+    /// Makes the worktree and, in static mode, runs the review, off the UI thread.
+    fn start_review(&mut self, task: ReviewTask) {
+        if self.review_job.is_some() {
+            return self.show_flash("A review is already running", true);
+        }
+        let t = task.clone();
+        let job = Job::spawn(move || {
+            let worktree = review::prepare_worktree(&t.repo, &t.repo_name, &t.reference)?;
+            if t.mode != Mode::Static {
+                return Ok((worktree, None));
+            }
+            review::run_static(&worktree, &t.branch, &t.base, &t.session_id)
+                .map(|findings| (worktree, Some(findings)))
+        });
+        if task.mode == Mode::Static {
+            self.show_flash(
+                format!("Reviewing {} in the background…", task.branch),
+                false,
+            );
+        }
+        self.review_job = Some((task, job));
+    }
+
+    /// Saves a finished review and shows its findings.
+    fn show_review(&mut self, task: &ReviewTask, worktree: PathBuf, result: Findings) {
+        let review = Review {
+            session_id: task.session_id.clone(),
+            repo: task.repo.clone(),
+            branch: task.branch.clone(),
+            base: task.base.clone(),
+            worktree,
+            mode: task.mode,
+            at: chrono::Utc::now().timestamp(),
+            result,
+        };
+        if let Err(e) = review::save(&review) {
+            self.show_flash(format!("Could not save the review: {e}"), true);
+        }
+        self.popup = Some(Popup::Findings {
+            review,
+            state: ListState::default().with_selected(Some(0)),
+            detail: None,
+        });
+        self.git_at = None;
+    }
+
+    /// After an interactive review session: its findings, from its last reply.
+    fn finish_interactive_review(&mut self) {
+        let Some((task, worktree)) = self.pending_review.take() else {
+            return;
+        };
+        let Some(path) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == task.session_id)
+            .map(|s| s.path.clone())
+        else {
+            return self.show_flash("The review session wasn't saved; nothing to list", true);
+        };
+        let replies = transcript::load(&path).unwrap_or_default();
+        let found = replies
+            .iter()
+            .rev()
+            .filter(|e| e.kind == transcript::Kind::Assistant)
+            .find_map(|e| review::from_reply(&e.text));
+        match found {
+            Some(result) => self.show_review(&task, worktree, result),
+            None => self.show_flash(
+                "No review found in the session's replies; read it with v in Sessions",
+                true,
+            ),
+        }
+    }
+
+    fn copy_finding(&mut self, review: &Review, i: usize) {
+        let Some(f) = review.result.findings.get(i) else {
+            return;
+        };
+        let place = f.line.map_or(f.file.clone(), |l| format!("{}:{l}", f.file));
+        let mut text = format!("{place}\n{}", f.comment);
+        if let Some(s) = f.suggestion.as_deref().filter(|s| !s.trim().is_empty()) {
+            text.push_str(&format!("\n\n```suggestion\n{}\n```", s.trim_end()));
+        }
+        match prompts::copy_to_clipboard(&text) {
+            Ok(()) => self.show_flash(format!("Copied the comment on {place}"), false),
+            Err(e) => self.show_flash(format!("Could not copy: {e}"), true),
+        }
+    }
+
+    fn export_review(&mut self, review: &Review) {
+        let result = exports_dir().and_then(|dir| {
+            let path = dir.join(format!(
+                "{}-review-{}.md",
+                chrono::Local::now().format("%Y-%m-%d"),
+                review.branch.replace('/', "-")
+            ));
+            std::fs::write(&path, review::markdown(review)).map(|()| path)
+        });
+        match result {
+            Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
+            Err(e) => self.show_flash(format!("Could not export: {e}"), true),
+        }
+    }
+
     /// Shows a view, doing what it needs when it opens.
     pub fn switch_view(&mut self, view: View) {
         match view {
@@ -2211,6 +2441,67 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some((repo, name, job)) = &self.branches_job
+            && let Some(result) = job.poll()
+        {
+            let (repo, repo_name) = (repo.clone(), name.clone());
+            self.branches_job = None;
+            match result.unwrap_or_else(|()| Err("No result".into())) {
+                Ok(listing) => {
+                    if let Some(e) = &listing.fetch_error {
+                        self.show_flash(
+                            format!("git fetch failed, showing known branches: {e}"),
+                            true,
+                        );
+                    }
+                    let reviewed = review::saved(&repo)
+                        .into_iter()
+                        .rev()
+                        .map(|r| (r.branch, r.at))
+                        .collect();
+                    let matches = (0..listing.branches.len()).collect();
+                    self.popup = Some(Popup::Branches {
+                        repo,
+                        repo_name,
+                        listing,
+                        reviewed,
+                        query: String::new(),
+                        matches,
+                        state: ListState::default().with_selected(Some(0)),
+                    });
+                }
+                Err(e) => self.show_flash(e, true),
+            }
+        }
+
+        if let Some((task, job)) = &self.review_job
+            && let Some(result) = job.poll()
+        {
+            let task = task.clone();
+            self.review_job = None;
+            match result.unwrap_or_else(|()| Err("No result".into())) {
+                Ok((worktree, Some(findings))) => {
+                    self.alert(
+                        "Review ready",
+                        &format!("{} has been reviewed", task.branch),
+                    );
+                    self.reload_sessions();
+                    self.show_review(&task, worktree, findings);
+                }
+                Ok((worktree, None)) => {
+                    let args = review::interactive_args(
+                        task.mode,
+                        &task.branch,
+                        &task.base,
+                        &task.session_id,
+                    );
+                    self.pending_command = Some((args, worktree.clone()));
+                    self.pending_review = Some((task, worktree));
+                }
+                Err(e) => self.show_flash(format!("Review of {}: {e}", task.branch), true),
+            }
+        }
+
         if let Some(job) = &self.summary_job
             && let Some(result) = job.poll()
         {
@@ -2691,6 +2982,136 @@ impl App {
 
     fn handle_popup_key(&mut self, code: KeyCode) {
         match &mut self.popup {
+            Some(Popup::Branches {
+                repo,
+                repo_name,
+                listing,
+                query,
+                matches,
+                state,
+                ..
+            }) => match code {
+                KeyCode::Esc => self.popup = None,
+                KeyCode::Down if !matches.is_empty() => {
+                    let next = state
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(matches.len() - 1));
+                    state.select(Some(next));
+                }
+                KeyCode::Up => state.select_previous(),
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    *matches = branch_matches(&listing.branches, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    *matches = branch_matches(&listing.branches, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Enter => {
+                    let Some(branch) = state
+                        .selected()
+                        .and_then(|i| matches.get(i))
+                        .map(|&i| listing.branches[i].clone())
+                    else {
+                        return;
+                    };
+                    let Some(base) = listing.base.clone() else {
+                        return self.show_flash(
+                            "No develop, main or master branch on the remote to review against",
+                            true,
+                        );
+                    };
+                    let (repo, repo_name) = (repo.clone(), repo_name.clone());
+                    self.choose_branch(repo, repo_name, base, &branch);
+                }
+                _ => {}
+            },
+            Some(Popup::ReviewSetup {
+                task, last, choice, ..
+            }) => {
+                let options = Mode::ALL.len() + usize::from(last.is_some());
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                    KeyCode::Down | KeyCode::Char('j') => *choice = (*choice + 1).min(options - 1),
+                    KeyCode::Up | KeyCode::Char('k') => *choice = choice.saturating_sub(1),
+                    KeyCode::Enter => {
+                        if *choice < Mode::ALL.len() {
+                            let mut task = task.clone();
+                            task.mode = Mode::ALL[*choice];
+                            self.popup = None;
+                            self.start_review(task);
+                        } else if let Some(review) = last.clone() {
+                            self.popup = Some(Popup::Findings {
+                                review,
+                                state: ListState::default().with_selected(Some(0)),
+                                detail: None,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(Popup::Findings {
+                review,
+                state,
+                detail,
+            }) => {
+                let n = review.result.findings.len();
+                let selected = state.selected().unwrap_or(0);
+                match (code, detail.as_mut()) {
+                    (KeyCode::Esc | KeyCode::Char('q'), Some(_)) => *detail = None,
+                    (KeyCode::Esc | KeyCode::Char('q'), None) => self.popup = None,
+                    (KeyCode::Down | KeyCode::Char('j'), Some(scroll)) => {
+                        *scroll = scroll.saturating_add(1)
+                    }
+                    (KeyCode::Up | KeyCode::Char('k'), Some(scroll)) => {
+                        *scroll = scroll.saturating_sub(1)
+                    }
+                    (KeyCode::Down | KeyCode::Char('j'), None) if n > 0 => {
+                        state.select(Some((selected + 1).min(n - 1)))
+                    }
+                    (KeyCode::Up | KeyCode::Char('k'), None) => state.select_previous(),
+                    (KeyCode::Enter, None) if n > 0 => *detail = Some(0),
+                    (KeyCode::Tab, _) => {
+                        let review = review.clone();
+                        self.copy_finding(&review, selected);
+                    }
+                    (KeyCode::Char('e'), _) => {
+                        let review = review.clone();
+                        self.export_review(&review);
+                    }
+                    (KeyCode::Char('v'), _) => {
+                        let id = review.session_id.clone();
+                        self.popup = None;
+                        self.reload_sessions();
+                        if self.sessions.iter().any(|s| s.id == id) {
+                            self.open_transcript(&id, None, None);
+                        } else {
+                            self.show_flash("The review's session is gone", true);
+                        }
+                    }
+                    (KeyCode::Char('D'), _) => {
+                        let (main, path) = (review.repo.clone(), review.worktree.clone());
+                        if !path.exists() {
+                            return self.show_flash("Its worktree is already gone", false);
+                        }
+                        self.popup = Some(Popup::Confirm {
+                            title: "Remove review worktree".into(),
+                            lines: vec![
+                                format!("Remove {}?", paths::display(&path)),
+                                String::new(),
+                                "The review and its session are kept. This runs".into(),
+                                "`git worktree remove`, which refuses if files changed.".into(),
+                            ],
+                            yes: "remove".into(),
+                            action: Confirm::RemoveReviewWorktree { main, path },
+                        });
+                    }
+                    _ => {}
+                }
+            }
             Some(Popup::Palette {
                 commands,
                 query,
@@ -3019,6 +3440,20 @@ impl App {
 }
 
 /// `<documents>/claudash-exports/` (or `~/claudash-exports/`), created if needed.
+/// Branches whose name, subject or author contain every word of `query`.
+fn branch_matches(branches: &[Branch], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    branches
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            let text = format!("{} {} {}", b.name, b.subject, b.author).to_lowercase();
+            words.iter().all(|w| text.contains(w.as_str()))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn exports_dir() -> io::Result<PathBuf> {
     let dir = dirs::document_dir()
         .or_else(dirs::home_dir)
@@ -3249,6 +3684,69 @@ mod tests {
                                 markdown: "# Title\n\n- a line\n".repeat(20),
                                 scroll: u16::MAX,
                             }),
+                            5 if view == View::Projects => Some(Popup::Branches {
+                                repo: PathBuf::from("/r"),
+                                repo_name: "r".into(),
+                                listing: Listing {
+                                    base: Some("origin/develop".into()),
+                                    branches: vec![Branch {
+                                        name: "feature/a-very-long-branch-name".into(),
+                                        reference: "origin/feature/x".into(),
+                                        subject: "Add a thing".into(),
+                                        author: "Someone".into(),
+                                        when: 0,
+                                        ahead: 3,
+                                    }],
+                                    fetch_error: None,
+                                },
+                                reviewed: HashMap::from([(
+                                    "feature/a-very-long-branch-name".to_string(),
+                                    0,
+                                )]),
+                                query: "feat".into(),
+                                matches: vec![0],
+                                state: ListState::default().with_selected(Some(0)),
+                            }),
+                            5 if view == View::Activity || view == View::Inspect => {
+                                let review = Review {
+                                    session_id: "s".into(),
+                                    repo: PathBuf::from("/r"),
+                                    branch: "feature/x".into(),
+                                    base: "origin/develop".into(),
+                                    worktree: PathBuf::from("/nonexistent"),
+                                    mode: Mode::Static,
+                                    at: 0,
+                                    result: Findings {
+                                        summary: "A summary that goes on. ".repeat(10),
+                                        findings: vec![review::Finding {
+                                            file: "src/a.rs".into(),
+                                            line: Some(42),
+                                            severity: "high".into(),
+                                            comment: "A comment. ".repeat(30),
+                                            suggestion: Some("let x = 1;\nlet y = 2;".into()),
+                                        }],
+                                    },
+                                };
+                                Some(Popup::Findings {
+                                    review,
+                                    state: ListState::default().with_selected(Some(0)),
+                                    detail: (view == View::Inspect).then_some(u16::MAX),
+                                })
+                            }
+                            5 if view == View::Ecosystem => Some(Popup::ReviewSetup {
+                                task: ReviewTask {
+                                    repo: PathBuf::from("/r"),
+                                    repo_name: "r".into(),
+                                    branch: "feature/x".into(),
+                                    reference: "origin/feature/x".into(),
+                                    base: "origin/develop".into(),
+                                    mode: Mode::Static,
+                                    session_id: "s".into(),
+                                },
+                                stat: Ok(DiffStat::default()),
+                                last: None,
+                                choice: 2,
+                            }),
                             5 if view == View::Help => {
                                 let commands = keys::commands(Context::Sessions, &[Context::Logs]);
                                 let matches = (0..commands.len()).collect();
@@ -3429,6 +3927,7 @@ mod tests {
             locked: false,
             prunable,
             claude_created: false,
+            review: false,
         };
         app.projects.repos = vec![Repo {
             name: "repo".into(),

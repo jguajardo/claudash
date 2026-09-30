@@ -20,6 +20,8 @@ pub struct Checkout {
     pub prunable: bool,
     /// Created by Claude Code (`claude --worktree`, subagents, background sessions).
     pub claude_created: bool,
+    /// A branch review's worktree, made by claudash.
+    pub review: bool,
 }
 
 impl Checkout {
@@ -99,6 +101,8 @@ pub fn build(dirs: &[PathBuf]) -> (Model, Statuses) {
                     locked: w.locked,
                     prunable: w.prunable,
                     claude_created: w.path.to_string_lossy().contains("/.claude/worktrees/"),
+                    review: crate::review::worktrees_dir()
+                        .is_some_and(|dir| w.path.starts_with(dir)),
                 }
             })
             .collect();

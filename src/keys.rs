@@ -279,6 +279,13 @@ pub const BINDINGS: &[Binding] = &[
     ),
     key(
         Projects,
+        "b",
+        "review a branch: fetch, pick one, and Claude Code reviews it in a worktree of its own",
+        Some("review branch"),
+        ch('b'),
+    ),
+    key(
+        Projects,
         "D",
         "remove the worktree (git worktree remove, asks first; git refuses if it has work)",
         Some("remove worktree"),
