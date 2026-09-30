@@ -1,7 +1,7 @@
 //! Application state, key handling and background work.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -27,6 +27,7 @@ use crate::{
     library::{self, Library, Trashed},
     mcp::{self, McpResult, McpStatus},
     notify, paths,
+    projects::{self, Model as ProjectsModel},
     sessions::{self, Session},
     statusline,
     transcript::{self, Entry, Hit},
@@ -53,6 +54,8 @@ const PLAN_ALERTS: [f64; 2] = [80.0, 95.0];
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Dashboard,
+    /// Repositories, their checkouts and worktrees, and what's wrong.
+    Projects,
     Ecosystem,
     Usage,
     /// A session's conversation, full screen.
@@ -221,6 +224,30 @@ impl TranscriptView {
         };
         self.jump_to = Some(self.matches[self.match_pos]);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectRow {
+    Repo(usize),
+    Checkout(usize, usize),
+    Loose(usize),
+}
+
+/// Something across projects that deserves attention.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Problem {
+    /// Two or more open sessions work in the same checkout.
+    SharedFolder { dir: PathBuf, sessions: Vec<String> },
+    /// Two or more open sessions edited the same file in the last day.
+    SameFile { file: String, sessions: Vec<String> },
+    /// A worktree with uncommitted or unpushed work and no open session.
+    IdleWorktree {
+        path: PathBuf,
+        changed: usize,
+        ahead: u32,
+    },
+    /// A worktree whose directory is gone.
+    MissingWorktree { path: PathBuf },
 }
 
 /// Uses per skill, subagent type, MCP server and command.
@@ -405,7 +432,11 @@ pub struct App {
     pub analyses: analysis::Cache,
     analysis_job: Option<Job<analysis::Cache>>,
     pub git: HashMap<PathBuf, Option<git::Status>>,
-    git_job: Option<Job<HashMap<PathBuf, Option<git::Status>>>>,
+    git_job: Option<Job<(ProjectsModel, projects::Statuses)>>,
+    pub projects: ProjectsModel,
+    pub projects_state: ListState,
+    /// Show only sessions of this exact folder (set from the Projects view).
+    pub folder_filter: Option<PathBuf>,
     git_at: Option<Instant>,
     /// Inspector scroll.
     pub inspect_scroll: u16,
@@ -469,6 +500,9 @@ impl App {
             analysis_job: None,
             git: HashMap::new(),
             git_job: None,
+            projects: ProjectsModel::default(),
+            projects_state: ListState::default(),
+            folder_filter: None,
             git_at: None,
             inspect_scroll: 0,
             doctor: None,
@@ -604,14 +638,139 @@ impl App {
         dirs.sort();
         dirs.dedup();
         self.git_at = Some(Instant::now());
-        self.git_job = Some(Job::spawn(move || {
-            dirs.into_iter()
-                .map(|d| {
-                    let status = git::status(&d);
-                    (d, status)
-                })
-                .collect()
-        }));
+        self.git_job = Some(Job::spawn(move || projects::build(&dirs)));
+    }
+
+    /// Rows of the Projects view: each repository followed by its checkouts,
+    /// then folders outside git.
+    pub fn project_rows(&self) -> Vec<ProjectRow> {
+        let mut rows = Vec::new();
+        for (r, repo) in self.projects.repos.iter().enumerate() {
+            rows.push(ProjectRow::Repo(r));
+            rows.extend((0..repo.checkouts.len()).map(|c| ProjectRow::Checkout(r, c)));
+        }
+        rows.extend((0..self.projects.loose.len()).map(ProjectRow::Loose));
+        rows
+    }
+
+    /// Folder of a Projects row, when it has one.
+    pub fn row_folder(&self, row: ProjectRow) -> Option<&Path> {
+        match row {
+            ProjectRow::Repo(r) => self.projects.repos[r]
+                .checkouts
+                .first()
+                .map(|c| c.path.as_path()),
+            ProjectRow::Checkout(r, c) => Some(&self.projects.repos[r].checkouts[c].path),
+            ProjectRow::Loose(l) => Some(&self.projects.loose[l]),
+        }
+    }
+
+    /// Sessions that ran in `dir`, newest first.
+    pub fn sessions_in(&self, dir: &Path) -> Vec<&Session> {
+        self.sessions
+            .iter()
+            .filter(|s| s.cwd.as_deref() == Some(dir))
+            .collect()
+    }
+
+    /// Things worth your attention across projects.
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+        let title = |id: &str| {
+            self.sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| id.chars().take(8).collect())
+        };
+        let open: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| self.live.contains_key(&s.id))
+            .collect();
+
+        let mut by_folder: BTreeMap<&Path, Vec<String>> = BTreeMap::new();
+        for s in &open {
+            if let Some(dir) = &s.cwd {
+                by_folder.entry(dir).or_default().push(title(&s.id));
+            }
+        }
+        for (dir, sessions) in by_folder.into_iter().filter(|(_, v)| v.len() >= 2) {
+            problems.push(Problem::SharedFolder {
+                dir: dir.to_path_buf(),
+                sessions,
+            });
+        }
+
+        // The same file edited by two open sessions in the last day.
+        let recent = chrono::Local::now() - chrono::Duration::hours(24);
+        let mut by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for s in &open {
+            let Some(a) = self.analysis(s) else {
+                continue;
+            };
+            for (file, at) in &a.edits {
+                if at.is_none_or(|t| t >= recent) {
+                    by_file.entry(file).or_default().push(title(&s.id));
+                }
+            }
+        }
+        for (file, sessions) in by_file.into_iter().filter(|(_, v)| v.len() >= 2) {
+            problems.push(Problem::SameFile {
+                file: file.to_string(),
+                sessions,
+            });
+        }
+
+        for repo in &self.projects.repos {
+            for c in repo.checkouts.iter().filter(|c| !c.main) {
+                if c.prunable {
+                    problems.push(Problem::MissingWorktree {
+                        path: c.path.clone(),
+                    });
+                } else if c.has_work() && self.open_in_folder(&c.path) == 0 {
+                    let s = c.status.as_ref();
+                    problems.push(Problem::IdleWorktree {
+                        path: c.path.clone(),
+                        changed: s.map_or(0, |s| s.changed),
+                        ahead: s.map_or(0, |s| s.ahead),
+                    });
+                }
+            }
+        }
+        problems
+    }
+
+    fn handle_projects_key(&mut self, code: KeyCode) {
+        let rows = self.project_rows();
+        match code {
+            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Down | KeyCode::Char('j') if !rows.is_empty() => {
+                let next = self
+                    .projects_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(rows.len() - 1));
+                self.projects_state.select(Some(next));
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.projects_state.select_previous(),
+            KeyCode::Enter => {
+                let Some(dir) = self
+                    .projects_state
+                    .selected()
+                    .and_then(|i| rows.get(i))
+                    .and_then(|&row| self.row_folder(row))
+                    .map(Path::to_path_buf)
+                else {
+                    return;
+                };
+                self.folder_filter = Some(dir);
+                self.filter.clear();
+                self.apply_filter(None);
+                self.view = View::Dashboard;
+                self.focus = Focus::Sessions;
+            }
+            _ => {}
+        }
     }
 
     pub fn analysis(&self, session: &Session) -> Option<&Analysis> {
@@ -793,6 +952,11 @@ impl App {
             .sessions
             .iter()
             .enumerate()
+            .filter(|(_, s)| {
+                self.folder_filter
+                    .as_ref()
+                    .is_none_or(|dir| s.cwd.as_ref() == Some(dir))
+            })
             .filter(|(_, s)| {
                 query.is_empty()
                     || session_matches(s, &query)
@@ -1363,8 +1527,13 @@ impl App {
         if let Some(job) = &self.git_job
             && let Some(result) = job.poll()
         {
-            if let Ok(git) = result {
+            if let Ok((model, git)) = result {
+                self.projects = model;
                 self.git = git;
+                let rows = self.project_rows().len();
+                if self.projects_state.selected().is_none_or(|i| i >= rows) {
+                    self.projects_state.select((rows > 0).then_some(0));
+                }
             }
             self.git_job = None;
         }
@@ -1534,8 +1703,9 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return self.should_quit = true,
             KeyCode::Char('1') => return self.view = View::Dashboard,
-            KeyCode::Char('2') => return self.view = View::Ecosystem,
-            KeyCode::Char('3') => return self.view = View::Usage,
+            KeyCode::Char('2') => return self.view = View::Projects,
+            KeyCode::Char('4') => return self.view = View::Ecosystem,
+            KeyCode::Char('5') => return self.view = View::Usage,
             KeyCode::Char('r') => return self.refresh_all(),
             KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
@@ -1552,6 +1722,7 @@ impl App {
                 _ => {}
             },
             View::Transcript => self.handle_transcript_key(key.code),
+            View::Projects => self.handle_projects_key(key.code),
             View::Inspect => match key.code {
                 KeyCode::Esc => self.view = View::Dashboard,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1639,6 +1810,11 @@ impl App {
         match code {
             // Esc clears the filter first; with no filter it quits.
             KeyCode::Esc if !self.filter.is_empty() => self.set_filter(String::new()),
+            KeyCode::Esc if self.folder_filter.is_some() => {
+                self.folder_filter = None;
+                let keep = self.selected_session().map(|s| s.id.clone());
+                self.apply_filter(keep);
+            }
             KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('/') => self.input = Some(Input::Search),
             KeyCode::Enter => self.request_resume(),
@@ -2147,6 +2323,7 @@ mod tests {
         for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
             for view in [
                 View::Dashboard,
+                View::Projects,
                 View::Ecosystem,
                 View::Usage,
                 View::Transcript,
@@ -2255,5 +2432,90 @@ mod tests {
         assert_eq!(counts.plugin("superpowers"), 4);
         assert_eq!(counts.plugin("context7"), 2);
         assert_eq!(counts.plugin("vercel"), 0);
+    }
+
+    #[test]
+    fn finds_shared_folders_same_files_and_forgotten_worktrees() {
+        use crate::projects::{Checkout, Repo};
+        let mut app = App::new(1_000_000, false);
+        let dir = PathBuf::from("/repo");
+        let session = |id: &str| Session {
+            id: id.into(),
+            path: PathBuf::from(format!("/t/{id}.jsonl")),
+            title: format!("title {id}"),
+            project_path: "~/repo".into(),
+            cwd: Some(dir.clone()),
+            git_branch: None,
+            modified: std::time::SystemTime::now(),
+            size: 0,
+            tokens: Default::default(),
+        };
+        app.sessions = vec![session("a"), session("b")];
+        app.live = ["a", "b"]
+            .iter()
+            .map(|id| {
+                let live = LiveSession {
+                    session_id: id.to_string(),
+                    status: "busy".into(),
+                    ..Default::default()
+                };
+                (id.to_string(), live)
+            })
+            .collect();
+        for id in ["a", "b"] {
+            let mut analysis = Analysis::default();
+            analysis.edits.insert("/repo/src/auth.rs".into(), None);
+            app.analyses.insert(
+                PathBuf::from(format!("/t/{id}.jsonl")),
+                (
+                    std::time::SystemTime::now(),
+                    0,
+                    std::sync::Arc::new(analysis),
+                ),
+            );
+        }
+        let checkout = |path: &str, main: bool, changed: usize, prunable: bool| Checkout {
+            path: PathBuf::from(path),
+            branch: None,
+            status: (!prunable).then(|| git::Status {
+                changed,
+                ..Default::default()
+            }),
+            main,
+            locked: false,
+            prunable,
+            claude_created: false,
+        };
+        app.projects.repos = vec![Repo {
+            name: "repo".into(),
+            checkouts: vec![
+                checkout("/repo", true, 0, false),
+                checkout("/repo/.claude/worktrees/x", false, 3, false),
+                checkout("/gone", false, 0, true),
+            ],
+        }];
+
+        let problems = app.problems();
+        assert!(
+            problems.iter().any(
+                |p| matches!(p, Problem::SharedFolder { sessions, .. } if sessions.len() == 2)
+            )
+        );
+        assert!(
+            problems.iter().any(
+                |p| matches!(p, Problem::SameFile { file, .. } if file == "/repo/src/auth.rs")
+            )
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, Problem::IdleWorktree { changed: 3, .. }))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, Problem::MissingWorktree { .. }))
+        );
+        assert_eq!(problems.len(), 4);
     }
 }

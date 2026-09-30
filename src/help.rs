@@ -97,7 +97,21 @@ const VIEWS: &[ViewHelp] = &[
         ],
     },
     ViewHelp {
-        name: "2 · Ecosystem",
+        name: "2 · Projects",
+        shows: "Every repository your sessions ran in, with all its checkouts (the main one and its \
+                worktrees) and their git state, how many sessions each has and which are open. On \
+                top, problems: open sessions sharing a folder, the same file edited by two open \
+                sessions, worktrees with work but no session, and worktrees that no longer exist.",
+        keys: &[
+            ("↑/↓", "move"),
+            (
+                "Enter",
+                "show that folder's sessions in the Dashboard (Esc there shows all again)",
+            ),
+        ],
+    },
+    ViewHelp {
+        name: "4 · Ecosystem",
         shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
                 user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
                 days. Plugins show their always-on token cost per session, and the ones you never use \
@@ -112,7 +126,7 @@ const VIEWS: &[ViewHelp] = &[
         ],
     },
     ViewHelp {
-        name: "3 · Usage",
+        name: "5 · Usage",
         shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
                 projects. Kept beyond Claude Code's 30-day cleanup.",
         keys: &[("m", "days or months")],
@@ -178,7 +192,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     }
 
     out.push(heading("Everywhere"));
-    out.push(key("1 2 3", "switch view"));
+    out.push(key("1 2 4 5", "switch view"));
     out.push(key(
         "r",
         "reload sessions, re-check MCP servers and the ecosystem",

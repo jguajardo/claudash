@@ -12,6 +12,7 @@ mod library;
 mod mcp;
 mod notify;
 mod paths;
+mod projects;
 mod sessions;
 mod setup;
 mod statusline;

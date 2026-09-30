@@ -41,6 +41,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, app, header);
     match app.view {
         View::Dashboard => draw_dashboard(frame, app, body),
+        View::Projects => draw_projects(frame, app, body),
         View::Ecosystem => draw_ecosystem(frame, app, body),
         View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
@@ -129,8 +130,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(20), Constraint::Length(10)]).areas(area);
     let tabs = [
         (View::Dashboard, "1 Dashboard"),
-        (View::Ecosystem, "2 Ecosystem"),
-        (View::Usage, "3 Usage"),
+        (View::Projects, "2 Projects"),
+        (View::Ecosystem, "4 Ecosystem"),
+        (View::Usage, "5 Usage"),
     ];
     let mut spans = vec![
         Span::styled(
@@ -203,6 +205,12 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if !app.filter.is_empty() {
         block = block.title(Line::from(format!(" filter: {} ", app.filter)).fg(Color::Yellow));
+    }
+    if let Some(dir) = &app.folder_filter {
+        block = block.title(
+            Line::from(format!(" folder: {} · Esc shows all ", paths::display(dir)))
+                .fg(Color::Yellow),
+        );
     }
 
     if app.visible.is_empty() {
@@ -1255,6 +1263,317 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+// ---- Projects ----------------------------------------------------------------
+
+fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
+    use crate::app::Problem;
+    let red = Style::new().fg(Color::Red).bold();
+    let yellow = Style::new().fg(Color::Yellow);
+    match problem {
+        Problem::SharedFolder { dir, sessions } => Line::from(vec![
+            Span::styled("⚠ ", red),
+            Span::styled(
+                format!(
+                    "{} open sessions share {}",
+                    sessions.len(),
+                    paths::display(dir)
+                ),
+                red,
+            ),
+            Span::styled(
+                format!(": {} · their edits can collide", sessions.join(", ")),
+                dim(),
+            ),
+        ]),
+        Problem::SameFile { file, sessions } => Line::from(vec![
+            Span::styled("⚠ ", red),
+            Span::styled(paths::display(std::path::Path::new(file)), red),
+            Span::styled(
+                format!(
+                    " edited by {} open sessions: {}",
+                    sessions.len(),
+                    sessions.join(", ")
+                ),
+                dim(),
+            ),
+        ]),
+        Problem::IdleWorktree {
+            path,
+            changed,
+            ahead,
+        } => {
+            let mut what = Vec::new();
+            if *changed > 0 {
+                what.push(format!("{changed} changed"));
+            }
+            if *ahead > 0 {
+                what.push(format!("{ahead} to push"));
+            }
+            Line::from(vec![
+                Span::styled("! ", yellow),
+                Span::styled(format!("worktree {}", paths::display(path)), yellow),
+                Span::styled(format!(": {} and no open session", what.join(", ")), dim()),
+            ])
+        }
+        Problem::MissingWorktree { path } => Line::from(vec![
+            Span::styled("· ", dim()),
+            Span::styled(
+                format!(
+                    "worktree {} no longer exists (git worktree prune)",
+                    paths::display(path)
+                ),
+                dim(),
+            ),
+        ]),
+    }
+}
+
+/// "3 changed ↑2 ↓1" or "clean".
+fn git_summary(status: Option<&crate::git::Status>) -> Vec<Span<'static>> {
+    let Some(s) = status else {
+        return vec![Span::styled("no git data", dim())];
+    };
+    let mut spans = vec![if s.changed > 0 {
+        Span::styled(
+            format!("{} changed", s.changed),
+            Style::new().fg(Color::Yellow),
+        )
+    } else {
+        Span::styled("clean", Style::new().fg(Color::Green))
+    }];
+    if s.ahead > 0 {
+        spans.push(Span::styled(
+            format!(" ↑{}", s.ahead),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    if s.behind > 0 {
+        spans.push(Span::styled(
+            format!(" ↓{}", s.behind),
+            Style::new().fg(Color::Magenta),
+        ));
+    }
+    spans
+}
+
+fn draw_projects(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::app::ProjectRow;
+    let problems = app.problems();
+    let problems_height = (problems.len().max(1) as u16 + 2)
+        .min(area.height / 3)
+        .max(3);
+    let [problems_area, body] =
+        Layout::vertical([Constraint::Length(problems_height), Constraint::Min(5)]).areas(area);
+
+    let lines: Vec<Line> = if problems.is_empty() {
+        vec![Line::from(Span::styled(
+            "✓ No conflicts: open sessions each have their own folder, and no worktree has forgotten work",
+            Style::new().fg(Color::Green),
+        ))]
+    } else {
+        problems.iter().map(problem_line).collect()
+    };
+    let title = if problems.is_empty() {
+        "Problems"
+    } else {
+        "Problems · needs a look"
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(
+                title,
+                if problems.is_empty() {
+                    Color::Green
+                } else {
+                    Color::Red
+                },
+            )),
+        problems_area,
+    );
+
+    let [tree_area, detail_area] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
+    let rows = app.project_rows();
+    if rows.is_empty() {
+        let text = if app.projects.repos.is_empty() && app.projects.loose.is_empty() {
+            format!(
+                "{} Reading git state of your session folders…",
+                app.spinner()
+            )
+        } else {
+            "No session folders.".into()
+        };
+        frame.render_widget(message(text, panel("Repositories", Color::Cyan)), tree_area);
+        frame.render_widget(panel("Details", Color::Cyan), detail_area);
+        return;
+    }
+
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match *row {
+            ProjectRow::Repo(r) => {
+                let repo = &app.projects.repos[r];
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("▾ {}", repo.name),
+                        Style::new().fg(Color::LightMagenta).bold(),
+                    ),
+                    Span::styled(format!("  {} checkout(s)", repo.checkouts.len()), dim()),
+                ]))
+            }
+            ProjectRow::Checkout(r, c) => {
+                let repo = &app.projects.repos[r];
+                let co = &repo.checkouts[c];
+                let where_ = if co.main {
+                    "main checkout".to_string()
+                } else {
+                    let root = &repo.checkouts[0].path;
+                    co.path
+                        .strip_prefix(root)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| paths::display(&co.path))
+                };
+                let mut spans = vec![
+                    Span::styled("  ⎇ ", Style::new().fg(Color::Cyan)),
+                    Span::styled(
+                        co.branch.clone().unwrap_or_else(|| "detached".into()),
+                        Style::new().bold(),
+                    ),
+                    Span::styled(format!("  {where_}  "), dim()),
+                ];
+                if co.prunable {
+                    spans.push(Span::styled("missing", Style::new().fg(Color::DarkGray)));
+                } else {
+                    spans.extend(git_summary(co.status.as_ref()));
+                }
+                let open = app.open_in_folder(&co.path);
+                let total = app.sessions_in(&co.path).len();
+                if open > 0 {
+                    spans.push(Span::styled(
+                        format!("  ● {open} open"),
+                        Style::new().fg(if open >= 2 { Color::Red } else { Color::Green }),
+                    ));
+                }
+                if total > 0 {
+                    spans.push(Span::styled(
+                        format!("  {}", plural(total as u64, "session")),
+                        dim(),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            }
+            ProjectRow::Loose(l) => {
+                let dir = &app.projects.loose[l];
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("▪ {}", paths::display(dir)), Style::new().bold()),
+                    Span::styled(
+                        format!(
+                            "  not in git · {}",
+                            plural(app.sessions_in(dir).len() as u64, "session")
+                        ),
+                        dim(),
+                    ),
+                ]))
+            }
+        })
+        .collect();
+    let selected = app
+        .projects_state
+        .selected()
+        .and_then(|i| rows.get(i))
+        .copied();
+    render_list(
+        frame,
+        items,
+        panel("Repositories", Color::Cyan),
+        tree_area,
+        &mut app.projects_state,
+    );
+
+    // Details of the selected row.
+    let block = panel("Details", Color::Cyan);
+    let Some(dir) = selected
+        .and_then(|row| app.row_folder(row))
+        .map(|d| d.to_path_buf())
+    else {
+        frame.render_widget(block, detail_area);
+        return;
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        paths::display(&dir),
+        Style::new().bold(),
+    ))];
+    if let Some(co) = app.projects.checkout(&dir) {
+        let mut flags = Vec::new();
+        if co.main {
+            flags.push("main checkout");
+        } else {
+            flags.push("worktree");
+        }
+        if co.claude_created {
+            flags.push("created by Claude Code");
+        }
+        if co.locked {
+            flags.push("locked");
+        }
+        lines.push(Line::from(Span::styled(flags.join(" · "), dim())));
+        if let Some(st) = &co.status {
+            let mut spans = vec![Span::styled("git  ", dim())];
+            spans.push(Span::raw(
+                st.branch.clone().unwrap_or_else(|| "detached".into()),
+            ));
+            if let Some(up) = &st.upstream {
+                spans.push(Span::styled(format!(" → {up}"), dim()));
+            }
+            spans.push(Span::raw("  "));
+            spans.extend(git_summary(Some(st)));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::default());
+    let sessions = app.sessions_in(&dir);
+    lines.push(Line::from(Span::styled(
+        format!("Sessions ({})", sessions.len()),
+        Style::new().fg(Color::LightMagenta).bold(),
+    )));
+    if sessions.is_empty() {
+        lines.push(Line::from(Span::styled("  none", dim())));
+    }
+    for s in sessions {
+        let mut spans = vec![Span::raw(format!("  {}", s.title))];
+        match app.activity(&s.id) {
+            Some(Activity::NeedsYou) => spans.push(Span::styled(
+                "  ▲ needs you",
+                Style::new().fg(Color::Yellow),
+            )),
+            Some(Activity::Working) => {
+                spans.push(Span::styled("  ● working", Style::new().fg(Color::Green)))
+            }
+            Some(Activity::Waiting) => {
+                spans.push(Span::styled("  ● waiting", Style::new().fg(Color::Cyan)))
+            }
+            _ => {}
+        }
+        spans.push(Span::styled(
+            format!("  · {}", sessions::relative_age(s.modified)),
+            dim(),
+        ));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Enter shows these sessions in the Dashboard",
+        dim().italic(),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        detail_area,
+    );
+}
+
 // ---- Inspector ---------------------------------------------------------------
 
 /// Downsamples `values` to `width` buckets, keeping each bucket's peak.
@@ -1756,6 +2075,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
                     (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
+                    (View::Projects, _) => vec![
+                        key(" ↑/↓ "),
+                        hint(" move  "),
+                        key(" Enter "),
+                        hint(" sessions of this folder  "),
+                    ],
                     (View::Inspect, _) => vec![
                         key(" v "),
                         hint(" read conversation  "),

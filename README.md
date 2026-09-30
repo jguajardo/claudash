@@ -27,7 +27,18 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
   - **Cache diagnostics**: how much of the input was read from cache, flagged when cache writes dominate; with the status line, whether the cache is still warm and until when, its TTL, cache misses and their cause (such as `tools_changed` or `ttl_expired_5m`), and how many tokens the next reply re-caches once it goes cold.
   - **Plan usage**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
 
-### 2 · Ecosystem
+### 2 · Projects
+
+Every repository your sessions ran in, with all its checkouts (the main one and its worktrees) and their git state: branch, changed files, commits to push or pull, how many sessions each has and which are open. `Enter` shows a folder's sessions in the Dashboard.
+
+On top, a **Problems** panel collects what can go wrong with several sessions at once:
+
+- two open sessions working in the same folder, whose edits can collide;
+- the same file edited by two open sessions in the last day;
+- worktrees with uncommitted or unpushed work that no open session is using;
+- worktrees whose directory is gone.
+
+### 4 · Ecosystem
 
 Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin, with how often each skill, subagent and command was used in the last 30 days. Plugins show their projected always-on token cost per session from `claude plugin details` and how often anything they provide was used, so plugins that cost tokens in every session without being used stand out, with their total. `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
 
@@ -38,7 +49,7 @@ claudash export 6b1f3c2e > session.md       # by session ID or its first charact
 claudash export 6b1f3c2e -o session.md
 ```
 
-### 3 · Usage
+### 5 · Usage
 
 Plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Subagents are included.
 
@@ -104,7 +115,7 @@ claudash --help
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` | Dashboard, Ecosystem, Usage |
+| `1` `2` `4` `5` | Dashboard, Projects, Ecosystem, Usage |
 | `↑` `↓` / `j` `k` | Move |
 | `Enter` | Resume the session · open the MCP server's log · show details |
 | `/` | Search sessions (`Enter` keeps the filter, `Esc` clears it) · search inside the open conversation |
