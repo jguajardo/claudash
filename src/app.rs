@@ -1873,7 +1873,6 @@ impl App {
             })
             .collect();
         self.summary_job = Some(Job::spawn(move || crate::summary::build(inputs, today)));
-        self.show_flash("Building today's summary…", false);
     }
 
     pub fn summarizing(&self) -> bool {

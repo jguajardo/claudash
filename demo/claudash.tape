@@ -44,8 +44,18 @@ Sleep 400ms
 Tab
 Sleep 400ms
 
+# Activity: what open sessions are doing, and a live feed of tool calls.
+Type "3"
+Sleep 3.5s
+
+# Inspect a session: context per request, tools and failures, files.
+Type "i"
+Sleep 3.5s
+Escape
+Sleep 600ms
+
 # Ecosystem: skills, agents, commands, hooks, plugins with their token cost.
-Type "2"
+Type "4"
 Sleep 2s
 Right
 Sleep 900ms
@@ -54,22 +64,24 @@ Sleep 900ms
 Right
 Sleep 900ms
 Right
-Sleep 3s
+Sleep 2.5s
 
 # Usage: plan limits with forecast, tokens per day, top projects.
-Type "3"
-Sleep 3.5s
+Type "5"
+Sleep 3s
 
-# Back to the dashboard and search.
+# Back to the dashboard: search past prompts, then today's summary.
 Type "1"
 Sleep 800ms
-Type "/"
-Sleep 300ms
-Type "data"
-Sleep 1.5s
-Enter
-Sleep 1.5s
+Type "h"
+Sleep 800ms
+Type "commit"
+Sleep 2s
 Escape
-Sleep 1.5s
+Sleep 600ms
+Type "D"
+Sleep 3.5s
+Escape
+Sleep 1s
 Type "q"
 Sleep 500ms

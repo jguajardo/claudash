@@ -2,7 +2,7 @@
 
 `claudash.gif` in the main README is recorded with [VHS](https://github.com/charmbracelet/vhs) from made-up data, so it never shows anyone's real sessions.
 
-- `fixtures.sh` builds a fake Claude Code environment in `/tmp/demo`: sessions, instruction files, skills, plugins, status line and hook data, an MCP log, and a stand-in `claude` command that answers `mcp list`, `agents --json` and `plugin` queries.
+- `fixtures.sh` builds a fake Claude Code environment in `/tmp/demo`: sessions, instruction files, skills, plugins, status line and hook data, an MCP log, prompt history, subagents, and a stand-in `claude` command that answers `--version`, `mcp list`, `agents --json` and `plugin` queries.
 - `claudash.tape` runs claudash against it and records the GIF.
 
 To regenerate it (Linux, Docker):

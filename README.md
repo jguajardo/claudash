@@ -4,7 +4,7 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 
 > **Unofficial project.** claudash is not affiliated with, endorsed by or supported by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic.
 
-![claudash demo: sessions with "needs you" and "working" markers, an MCP server log, the ecosystem view and the usage view](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/claudash.gif)
+![claudash demo: sessions that need you, an MCP server log, live activity, a session inspector, the ecosystem and usage views, prompt history and a daily summary](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/claudash.gif)
 
 <sub>Recorded from made-up data with [VHS](https://github.com/charmbracelet/vhs); see [demo/](demo/).</sub>
 

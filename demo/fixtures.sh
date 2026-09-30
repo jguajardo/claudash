@@ -34,10 +34,30 @@ session() {
     i=1
     while [ "$i" -le "$requests" ]; do
         # Spread requests back over the session's lifetime, a few days at most.
-        at=$((last - (requests - i) * 5400))
-        read_tokens=$((context - 4000 + i * 37))
-        printf '{"type":"assistant","requestId":"req_%s_%d","timestamp":"%s","message":{"model":"claude-opus-5-5","usage":{"input_tokens":%d,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":%d}}}\n' \
-            "$id" "$i" "$(iso "$at")" $((3 + i % 5)) $((2500 + (i * 911) % 9000)) "$read_tokens" $((900 + (i * 577) % 4000)) >> "$file"
+        at=$((last - (requests - i) * 120))
+        # Context grows with each request; long sessions compact halfway.
+        half=$((requests / 2))
+        if [ "$requests" -ge 60 ] && [ "$i" -gt "$half" ]; then
+            [ "$i" -eq $((half + 1)) ] &&
+                printf '{"type":"system","subtype":"compact_boundary","timestamp":"%s"}\n' "$(iso "$at")" >> "$file"
+            read_tokens=$((30000 + (context - 30000) * (i - half) / half))
+        else
+            read_tokens=$((24000 + (context - 24000) * i / requests))
+        fi
+        case $((i % 6)) in
+            0) tool='"name":"Edit","input":{"file_path":"'"$DEMO/code/$project"'/src/auth.rs"}' ;;
+            1) tool='"name":"Bash","input":{"command":"cargo test --workspace"}' ;;
+            2) tool='"name":"Read","input":{"file_path":"'"$DEMO/code/$project"'/src/lib.rs"}' ;;
+            3) tool='"name":"Grep","input":{"pattern":"fn handle_"}' ;;
+            4) tool='"name":"mcp__github__search_issues","input":{"query":"is:open label:bug"}' ;;
+            *) tool='"name":"Write","input":{"file_path":"'"$DEMO/code/$project"'/tests/login.rs"}' ;;
+        esac
+        printf '{"type":"assistant","requestId":"req_%s_%d","timestamp":"%s","message":{"model":"claude-opus-5-5","usage":{"input_tokens":%d,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":%d},"content":[{"type":"tool_use","id":"tu_%d",%s}]}}\n' \
+            "$id" "$i" "$(iso "$at")" $((3 + i % 5)) $((2500 + (i * 911) % 9000)) "$read_tokens" $((900 + (i * 577) % 4000)) "$i" "$tool" >> "$file"
+        # Every seventh call fails, like a test run that doesn't pass yet.
+        if [ $((i % 7)) -eq 1 ]; then
+            printf '{"type":"user","timestamp":"%s","message":{"content":[{"type":"tool_result","tool_use_id":"tu_%d","is_error":true,"content":"test failed"}]}}\n' "$(iso "$at")" "$i" >> "$file"
+        fi
         i=$((i + 1))
     done
     printf '{"type":"cost-state","totalCostUSD":%d.%02d}\n' $((requests / 9)) $((requests * 7 % 100)) >> "$file"
@@ -56,6 +76,42 @@ session "$C" api-server main "Fix flaky integration tests" 7300 30 164000
 session "$D" data-pipeline main "Speed up the nightly ETL job" 190000 80 530000
 session "$E" cli-tool release/2.0 "Write the v2.0 changelog" 520000 26 92000
 session "$F" data-pipeline main "Migrate jobs to the new scheduler" 1300000 120 610000
+
+# Subagents of the OAuth session.
+sub_dir="$CLAUDE/projects/-tmp-demo-code-api-server/$A/subagents"
+mkdir -p "$sub_dir"
+n=0
+for agent in "Explore|Find every place that issues sessions|48000" \
+    "test-writer|Write tests for the OAuth callback|126000" \
+    "general-purpose|Review the token refresh flow|83000"; do
+    kind=${agent%%|*} rest=${agent#*|} what=${rest%%|*} tokens=${rest#*|}
+    n=$((n + 1))
+    printf '{"type":"assistant","isSidechain":true,"requestId":"sub_%d","timestamp":"%s","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":12,"cache_creation_input_tokens":4000,"cache_read_input_tokens":%d,"output_tokens":2100},"content":[{"type":"tool_use","id":"s%d","name":"Grep","input":{"pattern":"session"}}]}}\n' \
+        "$n" "$(iso $((NOW - 600 * n)))" "$tokens" "$n" > "$sub_dir/agent-$n.jsonl"
+    printf '{"agentType":"%s","description":"%s","model":"sonnet"}\n' "$kind" "$what" > "$sub_dir/agent-$n.meta.json"
+done
+
+# claudash has been opened before: no welcome popup.
+mkdir -p "$DEMO/.local/share/claudash"
+: > "$DEMO/.local/share/claudash/welcomed"
+
+# --- Prompt history ------------------------------------------------------------------
+{
+    n=0
+    for entry in \
+        "api-server|$A|Add OAuth login to the API with GitHub and Google" \
+        "api-server|$A|commit the OAuth changes with a short message" \
+        "web-app|$B|Redesign the pricing page, three tiers, annual toggle" \
+        "api-server|$C|Fix the flaky integration tests in tests/db.rs" \
+        "api-server|$C|commit only the test fixes" \
+        "data-pipeline|$D|Profile the nightly ETL job and speed up the slowest step" \
+        "cli-tool|$E|Write the v2.0 changelog from the merged pull requests"; do
+        project=${entry%%|*} rest=${entry#*|} sid=${rest%%|*} text=${rest#*|}
+        n=$((n + 1))
+        printf '{"display":"%s","pastedContents":{},"project":"%s","sessionId":"%s","timestamp":%d000}\n' \
+            "$text" "$DEMO/code/$project" "$sid" $((NOW - 90000 + n * 12000))
+    done
+} > "$CLAUDE/history.jsonl"
 
 # --- Skills, agents, hooks --------------------------------------------------------
 skill() {
@@ -90,6 +146,9 @@ mkdir -p "$DEMO/bin"
 cat > "$DEMO/bin/claude" <<EOF
 #!/bin/sh
 case "\$1 \$2" in
+  "--version ")
+    echo "2.1.285 (Claude Code)"
+    ;;
   "mcp list")
     sleep 1
     echo "Checking MCP server health…"
@@ -101,7 +160,7 @@ case "\$1 \$2" in
     echo "postgres: npx -y @modelcontextprotocol/server-postgres - ✘ Failed to connect — connection refused"
     ;;
   "agents --json")
-    echo '[{"pid":4101,"sessionId":"$A","status":"busy"},{"pid":4102,"sessionId":"$B","status":"busy"}]'
+    echo '[{"pid":4101,"kind":"interactive","sessionId":"$A","status":"waiting","waitingFor":"permission prompt","cwd":"$DEMO/code/api-server"},{"pid":4102,"kind":"interactive","sessionId":"$B","status":"busy","cwd":"$DEMO/code/web-app"},{"pid":4103,"kind":"background","id":"bg7k2","sessionId":"$C","state":"working","status":"busy","name":"Fix flaky integration tests","cwd":"$DEMO/code/api-server"}]'
     ;;
   "plugin list")
     printf '[{"id":"context7@claude-plugins-official","version":"2a8ad9f7","scope":"user","enabled":true,"installPath":"%s","mcpServers":{"context7":{}}},' "$DEMO/plugins/context7"
