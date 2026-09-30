@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_header(frame, app, header);
     match app.view {
-        View::Dashboard => draw_dashboard(frame, app, body),
+        View::Sessions => draw_dashboard(frame, app, body),
         View::Projects => draw_projects(frame, app, body),
         View::Activity => draw_activity(frame, app, body),
         View::Logs => draw_logs(frame, app, body),
@@ -130,14 +130,17 @@ fn level_color(ratio: f64) -> Color {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(20), Constraint::Length(10)]).areas(area);
-    let tabs = [
-        (View::Dashboard, "1 Dashboard"),
-        (View::Projects, "2 Projects"),
-        (View::Activity, "3 Activity"),
-        (View::Ecosystem, "4 Ecosystem"),
-        (View::Usage, "5 Usage"),
-        (View::Logs, "6 Logs"),
-    ];
+    let tabs = crate::app::VIEW_KEYS.map(|view| {
+        let name = match view {
+            View::Sessions => "Sessions",
+            View::Activity => "Activity",
+            View::Projects => "Projects",
+            View::Logs => "Logs",
+            View::Usage => "Usage",
+            _ => "Ecosystem",
+        };
+        (view, name)
+    });
     let mut spans = vec![
         Span::styled(
             " ◆ claudash ",
@@ -145,7 +148,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("  "),
     ];
-    for (view, label) in tabs {
+    for (n, (view, label)) in tabs.into_iter().enumerate() {
+        let label = format!("{} {label}", n + 1);
         let style = if app.view == view {
             Style::new().fg(Color::White).bg(HIGHLIGHT).bold()
         } else {
@@ -1503,7 +1507,8 @@ fn draw_background(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let block = focused(
         panel("Background sessions", Color::Magenta).title_bottom(
-            Line::from(" Tab to select · l logs · a attach · S stop · R respawn ").right_aligned(),
+            Line::from(" Tab to select · Enter attach · l log · S stop · R respawn ")
+                .right_aligned(),
         ),
         app.activity_focus == crate::app::ActivityFocus::Background,
     );
@@ -1922,7 +1927,7 @@ fn draw_projects(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "Enter shows these sessions in the Dashboard",
+        "Enter shows these sessions in the Sessions view",
         dim().italic(),
     )));
     frame.render_widget(
@@ -2357,7 +2362,6 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
 // ---- Footer and popups ----------------------------------------------------------
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let key = |k: &'static str| Span::styled(k, Style::new().fg(Color::Black).bg(Color::Gray));
     let hint = |t: &'static str| Span::raw(t).dark_gray();
 
     let line = match &app.input {
@@ -2429,116 +2433,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(Color::Cyan),
                 ))
             } else {
-                let mut spans = match (app.view, app.focus) {
-                    (View::Dashboard, Focus::Sessions) => vec![
-                        key(" Enter "),
-                        hint(" resume  "),
-                        key(" / "),
-                        hint(" search  "),
-                        key(" p "),
-                        hint(" prompt  "),
-                        key(" v "),
-                        hint(" read  "),
-                        key(" f "),
-                        hint(" find  "),
-                        key(" d "),
-                        hint(" delete  "),
-                        key(" Tab "),
-                        hint(" MCP  "),
-                    ],
-                    (View::Dashboard, Focus::Mcp) => vec![
-                        key(" Enter "),
-                        hint(" server log  "),
-                        key(" Tab "),
-                        hint(" sessions  "),
-                    ],
-                    (View::Ecosystem, _) => vec![
-                        key(" ←/→ "),
-                        hint(" tab  "),
-                        key(" Enter "),
-                        hint(" details  "),
-                        key(" Space "),
-                        hint(" toggle plugin  "),
-                    ],
-                    (View::Usage, _) => vec![
-                        key(" m "),
-                        hint(" days/months  "),
-                        key(" D "),
-                        hint(" today's summary  "),
-                    ],
-                    (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
-                    (View::Activity, _)
-                        if app.activity_focus == crate::app::ActivityFocus::Background =>
-                    {
-                        vec![
-                            key(" l "),
-                            hint(" logs  "),
-                            key(" a "),
-                            hint(" attach  "),
-                            key(" S "),
-                            hint(" stop  "),
-                            key(" R "),
-                            hint(" respawn  "),
-                            key(" Tab "),
-                            hint(" open sessions  "),
-                        ]
-                    }
-                    (View::Activity, _) => vec![
-                        key(" ↑/↓ "),
-                        hint(" move  "),
-                        key(" v "),
-                        hint(" read  "),
-                        key(" i "),
-                        hint(" inspect  "),
-                        key(" Tab "),
-                        hint(" background  "),
-                    ],
-                    (View::Logs, _) => vec![
-                        key(" ↑/↓ "),
-                        hint(" source  "),
-                        key(" / "),
-                        hint(" filter  "),
-                        key(" x "),
-                        hint(" errors only  "),
-                        key(" f "),
-                        hint(" follow  "),
-                        key(" PgUp/PgDn "),
-                        hint(" scroll  "),
-                    ],
-                    (View::Projects, _) => vec![
-                        key(" ↑/↓ "),
-                        hint(" move  "),
-                        key(" Enter "),
-                        hint(" sessions of this folder  "),
-                        key(" x "),
-                        hint(" remove worktree  "),
-                        key(" p "),
-                        hint(" prune missing  "),
-                    ],
-                    (View::Inspect, _) => vec![
-                        key(" v "),
-                        hint(" read conversation  "),
-                        key(" s "),
-                        hint(" select subagent  "),
-                        key(" Enter "),
-                        hint(" read subagent  "),
-                        key(" Esc "),
-                        hint(" back  "),
-                    ],
-                    (View::Transcript, _) => vec![
-                        key(" / "),
-                        hint(" search  "),
-                        key(" n/N "),
-                        hint(" next/prev  "),
-                        key(" o "),
-                        hint(" tool output  "),
-                        key(" e "),
-                        hint(" export .md  "),
-                        key(" Esc "),
-                        hint(" back  "),
-                    ],
-                };
-                spans.extend([key(" r "), hint(" reload  "), key(" q "), hint(" quit")]);
+                let mut spans = Vec::new();
+                for b in crate::keys::footer(app.context()) {
+                    spans.push(Span::styled(
+                        format!(" {} ", b.keys.split("  ").next().unwrap_or(b.keys)),
+                        Style::new().fg(Color::Black).bg(Color::Gray),
+                    ));
+                    spans.push(
+                        Span::raw(format!(" {}  ", b.footer.unwrap_or_default())).dark_gray(),
+                    );
+                }
                 Line::from(spans)
             }
         }
@@ -2633,9 +2537,9 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 })
                 .collect();
             let hint_text = if purge.is_some() {
-                " press x again to delete for good · any other key cancels "
+                " press D again to delete for good · any other key cancels "
             } else {
-                " u restore · x delete for good · Esc close "
+                " Enter restore · D delete for good · Esc close "
             };
             let block =
                 panel("Trash", Color::Red).title_bottom(Line::from(hint_text).right_aligned());
@@ -2802,6 +2706,64 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 Line::from(" e export to Markdown · ↑/↓ scroll · Esc close ").right_aligned(),
             );
             frame.render_widget(Paragraph::new(rows).block(block).scroll((*scroll, 0)), area);
+        }
+        Some(Popup::Palette {
+            commands,
+            query,
+            matches,
+            state,
+        }) => {
+            let height = (matches.len() as u16 + 2).clamp(5, 24);
+            let area = centered(
+                frame.area(),
+                Constraint::Max(96),
+                Constraint::Length(height),
+            );
+            frame.render_widget(Clear, area);
+            let width = area.width.saturating_sub(6) as usize;
+            let items: Vec<ListItem> = matches
+                .iter()
+                .map(|&i| {
+                    let b = commands[i];
+                    let label = format!("{:<13}", b.context.title());
+                    let keys = format!(" {} ", b.keys);
+                    let room = width
+                        .saturating_sub(label.chars().count() + keys.chars().count())
+                        .max(1);
+                    let mut what: String = b.what.chars().take(room).collect();
+                    if b.what.chars().count() > room {
+                        what.pop();
+                        what.push('…');
+                    }
+                    let pad = room.saturating_sub(what.chars().count());
+                    ListItem::new(Line::from(vec![
+                        Span::styled(label, dim()),
+                        Span::raw(what),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(keys, Style::new().fg(Color::Yellow).bold()),
+                    ]))
+                })
+                .collect();
+            let block = panel("", Color::Magenta)
+                .title(Line::from(" Commands ").bold().fg(Color::Magenta))
+                .title(
+                    Line::from(format!(" {query}▌ "))
+                        .fg(Color::Yellow)
+                        .right_aligned(),
+                )
+                .title_bottom(
+                    Line::from(" type to filter · Enter run · Esc close ").right_aligned(),
+                );
+            if items.is_empty() {
+                frame.render_widget(message("No command matches.", block), area);
+            } else {
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_symbol("▶ ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                frame.render_stateful_widget(list, area, state);
+            }
         }
         Some(Popup::Results { query, hits, state }) => {
             let area = centered(

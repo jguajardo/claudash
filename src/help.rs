@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{
     app::App,
     doctor::{self, Level},
+    keys::{self, Context},
 };
 
 fn heading(text: &str) -> Line<'static> {
@@ -44,149 +45,74 @@ fn keyw(keys: &str, what: &str, width: usize) -> Line<'static> {
     ])
 }
 
-/// One view: its name, what it shows, and its keys.
+/// One view: its name, what it shows, and where its keys come from.
 struct ViewHelp {
     name: &'static str,
     shows: &'static str,
-    keys: &'static [(&'static str, &'static str)],
+    contexts: &'static [Context],
 }
 
 const VIEWS: &[ViewHelp] = &[
     ViewHelp {
-        name: "1 · Dashboard",
+        name: "1 · Sessions",
         shows: "Every Claude Code session on this machine, newest first, with what's open right now \
                 (▲ needs you, ● working, ● waiting; ⚠ when two open sessions share a folder). Beside \
                 it, the selected session's project: the instruction files Claude Code loads there, its \
                 git state, how many tokens a session there starts with, and its MCP servers' health. \
                 Below, the session's context, tokens, cost, prompt cache and your plan usage with a \
                 forecast.",
-        keys: &[
-            ("↑/↓  j/k", "move between sessions"),
-            (
-                "Enter",
-                "resume the session in Claude Code (claude --resume)",
-            ),
-            ("v", "read its conversation"),
-            (
-                "i",
-                "inspect it: context per request, tools and failures, files, subagents",
-            ),
-            ("p", "send it a one-off prompt (claude -p --resume)"),
-            (
-                "h",
-                "search your past prompts; Enter sends one to this session, Tab copies it",
-            ),
-            (
-                "D",
-                "today's summary across projects; e exports it to Markdown",
-            ),
-            ("/", "filter by title, path, branch, tag or note"),
-            ("f", "search the text of every conversation"),
-            ("t · n · *", "tag · add a note · star (kept by claudash)"),
-            ("d", "move it to the trash (asks first)"),
-            ("T · C", "open the trash · bulk cleanup"),
-            (
-                "Tab",
-                "move to the MCP list; Enter there shows the server's log",
-            ),
-        ],
+        contexts: &[Context::Sessions, Context::Mcp],
     },
     ViewHelp {
-        name: "Conversation (v)",
-        shows: "The session's prompts and replies with their times, tool calls, compactions and, on \
-                demand, tool output.",
-        keys: &[
-            ("↑/↓ PgUp/PgDn", "scroll · g/G top/bottom"),
-            ("o", "show or hide tool output"),
-            ("/ · n/N", "search inside · next/previous match"),
-            ("r", "reload (follow a running session)"),
-            ("e", "export to Markdown in ~/Documents/claudash-exports/"),
-            ("Esc", "back"),
-        ],
-    },
-    ViewHelp {
-        name: "2 · Projects",
-        shows: "Every repository your sessions ran in, with all its checkouts (the main one and its \
-                worktrees) and their git state, how many sessions each has and which are open. On \
-                top, problems: open sessions sharing a folder, the same file edited by two open \
-                sessions, worktrees with work but no session, and worktrees that no longer exist.",
-        keys: &[
-            ("↑/↓", "move"),
-            (
-                "Enter",
-                "show that folder's sessions in the Dashboard (Esc there shows all again)",
-            ),
-            (
-                "x",
-                "remove the selected worktree (git worktree remove, refuses if it has work)",
-            ),
-            ("p", "prune records of worktrees whose directory is gone"),
-        ],
-    },
-    ViewHelp {
-        name: "3 · Activity",
+        name: "2 · Activity",
         shows: "What open sessions are doing right now, the ones that need you first: their state and \
                 why they wait, their last tool call, how full their context is and how many subagents \
                 are running. Below, a live feed of every tool call from sessions active in the last \
                 hour, failures in red. Refreshes every 2 seconds while open. \
                 Background sessions (claude --bg) are listed with their state, finished ones included.",
-        keys: &[
-            ("↑/↓", "move between open sessions"),
-            ("v · i", "read · inspect the selected session"),
-            ("Tab", "switch to background sessions"),
-            (
-                "l · a",
-                "their log · attach in this terminal (claude attach)",
-            ),
-            (
-                "S · R",
-                "stop (asks first) · respawn (claude stop / respawn)",
-            ),
-        ],
+        contexts: &[Context::Activity, Context::Background],
     },
     ViewHelp {
-        name: "6 · Logs",
+        name: "3 · Projects",
+        shows: "Every repository your sessions ran in, with all its checkouts (the main one and its \
+                worktrees) and their git state, how many sessions each has and which are open. On \
+                top, problems: open sessions sharing a folder, the same file edited by two open \
+                sessions, worktrees with work but no session, and worktrees that no longer exist.",
+        contexts: &[Context::Projects],
+    },
+    ViewHelp {
+        name: "4 · Logs",
         shows: "Logs in one place: every MCP server of the selected project (what Claude Code wrote \
                 when it connected) and every background session's output. Follows new lines every 2 \
                 seconds.",
-        keys: &[
-            ("↑/↓", "choose a log"),
-            ("/", "show only lines containing some text"),
-            ("x", "errors only"),
-            ("f · PgUp/PgDn", "follow on/off · scroll"),
-        ],
+        contexts: &[Context::Logs],
+    },
+    ViewHelp {
+        name: "5 · Usage",
+        shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
+                projects. Kept beyond Claude Code's 30-day cleanup.",
+        contexts: &[Context::Usage],
+    },
+    ViewHelp {
+        name: "6 · Ecosystem",
+        shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
+                user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
+                days. Plugins show their always-on token cost per session, and the ones you never use \
+                are flagged with what they cost you.",
+        contexts: &[Context::Ecosystem],
     },
     ViewHelp {
         name: "Inspector (i)",
         shows: "One session in depth: its context per request with compactions, every tool with its \
                 failure rate, its subagents by usage (running ones marked), the files it edited and the \
                 skills, subagents, MCP servers and commands it used.",
-        keys: &[
-            ("s · S", "select the next · previous subagent"),
-            ("Enter", "read the selected subagent's conversation"),
-            ("v", "read the session's conversation"),
-        ],
+        contexts: &[Context::Inspect],
     },
     ViewHelp {
-        name: "4 · Ecosystem",
-        shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
-                user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
-                days. Plugins show their always-on token cost per session, and the ones you never use \
-                are flagged with what they cost you.",
-        keys: &[
-            ("←/→  Tab", "switch tab"),
-            ("Enter", "details"),
-            (
-                "Space",
-                "enable or disable the selected plugin (claude plugin enable/disable)",
-            ),
-        ],
-    },
-    ViewHelp {
-        name: "5 · Usage",
-        shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
-                projects. Kept beyond Claude Code's 30-day cleanup.",
-        keys: &[("m", "days or months"), ("D", "today's summary")],
+        name: "Conversation (v)",
+        shows: "The session's prompts and replies with their times, tool calls, compactions and, on \
+                demand, tool output.",
+        contexts: &[Context::Conversation],
     },
 ];
 
@@ -201,6 +127,8 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         ),
         para("It never talks to Claude itself except when you ask (resume, prompt) and makes no"),
         para("network requests of its own. Claude Code does the work; claudash keeps track of it."),
+        Line::default(),
+        para("Press : (or Ctrl+P) anywhere to find any action by name and run it."),
         Line::default(),
         heading("Setup"),
     ];
@@ -242,20 +170,24 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         for chunk in crate::app::textwrap(view.shows, 90) {
             out.push(dim(&chunk));
         }
-        for (k, what) in view.keys {
-            out.push(key(k, what));
+        for context in view.contexts {
+            if view.contexts.len() > 1 && *context != view.contexts[0] {
+                out.push(dim(&format!("{}:", context.title())));
+            }
+            for b in keys::for_context(*context) {
+                out.push(key(b.keys, b.what));
+            }
         }
         out.push(Line::default());
     }
 
     out.push(heading("Everywhere"));
-    out.push(key("1 … 6", "switch view"));
-    out.push(key(
-        "r",
-        "reload sessions, re-check MCP servers and the ecosystem",
+    for b in keys::for_context(Context::Global) {
+        out.push(key(b.keys, b.what));
+    }
+    out.push(dim(
+        "Keys that remove, stop or restart something are uppercase and ask first.",
     ));
-    out.push(key("?", "this help"));
-    out.push(key("q  Ctrl+C", "quit"));
     out.push(Line::default());
 
     out.push(heading("What changes things"));
@@ -263,7 +195,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         "Resume and prompt run Claude Code on the session (a prompt adds to its conversation).",
         "Trash moves the session's files out of ~/.claude into claudash's trash; T restores them.",
         "Plugin toggles run `claude plugin enable/disable`.",
-        "Background session actions run `claude stop`, `respawn` and `attach`.",
+        "Background session actions run `claude attach`, `stop` and `respawn`.",
         "Worktree removal runs `git worktree remove` without --force; prune runs `git worktree prune`.",
         "`claudash setup --apply` edits ~/.claude/settings.json after backing it up.",
         "Tags, notes, stars and the usage history are claudash's own files; Claude's are untouched.",
@@ -277,7 +209,16 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     for (cmd, what) in [
         (
             "claudash",
-            "open the dashboard (--no-notify, --context-limit 1M)",
+            "open claudash (--view NAME, --no-notify, --context-limit 1M)",
+        ),
+        (
+            "claudash status",
+            "one line for tmux or other status bars (--json)",
+        ),
+        ("claudash summary", "today's summary as Markdown (-o FILE)"),
+        (
+            "claudash export <ID>",
+            "a conversation as Markdown (-o FILE)",
         ),
         (
             "claudash setup",
@@ -285,8 +226,8 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         ),
         ("claudash doctor", "the Setup checks above"),
         (
-            "claudash export <ID>",
-            "a conversation as Markdown (-o FILE)",
+            "claudash config",
+            "the settings file and what's in effect (--init writes one)",
         ),
         (
             "claudash statusline",

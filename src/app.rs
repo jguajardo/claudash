@@ -24,6 +24,7 @@ use crate::{
     history::History,
     hooks::{self, Activity},
     instructions::{self, Instructions},
+    keys::{self, Binding, Context},
     library::{self, Library, Trashed},
     mcp::{self, McpResult, McpStatus},
     notify, paths,
@@ -54,7 +55,8 @@ const PLAN_ALERTS: [f64; 2] = [80.0, 95.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    Dashboard,
+    /// Every session, the selected one's project and its usage.
+    Sessions,
     /// Repositories, their checkouts and worktrees, and what's wrong.
     Projects,
     /// What open sessions are doing right now.
@@ -70,6 +72,16 @@ pub enum View {
     /// One session in depth: context over time, tools, files, subagents.
     Inspect,
 }
+
+/// Views in the order of their number keys, `1` to `6`.
+pub const VIEW_KEYS: [View; 6] = [
+    View::Sessions,
+    View::Activity,
+    View::Projects,
+    View::Logs,
+    View::Usage,
+    View::Ecosystem,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -125,7 +137,7 @@ pub enum Popup {
         yes: String,
         action: Confirm,
     },
-    /// Trashed sessions. `purge` holds the ID awaiting a second `x`.
+    /// Trashed sessions. `purge` holds the ID awaiting a second `D`.
     Trash {
         items: Vec<Trashed>,
         state: ListState,
@@ -141,6 +153,13 @@ pub enum Popup {
     },
     /// Today's summary, exportable to Markdown.
     Summary { markdown: String, scroll: u16 },
+    /// Every action, found by name and run by pressing its key.
+    Palette {
+        commands: Vec<&'static Binding>,
+        query: String,
+        matches: Vec<usize>,
+        state: ListState,
+    },
     /// Matches of a search through every session's conversation.
     Results {
         query: String,
@@ -154,6 +173,7 @@ pub enum Popup {
 pub enum Confirm {
     Trash(String),
     StopBackground(String),
+    RespawnBackground(String),
     RemoveWorktree { main: PathBuf, path: PathBuf },
     PruneWorktrees(PathBuf),
 }
@@ -571,7 +591,7 @@ impl App {
         let mut app = Self {
             context_limit,
             notify,
-            view: View::Dashboard,
+            view: View::Sessions,
             focus: Focus::Sessions,
             popup: None,
             input: None,
@@ -626,7 +646,7 @@ impl App {
             doctor: None,
             doctor_job: None,
             help_scroll: 0,
-            help_from: View::Dashboard,
+            help_from: View::Sessions,
             prompts: Vec::new(),
             summary_job: None,
             library: Library::load(),
@@ -862,7 +882,7 @@ impl App {
             .and_then(|i| open.get(i))
             .cloned();
         match code {
-            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Esc => self.view = View::Sessions,
             KeyCode::Down | KeyCode::Char('j') if !open.is_empty() => {
                 let next = self
                     .activity_state
@@ -935,6 +955,7 @@ impl App {
         match action {
             Confirm::Trash(id) => self.delete_session(&id),
             Confirm::StopBackground(id) => self.start_background_command("stop", &id),
+            Confirm::RespawnBackground(id) => self.start_background_command("respawn", &id),
             Confirm::RemoveWorktree { main, path } => {
                 match git::remove_worktree(&main, &path) {
                     Ok(()) => self
@@ -995,8 +1016,20 @@ impl App {
                     action: Confirm::StopBackground(id),
                 });
             }
-            KeyCode::Char('R') => self.start_background_command("respawn", &id),
-            KeyCode::Char('a') => {
+            KeyCode::Char('R') => {
+                self.popup = Some(Popup::Confirm {
+                    title: "Respawn background session".into(),
+                    lines: vec![
+                        format!("Respawn \"{}\"?", bg.name.clone().unwrap_or(id.clone())),
+                        String::new(),
+                        "This runs `claude respawn`: it restarts the session's process".into(),
+                        "and continues the same conversation.".into(),
+                    ],
+                    yes: "respawn it".into(),
+                    action: Confirm::RespawnBackground(id),
+                });
+            }
+            KeyCode::Enter => {
                 let cwd = bg
                     .cwd
                     .map(PathBuf::from)
@@ -1077,7 +1110,7 @@ impl App {
     fn handle_logs_key(&mut self, code: KeyCode) {
         let n = self.logs.sources.len();
         match code {
-            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Esc => self.view = View::Sessions,
             KeyCode::Down | KeyCode::Char('j') if n > 0 => {
                 let next = self.logs.state.selected().map_or(0, |i| (i + 1).min(n - 1));
                 self.logs.state.select(Some(next));
@@ -1096,11 +1129,9 @@ impl App {
                 self.logs.scroll = self.logs.scroll.saturating_sub(15);
             }
             KeyCode::PageDown => self.logs.scroll = self.logs.scroll.saturating_add(15),
-            KeyCode::Char('f') => {
-                self.logs.follow = !self.logs.follow;
-                if self.logs.follow {
-                    self.logs.scroll = usize::MAX;
-                }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.logs.follow = true;
+                self.logs.scroll = usize::MAX;
             }
             KeyCode::Char('x') => self.logs.errors_only = !self.logs.errors_only,
             KeyCode::Char('/') => {
@@ -1219,7 +1250,7 @@ impl App {
             .and_then(|i| rows.get(i))
             .copied();
         match code {
-            KeyCode::Char('x') => {
+            KeyCode::Char('D') => {
                 let Some(ProjectRow::Checkout(r, c)) = row else {
                     return;
                 };
@@ -1253,7 +1284,7 @@ impl App {
                     },
                 });
             }
-            KeyCode::Char('p') => {
+            KeyCode::Char('P') => {
                 let r = match row {
                     Some(ProjectRow::Repo(r) | ProjectRow::Checkout(r, _)) => r,
                     _ => return,
@@ -1274,7 +1305,7 @@ impl App {
                     action: Confirm::PruneWorktrees(repo.checkouts[0].path.clone()),
                 });
             }
-            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Esc => self.view = View::Sessions,
             KeyCode::Down | KeyCode::Char('j') if !rows.is_empty() => {
                 let next = self
                     .projects_state
@@ -1296,7 +1327,7 @@ impl App {
                 self.folder_filter = Some(dir);
                 self.filter.clear();
                 self.apply_filter(None);
-                self.view = View::Dashboard;
+                self.view = View::Sessions;
                 self.focus = Focus::Sessions;
             }
             _ => {}
@@ -1375,17 +1406,7 @@ impl App {
     /// from `claude agents --json`. `None` for sessions that aren't open.
     pub fn activity(&self, id: &str) -> Option<Activity> {
         let live = self.live.get(id)?;
-        // Claude Code's own "waiting on a permission" wins; hooks refine the rest.
-        if live.needs_you() {
-            return Some(Activity::NeedsYou);
-        }
-        match self.hook_states.get(id).map(hooks::State::activity) {
-            Some(Activity::Ended) | None => Some(match live.status.as_str() {
-                "busy" => Activity::Working,
-                _ => Activity::Waiting,
-            }),
-            Some(activity) => Some(activity),
-        }
+        Some(hooks::combine(live, self.hook_states.get(id)))
     }
 
     /// Notifies when an open session starts needing you or finishes a reply.
@@ -1813,7 +1834,8 @@ impl App {
             "    claudash setup           shows what it would change",
             "    claudash setup --apply   makes the change (backs up settings.json first)",
             "",
-            "Press ? any time for everything claudash can do. Esc closes this.",
+            "Press : to find any action by name, ? for everything claudash can do.",
+            "Esc closes this.",
         ];
         self.popup = Some(Popup::Text {
             title: " Welcome to claudash ".into(),
@@ -1824,6 +1846,102 @@ impl App {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(marker, "");
+    }
+
+    /// Shows a view, doing what it needs when it opens.
+    pub fn switch_view(&mut self, view: View) {
+        match view {
+            View::Logs => self.open_logs(None),
+            View::Activity => {
+                self.view = View::Activity;
+                self.start_analysis();
+            }
+            _ => self.view = view,
+        }
+    }
+
+    /// Where keys go right now, as named in `keys::BINDINGS`.
+    pub fn context(&self) -> Context {
+        match self.view {
+            View::Sessions if self.focus == Focus::Mcp => Context::Mcp,
+            View::Sessions => Context::Sessions,
+            View::Activity if self.activity_focus == ActivityFocus::Background => {
+                Context::Background
+            }
+            View::Activity => Context::Activity,
+            View::Projects => Context::Projects,
+            View::Logs => Context::Logs,
+            View::Usage => Context::Usage,
+            View::Ecosystem => Context::Ecosystem,
+            View::Inspect => Context::Inspect,
+            View::Transcript => Context::Conversation,
+            View::Help => Context::Help,
+        }
+    }
+
+    /// `:` or Ctrl+P: every action that makes sense from here, found by name.
+    fn open_palette(&mut self) {
+        let mut available = vec![
+            Context::Sessions,
+            Context::Activity,
+            Context::Projects,
+            Context::Logs,
+            Context::Usage,
+            Context::Ecosystem,
+        ];
+        if self.project_servers().is_some_and(|s| !s.is_empty()) {
+            available.push(Context::Mcp);
+        }
+        if !self.background.is_empty() {
+            available.push(Context::Background);
+        }
+        let commands = keys::commands(self.context(), &available);
+        let matches = (0..commands.len()).collect();
+        self.popup = Some(Popup::Palette {
+            commands,
+            query: String::new(),
+            matches,
+            state: ListState::default().with_selected(Some(0)),
+        });
+    }
+
+    /// Runs a command from the palette: goes where its key works and presses it.
+    fn run_command(&mut self, binding: &Binding) {
+        let Some(code) = binding.press else {
+            return;
+        };
+        if binding.context != self.context() {
+            match binding.context {
+                Context::Sessions => {
+                    self.view = View::Sessions;
+                    self.focus = Focus::Sessions;
+                }
+                Context::Mcp => {
+                    self.view = View::Sessions;
+                    self.focus = Focus::Mcp;
+                    if self.mcp_state.selected().is_none() {
+                        self.mcp_state.select(Some(0));
+                    }
+                }
+                Context::Activity => {
+                    self.switch_view(View::Activity);
+                    self.activity_focus = ActivityFocus::Open;
+                }
+                Context::Background => {
+                    self.switch_view(View::Activity);
+                    self.activity_focus = ActivityFocus::Background;
+                    if self.background_state.selected().is_none() {
+                        self.background_state.select(Some(0));
+                    }
+                }
+                Context::Projects => self.switch_view(View::Projects),
+                Context::Logs => self.switch_view(View::Logs),
+                Context::Usage => self.switch_view(View::Usage),
+                Context::Ecosystem => self.switch_view(View::Ecosystem),
+                Context::Global | Context::Inspect | Context::Conversation | Context::Help => {}
+            }
+        }
+        self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     fn toggle_help(&mut self) {
@@ -1854,24 +1972,7 @@ impl App {
             return;
         }
         let today = chrono::Local::now().date_naive();
-        let inputs: Vec<crate::summary::Input> = self
-            .sessions
-            .iter()
-            .filter(|s| s.tokens.daily.contains_key(&today))
-            .map(|s| {
-                let mut tokens = sessions::Usage::default();
-                for usage in s.tokens.daily[&today].values() {
-                    tokens.add(usage);
-                }
-                crate::summary::Input {
-                    title: s.title.clone(),
-                    project: s.project_path.clone(),
-                    cwd: s.cwd.clone(),
-                    path: s.path.clone(),
-                    tokens_today: tokens,
-                }
-            })
-            .collect();
+        let inputs = crate::summary::inputs(&self.sessions, today);
         self.summary_job = Some(Job::spawn(move || crate::summary::build(inputs, today)));
     }
 
@@ -2346,31 +2447,36 @@ impl App {
         if self.input.is_some() {
             return self.handle_input_key(key.code);
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            return self.open_palette();
+        }
+        // Keys that work everywhere; see `keys::BINDINGS`.
         match key.code {
             KeyCode::Char('q') => return self.should_quit = true,
-            KeyCode::Char('1') => return self.view = View::Dashboard,
-            KeyCode::Char('2') => return self.view = View::Projects,
-            KeyCode::Char('3') => {
-                self.view = View::Activity;
-                self.start_analysis();
+            KeyCode::Char(c @ '1'..='6') => {
+                return self.switch_view(VIEW_KEYS[c as usize - '1' as usize]);
+            }
+            KeyCode::Char(':') => return self.open_palette(),
+            KeyCode::Char('f') => {
+                self.input = Some(Input::FindAll {
+                    text: String::new(),
+                });
                 return;
             }
-            KeyCode::Char('4') => return self.view = View::Ecosystem,
-            KeyCode::Char('5') => return self.view = View::Usage,
-            KeyCode::Char('6') => return self.open_logs(None),
+            KeyCode::Char('h') => return self.open_prompts(),
+            KeyCode::Char('s') => return self.start_summary(),
             KeyCode::Char('r') => return self.refresh_all(),
             KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
         }
         match self.view {
-            View::Dashboard => match self.focus {
+            View::Sessions => match self.focus {
                 Focus::Sessions => self.handle_sessions_key(key.code),
                 Focus::Mcp => self.handle_mcp_key(key.code),
             },
             View::Ecosystem => self.handle_eco_key(key.code),
             View::Usage => match key.code {
-                KeyCode::Esc => self.view = View::Dashboard,
-                KeyCode::Char('D') => self.start_summary(),
+                KeyCode::Esc => self.view = View::Sessions,
                 KeyCode::Char('m') => self.monthly = !self.monthly,
                 _ => {}
             },
@@ -2379,7 +2485,7 @@ impl App {
             View::Activity => self.handle_activity_key(key.code),
             View::Logs => self.handle_logs_key(key.code),
             View::Inspect => match key.code {
-                KeyCode::Esc => self.view = View::Dashboard,
+                KeyCode::Esc => self.view = View::Sessions,
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.inspect_scroll = self.inspect_scroll.saturating_add(1)
                 }
@@ -2395,13 +2501,13 @@ impl App {
                         self.open_transcript(&id, None, None);
                     }
                 }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
+                KeyCode::Tab | KeyCode::BackTab => {
                     let n = self
                         .selected_session()
                         .and_then(|s| self.analysis(s))
                         .map_or(0, |a| a.subagents.len());
                     if n > 0 {
-                        let forward = key.code == KeyCode::Char('s');
+                        let forward = key.code == KeyCode::Tab;
                         self.inspect_sub = Some(match (self.inspect_sub, forward) {
                             (None, true) => 0,
                             (None, false) => n - 1,
@@ -2437,7 +2543,7 @@ impl App {
             return self.export_transcript();
         }
         let Some(view) = &mut self.transcript else {
-            self.view = View::Dashboard;
+            self.view = View::Sessions;
             return;
         };
         // Scrolling by hand wins over a jump still waiting for the next draw.
@@ -2454,7 +2560,7 @@ impl App {
             view.jump_to = None;
         }
         match code {
-            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Esc => self.view = View::Sessions,
             KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_add(1),
             KeyCode::Up | KeyCode::Char('k') => view.scroll = view.scroll.saturating_sub(1),
             KeyCode::PageDown | KeyCode::Char(' ') => view.scroll = view.scroll.saturating_add(20),
@@ -2486,20 +2592,14 @@ impl App {
                 let keep = self.selected_session().map(|s| s.id.clone());
                 self.apply_filter(keep);
             }
-            KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('/') => self.input = Some(Input::Search),
             KeyCode::Enter => self.request_resume(),
-            KeyCode::Char('d') | KeyCode::Delete => self.request_delete(),
+            KeyCode::Char('D') | KeyCode::Delete => self.request_delete(),
             KeyCode::Char('p') => self.start_prompt_input(),
             KeyCode::Char('v') => {
                 if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
                     self.open_transcript(&id, None, None);
                 }
-            }
-            KeyCode::Char('f') => {
-                self.input = Some(Input::FindAll {
-                    text: String::new(),
-                })
             }
             KeyCode::Char('*') => self.toggle_star(),
             KeyCode::Char('i') => {
@@ -2519,7 +2619,7 @@ impl App {
                     self.input = Some(Input::Tags { id, text });
                 }
             }
-            KeyCode::Char('n') => {
+            KeyCode::Char('c') => {
                 if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
                     let text = self
                         .library
@@ -2530,8 +2630,6 @@ impl App {
                 }
             }
             KeyCode::Char('T') => self.open_trash(),
-            KeyCode::Char('h') => self.open_prompts(),
-            KeyCode::Char('D') => self.start_summary(),
             KeyCode::Char('C') => self.popup = Some(Popup::Cleanup { preset: 0 }),
             KeyCode::Tab => {
                 if self.project_servers().is_some_and(|s| !s.is_empty()) {
@@ -2553,7 +2651,7 @@ impl App {
         let len = self.project_servers().map_or(0, Vec::len);
         match code {
             KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Sessions,
-            KeyCode::Enter => self.open_mcp_log(),
+            KeyCode::Enter | KeyCode::Char('l') => self.open_mcp_log(),
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
                 let next = self
                     .mcp_state
@@ -2571,11 +2669,11 @@ impl App {
         let len = self.eco_len(self.eco_tab);
         let state = &mut self.eco_states[tab];
         match code {
-            KeyCode::Esc => self.view = View::Dashboard,
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+            KeyCode::Esc => self.view = View::Sessions,
+            KeyCode::Right | KeyCode::Tab => {
                 self.eco_tab = EcoTab::ALL[(tab + 1) % EcoTab::ALL.len()];
             }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+            KeyCode::Left | KeyCode::BackTab => {
                 self.eco_tab = EcoTab::ALL[(tab + EcoTab::ALL.len() - 1) % EcoTab::ALL.len()];
             }
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
@@ -2593,6 +2691,42 @@ impl App {
 
     fn handle_popup_key(&mut self, code: KeyCode) {
         match &mut self.popup {
+            Some(Popup::Palette {
+                commands,
+                query,
+                matches,
+                state,
+            }) => match code {
+                KeyCode::Esc => self.popup = None,
+                KeyCode::Down if !matches.is_empty() => {
+                    let next = state
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(matches.len() - 1));
+                    state.select(Some(next));
+                }
+                KeyCode::Up => state.select_previous(),
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    *matches = keys::search(commands, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    *matches = keys::search(commands, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Enter => {
+                    let chosen = state
+                        .selected()
+                        .and_then(|i| matches.get(i))
+                        .map(|&i| commands[i]);
+                    self.popup = None;
+                    if let Some(binding) = chosen {
+                        self.run_command(binding);
+                    }
+                }
+                _ => {}
+            },
             Some(Popup::Trash {
                 items,
                 state,
@@ -2622,7 +2756,7 @@ impl App {
                             self.open_trash();
                         }
                     }
-                    KeyCode::Char('x') => {
+                    KeyCode::Char('D') => {
                         let Some(item) = selected else {
                             return;
                         };
@@ -3078,7 +3212,7 @@ mod tests {
         };
         for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
             for view in [
-                View::Dashboard,
+                View::Sessions,
                 View::Projects,
                 View::Activity,
                 View::Logs,
@@ -3115,6 +3249,16 @@ mod tests {
                                 markdown: "# Title\n\n- a line\n".repeat(20),
                                 scroll: u16::MAX,
                             }),
+                            5 if view == View::Help => {
+                                let commands = keys::commands(Context::Sessions, &[Context::Logs]);
+                                let matches = (0..commands.len()).collect();
+                                Some(Popup::Palette {
+                                    commands,
+                                    query: "a very long query".into(),
+                                    matches,
+                                    state: ListState::default().with_selected(Some(3)),
+                                })
+                            }
                             5 if view == View::Logs => Some(Popup::Prompts {
                                 query: "q".into(),
                                 matches: Vec::new(),
@@ -3180,6 +3324,37 @@ mod tests {
         app.hook_states.insert(id, state("Stop", None));
         app.check_activity_changes();
         assert!(app.flash.as_ref().is_some_and(|f| f.0.contains("finished")));
+    }
+
+    #[test]
+    fn palette_runs_commands_where_their_key_works() {
+        let mut app = App::new(1_000_000, false);
+        app.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        for c in "usage view".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+        assert!(app.view == View::Usage);
+
+        // A command of another view goes there first.
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        for c in "days or months".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.view = View::Sessions;
+        let before = app.monthly;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.view == View::Usage);
+        assert_ne!(app.monthly, before);
+
+        // Number keys follow the tab order.
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert!(app.view == View::Projects);
+        // Esc goes back but never quits.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.view == View::Sessions && !app.should_quit);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod analysis;
 mod app;
 mod claude_cli;
+mod config;
 mod doctor;
 mod ecosystem;
 mod git;
@@ -8,12 +9,14 @@ mod help;
 mod history;
 mod hooks;
 mod instructions;
+mod keys;
 mod library;
 mod mcp;
 mod notify;
 mod paths;
 mod projects;
 mod prompts;
+mod report;
 mod sessions;
 mod setup;
 mod statusline;
@@ -31,32 +34,59 @@ claudash — control dashboard for Claude Code (unofficial project)
 
 Usage:
   claudash [OPTIONS]                     open the dashboard
-  claudash setup [--apply | --remove]    connect claudash to Claude Code (status
-                                         line + hooks); shows the changes first
-  claudash statusline [-- <COMMAND>...]  status line command for Claude Code
-  claudash doctor                        check claudash's connection to Claude Code
-  claudash hook                          hook command for Claude Code
+  claudash status [--json]               one line for status bars: sessions that
+                                         need you, working, waiting; plan usage
+  claudash summary [-o FILE]             today's summary as Markdown
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
                                          without -o)
+  claudash setup [--apply | --remove]    connect claudash to Claude Code (status
+                                         line + hooks); shows the changes first
+  claudash doctor                        check claudash's connection to Claude Code
+  claudash config [--init]               show the settings file and its values;
+                                         --init writes a commented one
+  claudash statusline [-- <COMMAND>...]  status line command for Claude Code
+  claudash hook                          hook command for Claude Code
 
 Options:
+  --view <NAME>             View to open on: sessions, activity, projects, logs,
+                            usage or ecosystem.
   --context-limit <TOKENS>  Context window size used when Claude Code's status
                             line hasn't reported one (e.g. 1M, 200k, 500000).
                             Also set with CLAUDASH_CONTEXT_LIMIT. Default: 1M.
   --no-notify               No desktop notifications or bell.
   -h, --help                Print this help.
 
-Views: 1 Dashboard · 2 Ecosystem · 3 Usage. Press ? in the dashboard for keys.";
+Flags win over CLAUDASH_CONTEXT_LIMIT, which wins over the settings file.
+In the dashboard, press : to find any action by name, ? for help.";
 
 #[derive(Debug, PartialEq)]
 enum Cli {
-    Dashboard { context_limit: u64, notify: bool },
+    Dashboard {
+        context_limit: u64,
+        notify: bool,
+        /// Index into `app::VIEW_KEYS`.
+        view: usize,
+    },
+    Config {
+        init: bool,
+    },
+    Status {
+        json: bool,
+    },
+    Summary {
+        output: Option<String>,
+    },
     Help,
     Setup(setup::Mode),
-    Statusline { wrapped: Vec<String> },
+    Statusline {
+        wrapped: Vec<String>,
+    },
     Hook,
     Doctor,
-    Export { id: String, output: Option<String> },
+    Export {
+        id: String,
+        output: Option<String>,
+    },
 }
 
 /// Accepts "1M", "200k", "500000" (any case, optional '_' separators).
@@ -77,11 +107,16 @@ fn parse_token_count(input: &str) -> Result<u64, String> {
     }
 }
 
-/// Context limit precedence: `--context-limit` flag > environment variable > default.
-fn parse_args(args: impl IntoIterator<Item = String>, env: Option<String>) -> Result<Cli, String> {
+/// Precedence: flags > environment variable > settings file > defaults.
+fn parse_args(
+    args: impl IntoIterator<Item = String>,
+    env: Option<String>,
+    config: &config::Config,
+) -> Result<Cli, String> {
     let mut args = args.into_iter();
     let mut flag = None;
-    let mut notify = true;
+    let mut notify = config.notify.unwrap_or(true);
+    let mut view = config.view.as_deref().map_or(Ok(0), config::view_index)?;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Cli::Help),
@@ -97,6 +132,35 @@ fn parse_args(args: impl IntoIterator<Item = String>, env: Option<String>) -> Re
             }
             "hook" => return Ok(Cli::Hook),
             "doctor" => return Ok(Cli::Doctor),
+            "config" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [] => Ok(Cli::Config { init: false }),
+                    ["--init"] => Ok(Cli::Config { init: true }),
+                    _ => Err(format!("usage: claudash config [--init]\n\n{HELP}")),
+                };
+            }
+            "status" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [] => Ok(Cli::Status { json: false }),
+                    ["--json"] => Ok(Cli::Status { json: true }),
+                    _ => Err(format!("usage: claudash status [--json]\n\n{HELP}")),
+                };
+            }
+            "summary" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [] => Ok(Cli::Summary { output: None }),
+                    ["-o", file] => Ok(Cli::Summary {
+                        output: Some(file.to_string()),
+                    }),
+                    _ => Err(format!("usage: claudash summary [-o FILE]\n\n{HELP}")),
+                };
+            }
+            "--view" => {
+                view = config::view_index(&args.next().ok_or("missing value for --view")?)?;
+            }
             "export" => {
                 let rest: Vec<String> = args.collect();
                 return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -132,32 +196,63 @@ fn parse_args(args: impl IntoIterator<Item = String>, env: Option<String>) -> Re
             "--context-limit" => {
                 flag = Some(args.next().ok_or("missing value for --context-limit")?);
             }
-            other => match other.strip_prefix("--context-limit=") {
-                Some(value) => flag = Some(value.to_string()),
-                None => return Err(format!("unknown argument: '{other}'\n\n{HELP}")),
-            },
+            other => {
+                if let Some(value) = other.strip_prefix("--context-limit=") {
+                    flag = Some(value.to_string());
+                } else if let Some(value) = other.strip_prefix("--view=") {
+                    view = config::view_index(value)?;
+                } else {
+                    return Err(format!("unknown argument: '{other}'\n\n{HELP}"));
+                }
+            }
         }
     }
     let context_limit = flag
         .or(env)
+        .or_else(|| config.context_limit.as_ref().map(config::Limit::as_text))
         .map_or(Ok(DEFAULT_CONTEXT_LIMIT), |v| parse_token_count(&v))?;
     Ok(Cli::Dashboard {
         context_limit,
         notify,
+        view,
     })
 }
 
 fn main() -> std::io::Result<()> {
+    // A broken settings file must never break the status line or hooks, which
+    // Claude Code runs; only the dashboard and `claudash config` report it.
+    let settings = config::load();
+    let defaults = config::Config::default();
     // Parsed before taking over the terminal so errors print normally.
     let cli = parse_args(
         std::env::args().skip(1),
         std::env::var(CONTEXT_LIMIT_ENV).ok(),
+        settings.as_ref().unwrap_or(&defaults),
     );
-    let (context_limit, notify) = match cli {
+    if let (Err(e), Ok(Cli::Dashboard { .. } | Cli::Config { init: false })) = (&settings, &cli) {
+        eprintln!("claudash: {e}");
+        std::process::exit(2);
+    }
+    let (context_limit, notify, view) = match cli {
         Ok(Cli::Dashboard {
             context_limit,
             notify,
-        }) => (context_limit, notify),
+            view,
+        }) => (context_limit, notify, view),
+        Ok(Cli::Config { init: true }) => {
+            return exit_on_error(
+                "config",
+                config::init().map(|path| println!("Wrote {}", path.display())),
+            );
+        }
+        Ok(Cli::Config { init: false }) => {
+            show_config();
+            return Ok(());
+        }
+        Ok(Cli::Status { json }) => return exit_on_error("status", report::status(json)),
+        Ok(Cli::Summary { output }) => {
+            return exit_on_error("summary", report::summary(output.as_deref()));
+        }
         Ok(Cli::Help) => {
             println!("{HELP}");
             return Ok(());
@@ -181,9 +276,37 @@ fn main() -> std::io::Result<()> {
     // ratatui::init enables raw mode + the alternate screen and installs a panic hook
     // that restores the terminal; ratatui::restore leaves it clean on exit.
     let mut terminal = ratatui::init();
-    let result = app::App::new(context_limit, notify).run(&mut terminal);
+    let mut app = app::App::new(context_limit, notify);
+    app.switch_view(app::VIEW_KEYS[view]);
+    let result = app.run(&mut terminal);
     ratatui::restore();
     result
+}
+
+/// `claudash config`: where the settings file is and what's in effect.
+fn show_config() {
+    let path = config::path();
+    match &path {
+        Some(p) if p.exists() => println!("Settings file: {}", p.display()),
+        Some(p) => println!(
+            "Settings file: {} (not created; `claudash config --init` writes a commented one)",
+            p.display()
+        ),
+        None => println!("Settings file: none (no config directory)"),
+    }
+    let defaults = config::Config::default();
+    let settings = config::load().unwrap_or(defaults);
+    if let Ok(Cli::Dashboard {
+        context_limit,
+        notify,
+        view,
+    }) = parse_args(Vec::new(), std::env::var(CONTEXT_LIMIT_ENV).ok(), &settings)
+    {
+        println!();
+        println!("  view           {}", config::VIEW_NAMES[view]);
+        println!("  context_limit  {}", sessions::human_tokens(context_limit));
+        println!("  notify         {}", if notify { "on" } else { "off" });
+    }
 }
 
 /// Prints a subcommand's error once, plainly, and exits with status 1.
@@ -233,7 +356,11 @@ mod tests {
     }
 
     fn limit(list: &[&str], env: Option<&str>) -> Result<u64, String> {
-        match parse_args(args(list), env.map(str::to_owned))? {
+        match parse_args(
+            args(list),
+            env.map(str::to_owned),
+            &config::Config::default(),
+        )? {
             Cli::Dashboard { context_limit, .. } => Ok(context_limit),
             other => Err(format!("{other:?}")),
         }
@@ -263,16 +390,71 @@ mod tests {
     }
 
     #[test]
+    fn settings_file_loses_to_flags_and_environment() {
+        let settings = config::Config {
+            view: Some("activity".into()),
+            context_limit: Some(config::Limit::Text("200k".into())),
+            notify: Some(false),
+        };
+        let parse = |list: &[&str], env: Option<&str>| {
+            parse_args(args(list), env.map(str::to_owned), &settings)
+        };
+        assert_eq!(
+            parse(&[], None),
+            Ok(Cli::Dashboard {
+                context_limit: 200_000,
+                notify: false,
+                view: 1,
+            })
+        );
+        assert!(matches!(
+            parse(&["--view", "usage"], Some("300k")),
+            Ok(Cli::Dashboard {
+                context_limit: 300_000,
+                view: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["--context-limit", "2M"], Some("300k")),
+            Ok(Cli::Dashboard {
+                context_limit: 2_000_000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn parses_subcommands() {
-        let parse = |list: &[&str]| parse_args(args(list), None);
+        let parse = |list: &[&str]| parse_args(args(list), None, &config::Config::default());
         assert_eq!(parse(&["--help"]), Ok(Cli::Help));
         assert_eq!(
             parse(&["--no-notify"]),
             Ok(Cli::Dashboard {
                 context_limit: DEFAULT_CONTEXT_LIMIT,
-                notify: false
+                notify: false,
+                view: 0,
             })
         );
+        assert!(matches!(
+            parse(&["--view", "logs"]),
+            Ok(Cli::Dashboard { view: 3, .. })
+        ));
+        assert!(matches!(
+            parse(&["--view=usage"]),
+            Ok(Cli::Dashboard { view: 4, .. })
+        ));
+        assert!(parse(&["--view", "nope"]).is_err());
+        assert_eq!(parse(&["config"]), Ok(Cli::Config { init: false }));
+        assert_eq!(parse(&["config", "--init"]), Ok(Cli::Config { init: true }));
+        assert_eq!(parse(&["status", "--json"]), Ok(Cli::Status { json: true }));
+        assert_eq!(
+            parse(&["summary", "-o", "day.md"]),
+            Ok(Cli::Summary {
+                output: Some("day.md".into())
+            })
+        );
+        assert!(parse(&["summary", "extra"]).is_err());
         assert_eq!(parse(&["setup"]), Ok(Cli::Setup(setup::Mode::Show)));
         assert_eq!(
             parse(&["setup", "--apply"]),

@@ -33,6 +33,27 @@ struct SessionDay {
     tokens: u64,
 }
 
+/// The sessions that used tokens on `day`.
+pub fn inputs(sessions: &[crate::sessions::Session], day: NaiveDate) -> Vec<Input> {
+    sessions
+        .iter()
+        .filter(|s| s.tokens.daily.contains_key(&day))
+        .map(|s| {
+            let mut tokens = Usage::default();
+            for usage in s.tokens.daily[&day].values() {
+                tokens.add(usage);
+            }
+            Input {
+                title: s.title.clone(),
+                project: s.project_path.clone(),
+                cwd: s.cwd.clone(),
+                path: s.path.clone(),
+                tokens_today: tokens,
+            }
+        })
+        .collect()
+}
+
 /// Markdown for `day`. Reads each session's transcript and runs git per
 /// project folder: call it off the UI thread.
 pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {

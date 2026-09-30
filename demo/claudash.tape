@@ -45,17 +45,17 @@ Tab
 Sleep 400ms
 
 # Activity: what open sessions are doing, and a live feed of tool calls.
-Type "3"
+Type "2"
 Sleep 3.5s
 
-# Inspect a session: context per request, tools and failures, files.
+# Inspect a session: context per request, tools and failures, subagents.
 Type "i"
 Sleep 3.5s
 Escape
 Sleep 600ms
 
 # Ecosystem: skills, agents, commands, hooks, plugins with their token cost.
-Type "4"
+Type "6"
 Sleep 2s
 Right
 Sleep 900ms
@@ -70,7 +70,7 @@ Sleep 2.5s
 Type "5"
 Sleep 3s
 
-# Back to the dashboard: search past prompts, then today's summary.
+# Back to the sessions: search past prompts.
 Type "1"
 Sleep 800ms
 Type "h"
@@ -79,7 +79,13 @@ Type "commit"
 Sleep 2s
 Escape
 Sleep 600ms
-Type "D"
+
+# Any action by name: today's summary from the command palette.
+Type ":"
+Sleep 1s
+Type "summary"
+Sleep 1.2s
+Enter
 Sleep 3.5s
 Escape
 Sleep 1s

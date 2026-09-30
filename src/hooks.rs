@@ -70,6 +70,21 @@ impl State {
     }
 }
 
+/// What an open session is doing: Claude Code's own "waiting on a permission"
+/// wins, the session's last hook event refines the rest.
+pub fn combine(live: &crate::claude_cli::LiveSession, state: Option<&State>) -> Activity {
+    if live.needs_you() {
+        return Activity::NeedsYou;
+    }
+    match state.map(State::activity) {
+        Some(Activity::Ended) | None => match live.status.as_str() {
+            "busy" => Activity::Working,
+            _ => Activity::Waiting,
+        },
+        Some(activity) => activity,
+    }
+}
+
 fn state_dir() -> Option<PathBuf> {
     crate::paths::claudash_cache().map(|dir| dir.join("state"))
 }
