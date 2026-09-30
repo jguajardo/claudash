@@ -277,6 +277,9 @@ pub fn analyze(path: &Path) -> Analysis {
             file,
         });
     }
+    // Biggest first: the ones worth a look.
+    out.subagents
+        .sort_by_key(|s| std::cmp::Reverse(s.usage.processed()));
     out
 }
 

@@ -56,6 +56,8 @@ pub enum View {
     Dashboard,
     /// Repositories, their checkouts and worktrees, and what's wrong.
     Projects,
+    /// What open sessions are doing right now.
+    Activity,
     Ecosystem,
     Usage,
     /// A session's conversation, full screen.
@@ -224,6 +226,12 @@ impl TranscriptView {
         };
         self.jump_to = Some(self.matches[self.match_pos]);
     }
+}
+
+/// One tool call in the activity feed.
+pub struct FeedItem<'a> {
+    pub session: &'a Session,
+    pub event: &'a analysis::Event,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +448,9 @@ pub struct App {
     git_at: Option<Instant>,
     /// Inspector scroll.
     pub inspect_scroll: u16,
+    /// Subagent selected in the inspector (index into its analysis' list).
+    pub inspect_sub: Option<usize>,
+    pub activity_state: ListState,
 
     // Help.
     pub doctor: Option<Vec<doctor::Check>>,
@@ -505,6 +516,8 @@ impl App {
             folder_filter: None,
             git_at: None,
             inspect_scroll: 0,
+            inspect_sub: None,
+            activity_state: ListState::default(),
             doctor: None,
             doctor_job: None,
             help_scroll: 0,
@@ -566,6 +579,10 @@ impl App {
         }
         if self.refreshed_at.elapsed() >= REFRESH_EVERY {
             self.refresh();
+        } else if self.view == View::Activity && self.ticks.is_multiple_of(8) {
+            // Every 2 seconds: re-read what open sessions did.
+            self.start_analysis();
+            self.reload_hook_states();
         } else if self.ticks.is_multiple_of(4) {
             // Hook state is a few tiny files: check it every second so
             // "needs you" shows up (and notifies) right away.
@@ -613,10 +630,19 @@ impl App {
         if self.analysis_job.is_some() {
             return;
         }
+        // Fresh file metadata: open sessions change between session reloads.
         let targets: Vec<(PathBuf, std::time::SystemTime, u64)> = self
             .sessions
             .iter()
-            .map(|s| (s.path.clone(), s.modified, s.size))
+            .map(|s| {
+                let meta = std::fs::metadata(&s.path).ok();
+                let modified = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(s.modified);
+                let size = meta.map_or(s.size, |m| m.len());
+                (s.path.clone(), modified, size)
+            })
             .collect();
         let previous = self.analyses.clone();
         self.analysis_job = Some(Job::spawn(move || {
@@ -639,6 +665,132 @@ impl App {
         dirs.dedup();
         self.git_at = Some(Instant::now());
         self.git_job = Some(Job::spawn(move || projects::build(&dirs)));
+    }
+
+    /// Open sessions, the ones that need you first, then working, then waiting.
+    pub fn open_sessions(&self) -> Vec<&Session> {
+        let mut open: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| self.live.contains_key(&s.id))
+            .collect();
+        let rank = |s: &&Session| match self.activity(&s.id) {
+            Some(Activity::NeedsYou) => 0,
+            Some(Activity::Working) => 1,
+            _ => 2,
+        };
+        open.sort_by_key(|s| (rank(s), std::cmp::Reverse(s.modified)));
+        open
+    }
+
+    /// Recent tool calls across sessions active in the last hour, newest first.
+    pub fn feed(&self, limit: usize) -> Vec<FeedItem<'_>> {
+        let hour = Duration::from_secs(3_600);
+        let mut items: Vec<FeedItem> = self
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.modified.elapsed().is_ok_and(|age| age <= hour) || self.live.contains_key(&s.id)
+            })
+            .filter_map(|s| self.analysis(s).map(|a| (s, a)))
+            .flat_map(|(s, a)| {
+                a.recent.iter().map(move |e| FeedItem {
+                    session: s,
+                    event: e,
+                })
+            })
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.event.at));
+        items.truncate(limit);
+        items
+    }
+
+    /// Selects a session in the Dashboard list, clearing filters that hide it.
+    fn select_session(&mut self, id: &str) {
+        if !self.visible.iter().any(|&i| self.sessions[i].id == id) {
+            self.filter.clear();
+            self.folder_filter = None;
+            self.apply_filter(None);
+        }
+        let index = self.visible.iter().position(|&i| self.sessions[i].id == id);
+        self.session_state.select(index);
+        self.update_project();
+    }
+
+    fn handle_activity_key(&mut self, code: KeyCode) {
+        let open: Vec<String> = self.open_sessions().iter().map(|s| s.id.clone()).collect();
+        let selected = self
+            .activity_state
+            .selected()
+            .and_then(|i| open.get(i))
+            .cloned();
+        match code {
+            KeyCode::Esc => self.view = View::Dashboard,
+            KeyCode::Down | KeyCode::Char('j') if !open.is_empty() => {
+                let next = self
+                    .activity_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(open.len() - 1));
+                self.activity_state.select(Some(next));
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.activity_state.select_previous(),
+            KeyCode::Char('v') => {
+                if let Some(id) = selected {
+                    self.select_session(&id);
+                    self.open_transcript(&id, None, None);
+                }
+            }
+            KeyCode::Char('i') => {
+                if let Some(id) = selected {
+                    self.select_session(&id);
+                    self.inspect_scroll = 0;
+                    self.inspect_sub = None;
+                    self.view = View::Inspect;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens a subagent's own conversation.
+    fn open_subagent(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let Some(sub) = self
+            .inspect_sub
+            .and_then(|i| self.analysis(session).and_then(|a| a.subagents.get(i)))
+            .cloned()
+        else {
+            return;
+        };
+        let entries = match transcript::load(&sub.file) {
+            Ok(entries) => entries,
+            Err(e) => return self.show_flash(format!("Could not read the subagent: {e}"), true),
+        };
+        let title = if sub.description.is_empty() {
+            format!("{} (subagent)", sub.agent_type)
+        } else {
+            format!("{} · {} (subagent)", sub.description, sub.agent_type)
+        };
+        self.transcript = Some(TranscriptView {
+            session_id: session.id.clone(),
+            title,
+            path: sub.file.clone(),
+            project: session.project_path.clone(),
+            branch: session.git_branch.clone(),
+            entries,
+            show_output: false,
+            query: None,
+            matches: Vec::new(),
+            match_pos: 0,
+            scroll: 0,
+            at_end: false,
+            jump_to: Some(usize::MAX),
+            rows: Vec::new(),
+            rows_key: None,
+        });
+        self.view = View::Transcript;
     }
 
     /// Rows of the Projects view: each repository followed by its checkouts,
@@ -1704,6 +1856,11 @@ impl App {
             KeyCode::Char('q') => return self.should_quit = true,
             KeyCode::Char('1') => return self.view = View::Dashboard,
             KeyCode::Char('2') => return self.view = View::Projects,
+            KeyCode::Char('3') => {
+                self.view = View::Activity;
+                self.start_analysis();
+                return;
+            }
             KeyCode::Char('4') => return self.view = View::Ecosystem,
             KeyCode::Char('5') => return self.view = View::Usage,
             KeyCode::Char('r') => return self.refresh_all(),
@@ -1723,6 +1880,7 @@ impl App {
             },
             View::Transcript => self.handle_transcript_key(key.code),
             View::Projects => self.handle_projects_key(key.code),
+            View::Activity => self.handle_activity_key(key.code),
             View::Inspect => match key.code {
                 KeyCode::Esc => self.view = View::Dashboard,
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1740,6 +1898,22 @@ impl App {
                         self.open_transcript(&id, None, None);
                     }
                 }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    let n = self
+                        .selected_session()
+                        .and_then(|s| self.analysis(s))
+                        .map_or(0, |a| a.subagents.len());
+                    if n > 0 {
+                        let forward = key.code == KeyCode::Char('s');
+                        self.inspect_sub = Some(match (self.inspect_sub, forward) {
+                            (None, true) => 0,
+                            (None, false) => n - 1,
+                            (Some(i), true) => (i + 1) % n,
+                            (Some(i), false) => (i + n - 1) % n,
+                        });
+                    }
+                }
+                KeyCode::Enter => self.open_subagent(),
                 _ => {}
             },
             View::Help => match key.code {
@@ -1834,6 +2008,7 @@ impl App {
             KeyCode::Char('i') => {
                 if self.selected_session().is_some() {
                     self.inspect_scroll = 0;
+                    self.inspect_sub = None;
                     self.view = View::Inspect;
                 }
             }
@@ -2324,6 +2499,7 @@ mod tests {
             for view in [
                 View::Dashboard,
                 View::Projects,
+                View::Activity,
                 View::Ecosystem,
                 View::Usage,
                 View::Transcript,

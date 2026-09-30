@@ -44,21 +44,26 @@ pub struct Entry {
     pub text: String,
 }
 
+/// Reads a session transcript, or a subagent's (`<session>/subagents/*.jsonl`).
 pub fn load(path: &Path) -> io::Result<Vec<Entry>> {
     let file = fs::File::open(path)?;
+    // A subagent file is all sidechain records; a session file keeps its own turns.
+    let subagent = path.parent().is_some_and(|p| p.ends_with("subagents"));
     let mut entries = Vec::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if let Ok(record) = serde_json::from_str::<Value>(&line) {
-            parse_record(&record, &mut entries);
+            parse_record(&record, subagent, &mut entries);
         }
     }
     Ok(entries)
 }
 
-fn parse_record(record: &Value, out: &mut Vec<Entry>) {
-    // Subagent turns live in their own files; meta messages are Claude Code's
-    // own injections (skill bodies, command wrappers).
-    if record["isSidechain"].as_bool() == Some(true) || record["isMeta"].as_bool() == Some(true) {
+fn parse_record(record: &Value, subagent: bool, out: &mut Vec<Entry>) {
+    // In a session file, subagent turns are skipped (they have their own files);
+    // meta messages are Claude Code's own injections (skill bodies, wrappers).
+    if (!subagent && record["isSidechain"].as_bool() == Some(true))
+        || record["isMeta"].as_bool() == Some(true)
+    {
         return;
     }
     let at = record["timestamp"]
@@ -380,7 +385,7 @@ mod tests {
     fn parse(records: &[Value]) -> Vec<Entry> {
         let mut out = Vec::new();
         for r in records {
-            parse_record(r, &mut out);
+            parse_record(r, false, &mut out);
         }
         out
     }

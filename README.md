@@ -38,6 +38,12 @@ On top, a **Problems** panel collects what can go wrong with several sessions at
 - worktrees with uncommitted or unpushed work that no open session is using;
 - worktrees whose directory is gone.
 
+### 3 · Activity
+
+What open sessions are doing right now, the ones that need you first: their state and why they wait (for example "permission prompt"), their last tool call, how full their context is and how many subagents are running. Below, a live feed of every tool call from sessions active in the last hour, with failures in red. It refreshes every 2 seconds while it's open, re-reading only the transcripts that changed.
+
+In the inspector (`i`), `s` selects a subagent and `Enter` opens its own conversation.
+
 ### 4 · Ecosystem
 
 Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin, with how often each skill, subagent and command was used in the last 30 days. Plugins show their projected always-on token cost per session from `claude plugin details` and how often anything they provide was used, so plugins that cost tokens in every session without being used stand out, with their total. `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
@@ -115,7 +121,7 @@ claudash --help
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `4` `5` | Dashboard, Projects, Ecosystem, Usage |
+| `1`–`5` | Dashboard, Projects, Activity, Ecosystem, Usage |
 | `↑` `↓` / `j` `k` | Move |
 | `Enter` | Resume the session · open the MCP server's log · show details |
 | `/` | Search sessions (`Enter` keeps the filter, `Esc` clears it) · search inside the open conversation |

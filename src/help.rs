@@ -111,6 +111,28 @@ const VIEWS: &[ViewHelp] = &[
         ],
     },
     ViewHelp {
+        name: "3 · Activity",
+        shows: "What open sessions are doing right now, the ones that need you first: their state and \
+                why they wait, their last tool call, how full their context is and how many subagents \
+                are running. Below, a live feed of every tool call from sessions active in the last \
+                hour, failures in red. Refreshes every 2 seconds while open.",
+        keys: &[
+            ("↑/↓", "move between open sessions"),
+            ("v · i", "read · inspect the selected session"),
+        ],
+    },
+    ViewHelp {
+        name: "Inspector (i)",
+        shows: "One session in depth: its context per request with compactions, every tool with its \
+                failure rate, its subagents by usage (running ones marked), the files it edited and the \
+                skills, subagents, MCP servers and commands it used.",
+        keys: &[
+            ("s · S", "select the next · previous subagent"),
+            ("Enter", "read the selected subagent's conversation"),
+            ("v", "read the session's conversation"),
+        ],
+    },
+    ViewHelp {
         name: "4 · Ecosystem",
         shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
                 user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
@@ -192,7 +214,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     }
 
     out.push(heading("Everywhere"));
-    out.push(key("1 2 4 5", "switch view"));
+    out.push(key("1 2 3 4 5", "switch view"));
     out.push(key(
         "r",
         "reload sessions, re-check MCP servers and the ecosystem",

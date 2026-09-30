@@ -42,6 +42,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.view {
         View::Dashboard => draw_dashboard(frame, app, body),
         View::Projects => draw_projects(frame, app, body),
+        View::Activity => draw_activity(frame, app, body),
         View::Ecosystem => draw_ecosystem(frame, app, body),
         View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
@@ -131,6 +132,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let tabs = [
         (View::Dashboard, "1 Dashboard"),
         (View::Projects, "2 Projects"),
+        (View::Activity, "3 Activity"),
         (View::Ecosystem, "4 Ecosystem"),
         (View::Usage, "5 Usage"),
     ];
@@ -1263,6 +1265,184 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+// ---- Activity ----------------------------------------------------------------
+
+/// How long ago a file changed.
+fn file_age(path: &std::path::Path) -> Option<std::time::Duration> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
+}
+
+/// "12s", "4m", "2h".
+fn short_age(secs: i64) -> String {
+    match secs.max(0) {
+        s @ 0..60 => format!("{s}s"),
+        s @ 60..3_600 => format!("{}m", s / 60),
+        s => format!("{}h", s / 3_600),
+    }
+}
+
+fn project_name(project_path: &str) -> String {
+    project_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(project_path)
+        .to_string()
+}
+
+fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
+    let now = chrono::Local::now();
+    let open = app.open_sessions();
+    let open_height = ((open.len().max(1) * 2) as u16 + 2)
+        .min(area.height / 2)
+        .max(4);
+    let [open_area, feed_area] =
+        Layout::vertical([Constraint::Length(open_height), Constraint::Min(4)]).areas(area);
+
+    let block = panel("Open sessions", Color::Green)
+        .title_bottom(Line::from(format!(" {} open ", open.len())).right_aligned());
+    if open.is_empty() {
+        frame.render_widget(
+            message("No Claude Code session is open right now.", block),
+            open_area,
+        );
+    } else {
+        let items: Vec<ListItem> = open
+            .iter()
+            .map(|s| {
+                let (mark, color, label) = match app.activity(&s.id) {
+                    Some(Activity::NeedsYou) => ("▲", Color::Yellow, "needs you"),
+                    Some(Activity::Working) => ("●", Color::Green, "working"),
+                    _ => ("●", Color::Cyan, "waiting"),
+                };
+                let mut head = vec![
+                    Span::styled(format!("{mark} "), Style::new().fg(color).bold()),
+                    Span::styled(s.title.clone(), Style::new().bold()),
+                    Span::styled(format!("  {label}"), Style::new().fg(color)),
+                    Span::styled(format!("  · {}", s.project_path), dim()),
+                ];
+                if let Some(why) = app.live.get(&s.id).and_then(|l| l.waiting_for.clone()) {
+                    head.push(Span::styled(
+                        format!("  ({why})"),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                }
+                let analysis = app.analysis(s);
+                let mut detail = vec![Span::raw("    ")];
+                if let Some(e) = analysis.and_then(|a| a.recent.last()) {
+                    let ago =
+                        e.at.map(|t| short_age((now - t).num_seconds()))
+                            .unwrap_or_default();
+                    detail.push(Span::styled(
+                        format!(
+                            "last: ⚙ {} {}",
+                            tool_label(&e.tool),
+                            e.summary.chars().take(50).collect::<String>()
+                        ),
+                        if e.failed {
+                            Style::new().fg(Color::Red)
+                        } else {
+                            Style::new().fg(Color::Gray)
+                        },
+                    ));
+                    detail.push(Span::styled(format!(" · {ago} ago"), dim()));
+                }
+                let limit = app
+                    .statusline
+                    .sessions
+                    .get(&s.id)
+                    .and_then(|x| x.context_window.context_window_size)
+                    .filter(|&n| n > 0)
+                    .unwrap_or(app.context_limit);
+                let pct = s.tokens.context_used as f64 / limit as f64 * 100.0;
+                detail.push(Span::styled(
+                    format!("  · context {pct:.0}%"),
+                    Style::new().fg(level_color(pct / 100.0)),
+                ));
+                let running = analysis.map_or(0, |a| {
+                    a.subagents
+                        .iter()
+                        .filter(|sub| file_age(&sub.file).is_some_and(|age| age.as_secs() < 60))
+                        .count()
+                });
+                if running > 0 {
+                    detail.push(Span::styled(
+                        format!("  · {} running", plural(running as u64, "subagent")),
+                        Style::new().fg(Color::Green),
+                    ));
+                }
+                ListItem::new(vec![Line::from(head), Line::from(detail)])
+            })
+            .collect();
+        if app
+            .activity_state
+            .selected()
+            .is_none_or(|i| i >= items.len())
+        {
+            app.activity_state.select(Some(0));
+        }
+        render_list(frame, items, block, open_area, &mut app.activity_state);
+    }
+
+    // Live feed of tool calls.
+    let rows = feed_area.height.saturating_sub(2) as usize;
+    let feed = app.feed(rows.max(1));
+    let block = panel("Live feed", Color::Cyan).title_bottom(
+        Line::from(" tool calls of sessions active in the last hour · refreshes every 2s ")
+            .right_aligned(),
+    );
+    if feed.is_empty() {
+        let text = if app.analyses.is_empty() {
+            format!("{} Reading sessions…", app.spinner())
+        } else {
+            "Nothing happened in the last hour.".into()
+        };
+        frame.render_widget(message(text, block), feed_area);
+        return;
+    }
+    let lines: Vec<Line> = feed
+        .iter()
+        .map(|item| {
+            let e = item.event;
+            let time =
+                e.at.map(|t| t.format("%H:%M:%S").to_string())
+                    .unwrap_or_default();
+            let (mark, style) = if e.failed {
+                ("✘", Style::new().fg(Color::Red))
+            } else {
+                ("⚙", Style::new().fg(Color::Yellow))
+            };
+            Line::from(vec![
+                Span::styled(format!("{time}  "), dim()),
+                Span::styled(
+                    format!(
+                        "{:<16}",
+                        project_name(&item.session.project_path)
+                            .chars()
+                            .take(16)
+                            .collect::<String>()
+                    ),
+                    Style::new().fg(Color::LightMagenta),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<28}  ",
+                        item.session.title.chars().take(28).collect::<String>()
+                    ),
+                    dim(),
+                ),
+                Span::styled(format!("{mark} {}  ", tool_label(&e.tool)), style),
+                Span::raw(e.summary.clone()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), feed_area);
+}
+
 // ---- Projects ----------------------------------------------------------------
 
 fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
@@ -1681,7 +1861,10 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
                 "  {:<40}",
                 name.chars().take(40).collect::<String>()
             )),
-            Span::styled(format!("{:>5} calls", t.calls), Style::new().bold()),
+            Span::styled(
+                format!("{:>11}", plural(t.calls as u64, "call")),
+                Style::new().bold(),
+            ),
             Span::styled(
                 format!("   {:>3} failed ({rate:.0}%)", t.errors),
                 Style::new().fg(color),
@@ -1693,23 +1876,37 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
     if a.subagents.is_empty() {
         lines.push(Line::from(Span::styled("  none", dim())));
     }
-    let mut subagents: Vec<&crate::analysis::Subagent> = a.subagents.iter().collect();
-    subagents.sort_by_key(|s| std::cmp::Reverse(s.usage.processed()));
-    for sub in subagents {
+    for (i, sub) in a.subagents.iter().enumerate() {
+        let selected = app.inspect_sub == Some(i);
+        let marker = if selected { "▶ " } else { "├ " };
+        let running = file_age(&sub.file).is_some_and(|age| age.as_secs() < 60);
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  ├ {}", sub.agent_type),
-                Style::new().fg(Color::Cyan).bold(),
+                format!("  {marker}{}", sub.agent_type),
+                if selected {
+                    Style::new().fg(Color::Black).bg(Color::Cyan).bold()
+                } else {
+                    Style::new().fg(Color::Cyan).bold()
+                },
+            ),
+            Span::styled(
+                if running { "  ● running" } else { "" },
+                Style::new().fg(Color::Green),
             ),
             Span::raw(format!("  {}", sub.description)),
             Span::styled(
-                format!(
-                    "  · {}{} · {} tools · {} tokens",
-                    sub.model,
-                    if sub.background { " · background" } else { "" },
-                    sub.tool_calls,
-                    human_tokens(sub.usage.processed())
-                ),
+                {
+                    let mut parts = Vec::new();
+                    if !sub.model.is_empty() {
+                        parts.push(sub.model.clone());
+                    }
+                    if sub.background {
+                        parts.push("background".into());
+                    }
+                    parts.push(plural(sub.tool_calls as u64, "tool call"));
+                    parts.push(format!("{} tokens", human_tokens(sub.usage.processed())));
+                    format!("  · {}", parts.join(" · "))
+                },
                 dim(),
             ),
         ]));
@@ -2075,6 +2272,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
                     (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
+                    (View::Activity, _) => vec![
+                        key(" ↑/↓ "),
+                        hint(" move  "),
+                        key(" v "),
+                        hint(" read  "),
+                        key(" i "),
+                        hint(" inspect  "),
+                    ],
                     (View::Projects, _) => vec![
                         key(" ↑/↓ "),
                         hint(" move  "),
@@ -2084,6 +2289,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     (View::Inspect, _) => vec![
                         key(" v "),
                         hint(" read conversation  "),
+                        key(" s "),
+                        hint(" select subagent  "),
+                        key(" Enter "),
+                        hint(" read subagent  "),
                         key(" Esc "),
                         hint(" back  "),
                     ],
