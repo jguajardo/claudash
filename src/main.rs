@@ -13,9 +13,11 @@ mod mcp;
 mod notify;
 mod paths;
 mod projects;
+mod prompts;
 mod sessions;
 mod setup;
 mod statusline;
+mod summary;
 mod transcript;
 mod ui;
 

@@ -18,6 +18,8 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
   - `i` inspects the session: a chart of its context per request with compactions, every tool it called with its failure rate, the files it edited, its subagents (type, model, tokens) and the skills, subagents, MCP servers and commands it used.
   - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
   - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
+  - `h` searches every prompt you've typed in Claude Code, newest first. `Enter` puts the chosen one in the prompt box for the selected session, `Tab` copies it to the clipboard (OSC 52, works over SSH).
+  - `D` summarizes today across projects: sessions, prompts, tool calls and failures, files edited, tokens and each repository's commits. `e` exports it to Markdown in `~/Documents/claudash-exports/`.
   - `t` tags a session, `n` adds a note and `*` stars it. Tags and notes show in the list and `/` finds them (`#tag` works too). They're kept by claudash, not in Claude Code's files.
   - `d` moves the session to claudash's trash, after asking; `T` opens the trash to restore sessions or delete them for good, and anything left there is deleted after 30 days. `C` cleans up in bulk: pick a criterion (not used for 7/14/21 days, larger than 5/20 MB), check the list and move them all to the trash. Open and starred sessions are never included.
 - **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
@@ -137,6 +139,8 @@ claudash --help
 | `v` | Read the selected session's conversation |
 | `o` · `n`/`N` · `e` | In a conversation: show tool output · next/previous match · export to Markdown |
 | `p` | Send a one-off prompt to the selected session |
+| `h` | Search your prompt history (`Enter` sends to the selected session, `Tab` copies) |
+| `D` | Today's summary across projects (`e` exports it) |
 | `d` / `Delete` | Move the selected session to the trash (asks first) |
 | `t` · `n` · `*` | Tag · note · star the selected session |
 | `T` · `C` | Trash (restore, delete for good) · bulk cleanup |
@@ -172,6 +176,7 @@ claudash makes no network requests of its own. It reads local files and runs the
 | Instruction files | The [memory docs](https://code.claude.com/docs/en/memory) rules; the *Project instructions* setting from user and managed settings | Documented |
 | Skills, agents, commands, hooks | `SKILL.md` and Markdown frontmatter, `hooks` in settings files and plugins' `hooks/hooks.json` | Documented |
 | Sessions, conversations, tokens, cost | `~/.claude/projects/<project>/<session-id>.jsonl` | Internal |
+| Prompt history | `~/.claude/history.jsonl` (pasted content is left out) | Internal |
 | MCP server logs | `~/.cache/claude-cli-nodejs/<project>/mcp-logs-<server>/` | Internal |
 
 claudash's own files live in `~/.local/share/claudash/` (`~/Library/Application Support/claudash/` on macOS): `library.json` for tags, notes and stars, `usage-history.json` for the charts, and `trash/`.

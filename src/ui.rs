@@ -2418,6 +2418,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ),
                     Style::new().fg(Color::Magenta),
                 ))
+            } else if app.summarizing() {
+                Line::from(Span::styled(
+                    format!(" {} building today's summary…", app.spinner()),
+                    Style::new().fg(Color::LightMagenta),
+                ))
             } else if app.prompt_running() {
                 Line::from(Span::styled(
                     format!(" {} waiting for Claude's reply…", app.spinner()),
@@ -2455,7 +2460,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         key(" Space "),
                         hint(" toggle plugin  "),
                     ],
-                    (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
+                    (View::Usage, _) => vec![
+                        key(" m "),
+                        hint(" days/months  "),
+                        key(" D "),
+                        hint(" today's summary  "),
+                    ],
                     (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
                     (View::Activity, _)
                         if app.activity_focus == crate::app::ActivityFocus::Background =>
@@ -2690,6 +2700,108 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                     .right_aligned(),
             );
             frame.render_widget(Paragraph::new(lines).block(block), area);
+        }
+        Some(Popup::Prompts {
+            query,
+            matches,
+            state,
+        }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(85),
+                Constraint::Percentage(80),
+            );
+            frame.render_widget(Clear, area);
+            let items: Vec<ListItem> = matches
+                .iter()
+                .take(500)
+                .map(|&i| {
+                    let p = &app.prompts[i];
+                    let when =
+                        p.at.map(|t| t.format("%b %d %H:%M").to_string())
+                            .unwrap_or_default();
+                    let first = p.text.lines().next().unwrap_or_default().to_string();
+                    let lines = p.text.lines().count();
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::raw(first),
+                            Span::styled(
+                                if lines > 1 {
+                                    format!("  (+{} lines)", lines - 1)
+                                } else {
+                                    String::new()
+                                },
+                                dim(),
+                            ),
+                        ]),
+                        Line::from(Span::styled(format!("  {when} · {}", p.project), dim())),
+                    ])
+                })
+                .collect();
+            let block = panel("", Color::Magenta)
+                .title(
+                    Line::from(format!(" Prompt history · {} of {} ", matches.len(), app.prompts.len()))
+                        .bold()
+                        .fg(Color::Magenta),
+                )
+                .title(
+                    Line::from(format!(" search: {query}▌ "))
+                        .fg(Color::Yellow)
+                        .right_aligned(),
+                )
+                .title_bottom(
+                    Line::from(" type to search · Enter use as prompt for the selected session · Tab copy · Esc close ")
+                        .right_aligned(),
+                );
+            if items.is_empty() {
+                frame.render_widget(message("No prompts match.", block), area);
+            } else {
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_symbol("▶ ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                frame.render_stateful_widget(list, area, state);
+            }
+        }
+        Some(Popup::Summary { markdown, scroll }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(85),
+                Constraint::Percentage(85),
+            );
+            frame.render_widget(Clear, area);
+            let width = area.width.saturating_sub(4).max(1) as usize;
+            let rows: Vec<Line> = markdown
+                .lines()
+                .flat_map(|l| {
+                    let style = if l.starts_with("# ") {
+                        Style::new().fg(Color::LightMagenta).bold()
+                    } else if l.starts_with("## ") {
+                        Style::new().fg(Color::Cyan).bold()
+                    } else if l.starts_with("**") || l.starts_with("- **") {
+                        Style::new().bold()
+                    } else if l.trim_start().starts_with("- `") || l.starts_with("Commits") {
+                        Style::new().fg(Color::Green)
+                    } else {
+                        Style::new()
+                    };
+                    let text = l
+                        .trim_start_matches("# ")
+                        .trim_start_matches("## ")
+                        .replace("**", "");
+                    hard_wrap(&text, width)
+                        .into_iter()
+                        .map(move |r| Line::from(Span::styled(r, style)))
+                })
+                .collect();
+            let visible = area.height.saturating_sub(2) as usize;
+            let last_page = rows.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
+            *scroll = (*scroll).min(last_page);
+            let block = panel("Today", Color::LightMagenta).title_bottom(
+                Line::from(" e export to Markdown · ↑/↓ scroll · Esc close ").right_aligned(),
+            );
+            frame.render_widget(Paragraph::new(rows).block(block).scroll((*scroll, 0)), area);
         }
         Some(Popup::Results { query, hits, state }) => {
             let area = centered(

@@ -151,6 +151,16 @@ pub fn prune_worktrees(main_checkout: &Path) -> Result<(), String> {
         .ok_or_else(|| "git worktree prune failed".to_string())
 }
 
+/// Commits made today in the repository at `dir`, one line each.
+pub fn commits_today(dir: &Path) -> Vec<String> {
+    git(
+        dir,
+        &["log", "--since=midnight", "--format=%h %s", "--no-merges"],
+    )
+    .map(|out| out.lines().map(str::to_owned).collect())
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

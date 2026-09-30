@@ -28,6 +28,7 @@ use crate::{
     mcp::{self, McpResult, McpStatus},
     notify, paths,
     projects::{self, Model as ProjectsModel},
+    prompts::{self, Prompt},
     sessions::{self, Session},
     statusline,
     transcript::{self, Entry, Hit},
@@ -132,6 +133,14 @@ pub enum Popup {
     },
     /// Bulk cleanup: move every session matching a preset to the trash.
     Cleanup { preset: usize },
+    /// Your earlier prompts, filtered as you type.
+    Prompts {
+        query: String,
+        matches: Vec<usize>,
+        state: ListState,
+    },
+    /// Today's summary, exportable to Markdown.
+    Summary { markdown: String, scroll: u16 },
     /// Matches of a search through every session's conversation.
     Results {
         query: String,
@@ -546,6 +555,10 @@ pub struct App {
     /// View to return to when the help closes.
     help_from: View,
 
+    // Prompt history and daily summary.
+    pub prompts: Vec<Prompt>,
+    summary_job: Option<Job<String>>,
+
     // Organization.
     pub library: Library,
     pub history: History,
@@ -614,6 +627,8 @@ impl App {
             doctor_job: None,
             help_scroll: 0,
             help_from: View::Dashboard,
+            prompts: Vec::new(),
+            summary_job: None,
             library: Library::load(),
             history: History::load(),
             monthly: false,
@@ -1821,6 +1836,65 @@ impl App {
         }
     }
 
+    fn open_prompts(&mut self) {
+        self.prompts = prompts::load();
+        let matches = prompts::search(&self.prompts, "");
+        let mut state = ListState::default();
+        state.select((!matches.is_empty()).then_some(0));
+        self.popup = Some(Popup::Prompts {
+            query: String::new(),
+            matches,
+            state,
+        });
+    }
+
+    /// Builds today's summary in the background; it opens when ready.
+    fn start_summary(&mut self) {
+        if self.summary_job.is_some() {
+            return;
+        }
+        let today = chrono::Local::now().date_naive();
+        let inputs: Vec<crate::summary::Input> = self
+            .sessions
+            .iter()
+            .filter(|s| s.tokens.daily.contains_key(&today))
+            .map(|s| {
+                let mut tokens = sessions::Usage::default();
+                for usage in s.tokens.daily[&today].values() {
+                    tokens.add(usage);
+                }
+                crate::summary::Input {
+                    title: s.title.clone(),
+                    project: s.project_path.clone(),
+                    cwd: s.cwd.clone(),
+                    path: s.path.clone(),
+                    tokens_today: tokens,
+                }
+            })
+            .collect();
+        self.summary_job = Some(Job::spawn(move || crate::summary::build(inputs, today)));
+        self.show_flash("Building today's summary…", false);
+    }
+
+    pub fn summarizing(&self) -> bool {
+        self.summary_job.is_some()
+    }
+
+    /// Writes today's summary to the exports folder.
+    fn export_summary(&mut self, markdown: &str) {
+        let result = exports_dir().and_then(|dir| {
+            let path = dir.join(format!(
+                "{}-claude-code-summary.md",
+                chrono::Local::now().format("%Y-%m-%d")
+            ));
+            std::fs::write(&path, markdown).map(|()| path)
+        });
+        match result {
+            Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
+            Err(e) => self.show_flash(format!("Could not export: {e}"), true),
+        }
+    }
+
     pub fn prompt_running(&self) -> bool {
         self.prompt_job.is_some()
     }
@@ -2037,6 +2111,21 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some(job) = &self.summary_job
+            && let Some(result) = job.poll()
+        {
+            self.summary_job = None;
+            match result {
+                Ok(markdown) => {
+                    self.popup = Some(Popup::Summary {
+                        markdown,
+                        scroll: 0,
+                    })
+                }
+                Err(()) => self.show_flash("Could not build the summary", true),
+            }
+        }
+
         if let Some((what, job)) = &self.background_job
             && let Some(result) = job.poll()
         {
@@ -2282,6 +2371,7 @@ impl App {
             View::Ecosystem => self.handle_eco_key(key.code),
             View::Usage => match key.code {
                 KeyCode::Esc => self.view = View::Dashboard,
+                KeyCode::Char('D') => self.start_summary(),
                 KeyCode::Char('m') => self.monthly = !self.monthly,
                 _ => {}
             },
@@ -2441,6 +2531,8 @@ impl App {
                 }
             }
             KeyCode::Char('T') => self.open_trash(),
+            KeyCode::Char('h') => self.open_prompts(),
+            KeyCode::Char('D') => self.start_summary(),
             KeyCode::Char('C') => self.popup = Some(Popup::Cleanup { preset: 0 }),
             KeyCode::Tab => {
                 if self.project_servers().is_some_and(|s| !s.is_empty()) {
@@ -2563,6 +2655,70 @@ impl App {
                     let chosen = CLEANUP_PRESETS[*preset];
                     self.popup = None;
                     self.run_cleanup(chosen);
+                }
+                _ => {}
+            },
+            Some(Popup::Prompts {
+                query,
+                matches,
+                state,
+            }) => match code {
+                KeyCode::Esc => self.popup = None,
+                KeyCode::Down if !matches.is_empty() => {
+                    let next = state
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(matches.len() - 1));
+                    state.select(Some(next));
+                }
+                KeyCode::Up => state.select_previous(),
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    *matches = prompts::search(&self.prompts, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    *matches = prompts::search(&self.prompts, query);
+                    state.select((!matches.is_empty()).then_some(0));
+                }
+                KeyCode::Tab => {
+                    if let Some(p) = state
+                        .selected()
+                        .and_then(|i| matches.get(i))
+                        .map(|&i| &self.prompts[i])
+                    {
+                        let text = p.text.clone();
+                        match prompts::copy_to_clipboard(&text) {
+                            Ok(()) => self.show_flash("Copied to the clipboard", false),
+                            Err(e) => self.show_flash(format!("Could not copy: {e}"), true),
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    let Some(text) = state
+                        .selected()
+                        .and_then(|i| matches.get(i))
+                        .map(|&i| self.prompts[i].text.clone())
+                    else {
+                        return;
+                    };
+                    self.popup = None;
+                    self.start_prompt_input();
+                    if let Some(Input::Prompt { text: t, .. }) = &mut self.input {
+                        *t = text;
+                    }
+                }
+                _ => {}
+            },
+            Some(Popup::Summary { markdown, scroll }) => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::PageDown | KeyCode::Char(' ') => *scroll = scroll.saturating_add(15),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(15),
+                KeyCode::Char('e') => {
+                    let markdown = markdown.clone();
+                    self.export_summary(&markdown);
                 }
                 _ => {}
             },
@@ -2729,14 +2885,19 @@ impl App {
     }
 }
 
-/// Writes `view` as Markdown to `<documents>/claudash-exports/` (or
-/// `~/claudash-exports/`) and returns the file.
-fn export_markdown(view: &TranscriptView) -> io::Result<PathBuf> {
+/// `<documents>/claudash-exports/` (or `~/claudash-exports/`), created if needed.
+fn exports_dir() -> io::Result<PathBuf> {
     let dir = dirs::document_dir()
         .or_else(dirs::home_dir)
         .ok_or_else(|| io::Error::other("no documents or home folder"))?
         .join("claudash-exports");
     std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Writes `view` as Markdown to the exports folder and returns the file.
+fn export_markdown(view: &TranscriptView) -> io::Result<PathBuf> {
+    let dir = exports_dir()?;
     let slug: String = view
         .title
         .chars()
@@ -2949,6 +3110,15 @@ mod tests {
                             4 => Some(Popup::Results {
                                 query: "q".into(),
                                 hits: vec![hit.clone()],
+                                state: ListState::default(),
+                            }),
+                            5 if view == View::Usage => Some(Popup::Summary {
+                                markdown: "# Title\n\n- a line\n".repeat(20),
+                                scroll: u16::MAX,
+                            }),
+                            5 if view == View::Logs => Some(Popup::Prompts {
+                                query: "q".into(),
+                                matches: Vec::new(),
                                 state: ListState::default(),
                             }),
                             _ => Some(Popup::Confirm {

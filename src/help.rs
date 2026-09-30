@@ -72,6 +72,14 @@ const VIEWS: &[ViewHelp] = &[
                 "inspect it: context per request, tools and failures, files, subagents",
             ),
             ("p", "send it a one-off prompt (claude -p --resume)"),
+            (
+                "h",
+                "search your past prompts; Enter sends one to this session, Tab copies it",
+            ),
+            (
+                "D",
+                "today's summary across projects; e exports it to Markdown",
+            ),
             ("/", "filter by title, path, branch, tag or note"),
             ("f", "search the text of every conversation"),
             ("t · n · *", "tag · add a note · star (kept by claudash)"),
@@ -178,7 +186,7 @@ const VIEWS: &[ViewHelp] = &[
         name: "5 · Usage",
         shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
                 projects. Kept beyond Claude Code's 30-day cleanup.",
-        keys: &[("m", "days or months")],
+        keys: &[("m", "days or months"), ("D", "today's summary")],
     },
 ];
 
