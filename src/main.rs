@@ -1,7 +1,9 @@
+mod analysis;
 mod app;
 mod claude_cli;
 mod doctor;
 mod ecosystem;
+mod git;
 mod help;
 mod history;
 mod hooks;

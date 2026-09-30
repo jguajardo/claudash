@@ -16,9 +16,11 @@ use ratatui::{
 };
 
 use crate::{
+    analysis::{self, Analysis},
     claude_cli::{self, LiveSession, PromptReply},
     doctor,
     ecosystem::{self, Ecosystem},
+    git,
     history::History,
     hooks::{self, Activity},
     instructions::{self, Instructions},
@@ -38,6 +40,11 @@ const REFRESH_EVERY: Duration = Duration::from_secs(5);
 /// How long the selected project must stay the same before its MCP servers are
 /// checked, so scrolling through sessions doesn't start servers for every project.
 const MCP_DEBOUNCE: Duration = Duration::from_millis(600);
+/// How often git state is refreshed for session folders.
+const GIT_EVERY: Duration = Duration::from_secs(15);
+/// Window for "used N times" counts in the Ecosystem view.
+pub const USAGE_WINDOW_DAYS: u64 = 30;
+
 /// How long a footer notice stays visible.
 const FLASH_DURATION: Duration = Duration::from_secs(4);
 /// Plan usage percentages that trigger an alert, once per window.
@@ -52,6 +59,8 @@ pub enum View {
     Transcript,
     /// Everything claudash does, and whether it's set up.
     Help,
+    /// One session in depth: context over time, tools, files, subagents.
+    Inspect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,6 +223,49 @@ impl TranscriptView {
     }
 }
 
+/// Uses per skill, subagent type, MCP server and command.
+#[derive(Default)]
+pub struct UsageCounts {
+    pub skills: HashMap<String, u32>,
+    pub agents: HashMap<String, u32>,
+    pub mcp_servers: HashMap<String, u32>,
+    pub commands: HashMap<String, u32>,
+}
+
+impl UsageCounts {
+    /// Uses of `name`, whether recorded plain or with a plugin prefix
+    /// (`plugin:name`).
+    pub fn count(map: &HashMap<String, u32>, name: &str) -> u32 {
+        map.iter()
+            .filter(|(k, _)| {
+                let k = k.trim_start_matches('/');
+                k == name || k.rsplit_once(':').is_some_and(|(_, n)| n == name)
+            })
+            .map(|(_, v)| v)
+            .sum()
+    }
+
+    /// Everything a plugin contributed: its skills, subagents, commands and
+    /// MCP servers (`plugin_<name>_<server>`).
+    pub fn plugin(&self, plugin: &str) -> u32 {
+        let prefix = format!("{plugin}:");
+        let by_prefix = |map: &HashMap<String, u32>| -> u32 {
+            map.iter()
+                .filter(|(k, _)| k.trim_start_matches('/').starts_with(&prefix))
+                .map(|(_, v)| v)
+                .sum()
+        };
+        let mcp_prefix = format!("plugin_{plugin}_");
+        let mcp: u32 = self
+            .mcp_servers
+            .iter()
+            .filter(|(k, _)| k.starts_with(&mcp_prefix))
+            .map(|(_, v)| v)
+            .sum();
+        by_prefix(&self.skills) + by_prefix(&self.agents) + by_prefix(&self.commands) + mcp
+    }
+}
+
 /// Bulk cleanup presets: which sessions to move to the trash.
 #[derive(Clone, Copy)]
 pub enum Preset {
@@ -349,6 +401,15 @@ pub struct App {
     pub transcript: Option<TranscriptView>,
     find_job: Option<(String, Job<Vec<Hit>>)>,
 
+    // Analysis of every transcript and git state of every session folder.
+    pub analyses: analysis::Cache,
+    analysis_job: Option<Job<analysis::Cache>>,
+    pub git: HashMap<PathBuf, Option<git::Status>>,
+    git_job: Option<Job<HashMap<PathBuf, Option<git::Status>>>>,
+    git_at: Option<Instant>,
+    /// Inspector scroll.
+    pub inspect_scroll: u16,
+
     // Help.
     pub doctor: Option<Vec<doctor::Check>>,
     doctor_job: Option<Job<Vec<doctor::Check>>>,
@@ -404,6 +465,12 @@ impl App {
             prompt_job: None,
             transcript: None,
             find_job: None,
+            analyses: analysis::Cache::new(),
+            analysis_job: None,
+            git: HashMap::new(),
+            git_job: None,
+            git_at: None,
+            inspect_scroll: 0,
             doctor: None,
             doctor_job: None,
             help_scroll: 0,
@@ -497,10 +564,117 @@ impl App {
         self.statusline = statusline::load();
         self.check_plan_alerts();
         self.reload_hook_states();
+        self.start_analysis();
+        if self.git_at.is_none_or(|t| t.elapsed() >= GIT_EVERY) {
+            self.start_git();
+        }
         if self.live_job.is_none() {
             self.live_job = Some(Job::spawn(|| claude_cli::live_sessions(false)));
         }
         self.refreshed_at = Instant::now();
+    }
+
+    /// Re-analyzes transcripts that changed, in the background.
+    fn start_analysis(&mut self) {
+        if self.analysis_job.is_some() {
+            return;
+        }
+        let targets: Vec<(PathBuf, std::time::SystemTime, u64)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.path.clone(), s.modified, s.size))
+            .collect();
+        let previous = self.analyses.clone();
+        self.analysis_job = Some(Job::spawn(move || {
+            analysis::analyze_all(&targets, &previous)
+        }));
+    }
+
+    /// Reads git state for every folder a session ran in, in the background.
+    fn start_git(&mut self) {
+        if self.git_job.is_some() {
+            return;
+        }
+        let mut dirs: Vec<PathBuf> = self
+            .sessions
+            .iter()
+            .filter_map(|s| s.cwd.clone())
+            .filter(|d| d.is_dir())
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        self.git_at = Some(Instant::now());
+        self.git_job = Some(Job::spawn(move || {
+            dirs.into_iter()
+                .map(|d| {
+                    let status = git::status(&d);
+                    (d, status)
+                })
+                .collect()
+        }));
+    }
+
+    pub fn analysis(&self, session: &Session) -> Option<&Analysis> {
+        self.analyses.get(&session.path).map(|(_, _, a)| a.as_ref())
+    }
+
+    pub fn git_status(&self, dir: &Path) -> Option<&git::Status> {
+        self.git.get(dir).and_then(Option::as_ref)
+    }
+
+    /// How many open sessions work in `dir` (the same checkout).
+    pub fn open_in_folder(&self, dir: &Path) -> usize {
+        self.live
+            .keys()
+            .filter_map(|id| self.sessions.iter().find(|s| &s.id == id))
+            .filter(|s| s.cwd.as_deref() == Some(dir))
+            .count()
+    }
+
+    /// Median context size of the first request in sessions of `dir`: what a
+    /// session there carries before any work (system prompt, tools, instructions).
+    pub fn baseline_context(&self, dir: &Path) -> Option<(u64, usize)> {
+        let mut firsts: Vec<u64> = self
+            .sessions
+            .iter()
+            .filter(|s| s.cwd.as_deref() == Some(dir))
+            .filter_map(|s| self.analysis(s).and_then(Analysis::first_context))
+            .collect();
+        if firsts.is_empty() {
+            return None;
+        }
+        firsts.sort_unstable();
+        Some((firsts[firsts.len() / 2], firsts.len()))
+    }
+
+    /// Uses of skills, subagent types, MCP servers and commands in sessions
+    /// active during the last [`USAGE_WINDOW_DAYS`].
+    pub fn recent_usage(&self) -> UsageCounts {
+        let window = Duration::from_secs(USAGE_WINDOW_DAYS * 86_400);
+        let mut counts = UsageCounts::default();
+        for s in &self.sessions {
+            if s.modified.elapsed().is_ok_and(|age| age > window) {
+                continue;
+            }
+            let Some(a) = self.analysis(s) else {
+                continue;
+            };
+            for (map, into) in [
+                (&a.skills, &mut counts.skills),
+                (&a.agents, &mut counts.agents),
+                (&a.mcp_servers, &mut counts.mcp_servers),
+                (&a.commands, &mut counts.commands),
+            ] {
+                for (k, v) in map {
+                    *into.entry(k.clone()).or_default() += v;
+                }
+            }
+        }
+        counts
+    }
+
+    pub fn analyzing(&self) -> bool {
+        self.analysis_job.is_some() && self.analyses.is_empty()
     }
 
     fn reload_hook_states(&mut self) {
@@ -1178,6 +1352,23 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some(job) = &self.analysis_job
+            && let Some(result) = job.poll()
+        {
+            if let Ok(cache) = result {
+                self.analyses = cache;
+            }
+            self.analysis_job = None;
+        }
+        if let Some(job) = &self.git_job
+            && let Some(result) = job.poll()
+        {
+            if let Ok(git) = result {
+                self.git = git;
+            }
+            self.git_job = None;
+        }
+
         if let Some(job) = &self.doctor_job
             && let Some(result) = job.poll()
         {
@@ -1306,6 +1497,7 @@ impl App {
         if self.doctor_job.is_none() {
             self.doctor_job = Some(Job::spawn(doctor::run));
         }
+        self.git_at = None;
         self.refresh();
         if let Some(project) = self.project.take() {
             self.mcp_cache.remove(&project.cwd);
@@ -1360,6 +1552,25 @@ impl App {
                 _ => {}
             },
             View::Transcript => self.handle_transcript_key(key.code),
+            View::Inspect => match key.code {
+                KeyCode::Esc => self.view = View::Dashboard,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.inspect_scroll = self.inspect_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.inspect_scroll = self.inspect_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    self.inspect_scroll = self.inspect_scroll.saturating_add(15)
+                }
+                KeyCode::PageUp => self.inspect_scroll = self.inspect_scroll.saturating_sub(15),
+                KeyCode::Char('v') => {
+                    if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
+                        self.open_transcript(&id, None, None);
+                    }
+                }
+                _ => {}
+            },
             View::Help => match key.code {
                 KeyCode::Esc => self.toggle_help(),
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1444,6 +1655,12 @@ impl App {
                 })
             }
             KeyCode::Char('*') => self.toggle_star(),
+            KeyCode::Char('i') => {
+                if self.selected_session().is_some() {
+                    self.inspect_scroll = 0;
+                    self.view = View::Inspect;
+                }
+            }
             KeyCode::Char('t') => {
                 if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
                     let text = self
@@ -1934,6 +2151,7 @@ mod tests {
                 View::Usage,
                 View::Transcript,
                 View::Help,
+                View::Inspect,
             ] {
                 for tab in EcoTab::ALL {
                     for popup in 0..6 {
@@ -2016,5 +2234,26 @@ mod tests {
         app.hook_states.insert(id, state("Stop", None));
         app.check_activity_changes();
         assert!(app.flash.as_ref().is_some_and(|f| f.0.contains("finished")));
+    }
+
+    #[test]
+    fn counts_uses_by_name_and_plugin() {
+        let counts = UsageCounts {
+            skills: HashMap::from([
+                ("superpowers:writing-plans".into(), 3),
+                ("release-notes".into(), 1),
+            ]),
+            mcp_servers: HashMap::from([
+                ("plugin_context7_context7".into(), 2),
+                ("playwright".into(), 5),
+            ]),
+            commands: HashMap::from([("/superpowers:brainstorm".into(), 1)]),
+            ..Default::default()
+        };
+        assert_eq!(UsageCounts::count(&counts.skills, "writing-plans"), 3);
+        assert_eq!(UsageCounts::count(&counts.skills, "release-notes"), 1);
+        assert_eq!(counts.plugin("superpowers"), 4);
+        assert_eq!(counts.plugin("context7"), 2);
+        assert_eq!(counts.plugin("vercel"), 0);
     }
 }

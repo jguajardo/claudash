@@ -45,6 +45,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
         View::Help => draw_help(frame, app, body),
+        View::Inspect => draw_inspect(frame, app, body),
     }
     draw_footer(frame, app, footer);
     draw_popup(frame, app);
@@ -63,6 +64,36 @@ fn panel(title: &str, accent: Color) -> Block<'_> {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(accent))
         .padding(Padding::horizontal(1))
+}
+
+/// "1 use", "3 uses".
+fn plural(n: u64, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+/// "~1,067" (from `claude plugin details`) -> 1067.
+fn parse_tokens(text: &str) -> u64 {
+    text.chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// `mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot` ->
+/// `chrome-devtools › take_screenshot`; other names unchanged.
+fn tool_label(name: &str) -> String {
+    match name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
+        Some((server, tool)) => {
+            let server = server.rsplit('_').next().unwrap_or(server);
+            format!("{server} › {tool}")
+        }
+        None => name.to_string(),
+    }
 }
 
 fn focused(block: Block<'_>, is_focused: bool) -> Block<'_> {
@@ -213,6 +244,14 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.live.get(&s.id).is_some_and(|l| l.is_background()) {
                 title.push(Span::styled("  bg", dim()));
             }
+            if app.live.contains_key(&s.id)
+                && s.cwd.as_deref().is_some_and(|d| app.open_in_folder(d) >= 2)
+            {
+                title.push(Span::styled(
+                    "  ⚠ shared folder",
+                    Style::new().fg(Color::Red),
+                ));
+            }
             let mut detail = vec![Span::styled(
                 format!("  {}", s.project_path),
                 Style::new().fg(Color::Gray),
@@ -289,6 +328,50 @@ fn project_lines(app: &App) -> Vec<Line<'static>> {
                 Style::new().fg(Color::Yellow),
             ),
         ]));
+    }
+    if let Some(git) = app.git_status(&project.cwd) {
+        let mut spans = vec![
+            Span::styled("⎇ ", Style::new().fg(Color::Cyan)),
+            Span::raw(git.branch.clone().unwrap_or_else(|| "detached HEAD".into())),
+        ];
+        if git.linked_worktree {
+            spans.push(Span::styled("  worktree", dim()));
+        }
+        if git.changed > 0 {
+            spans.push(Span::styled(
+                format!("  {} changed", git.changed),
+                Style::new().fg(Color::Yellow),
+            ));
+        } else {
+            spans.push(Span::styled("  clean", Style::new().fg(Color::Green)));
+        }
+        if git.ahead > 0 {
+            spans.push(Span::styled(
+                format!("  ↑{} to push", git.ahead),
+                Style::new().fg(Color::Cyan),
+            ));
+        }
+        if git.behind > 0 {
+            spans.push(Span::styled(
+                format!("  ↓{} to pull", git.behind),
+                Style::new().fg(Color::Magenta),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if let Some((tokens, n)) = app.baseline_context(&project.cwd) {
+        lines.push(Line::from(vec![
+            Span::styled("◔ ", dim()),
+            Span::raw(format!("~{} tokens at start", human_tokens(tokens))),
+            Span::styled(format!("  (median of {n})"), dim()),
+        ]));
+    }
+    let open = app.open_in_folder(&project.cwd);
+    if open >= 2 {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ {open} open sessions share this folder: their edits can collide"),
+            Style::new().fg(Color::Red).bold(),
+        )));
     }
     lines
 }
@@ -663,7 +746,11 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
     let mut scope = match &app.project {
-        Some(p) => format!(" user + {} ", paths::display(&p.cwd)),
+        Some(p) => format!(
+            " uses: last {} days · user + {} ",
+            crate::app::USAGE_WINDOW_DAYS,
+            paths::display(&p.cwd)
+        ),
         None => " user scope ".to_string(),
     };
     if app.eco_loading() && app.eco.is_some() {
@@ -690,6 +777,31 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
             return;
         }
         let toggling = app.toggling_plugin();
+        let usage = app.recent_usage();
+        // What enabled plugins nobody used cost in every session.
+        let wasted: u64 = eco
+            .plugins
+            .iter()
+            .filter(|p| p.enabled && usage.plugin(p.short_name()) == 0)
+            .filter_map(|p| app.plugin_details.get(&p.id)?.as_ref().ok())
+            .filter_map(|d| crate::ecosystem::always_on_tokens(d))
+            .map(|t| parse_tokens(&t))
+            .sum();
+        let block = if wasted > 0 && !app.analyzing() {
+            block.title_bottom(
+                Line::from(Span::styled(
+                    format!(
+                        " plugins unused in {} days cost ~{} tokens per session ",
+                        crate::app::USAGE_WINDOW_DAYS,
+                        human_tokens(wasted)
+                    ),
+                    Style::new().fg(Color::Red),
+                ))
+                .left_aligned(),
+            )
+        } else {
+            block
+        };
         let items: Vec<ListItem> = eco
             .plugins
             .iter()
@@ -704,13 +816,27 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(p.short_name().to_string(), Style::new().bold()),
                     Span::styled(format!("  {}", p.version), dim()),
                 ];
-                if let Some(Ok(details)) = app.plugin_details.get(&p.id)
-                    && let Some(tokens) = crate::ecosystem::always_on_tokens(details)
-                {
+                let tokens = app
+                    .plugin_details
+                    .get(&p.id)
+                    .and_then(|d| d.as_ref().ok())
+                    .and_then(|d| crate::ecosystem::always_on_tokens(d));
+                if let Some(tokens) = &tokens {
                     spans.push(Span::styled(
                         format!("  {tokens} tok/session"),
                         Style::new().fg(Color::Yellow),
                     ));
+                }
+                let uses = usage.plugin(p.short_name());
+                // Enabled, costs tokens in every session, and nothing of it was used.
+                let costly = tokens.as_deref().is_some_and(|t| t != "~0");
+                if uses > 0 {
+                    spans.push(Span::styled(
+                        format!("  {}", plural(uses as u64, "use")),
+                        dim(),
+                    ));
+                } else if p.enabled && costly && !app.analyzing() {
+                    spans.push(Span::styled("  unused", Style::new().fg(Color::Red).bold()));
                 }
                 if toggling == Some(p.id.as_str()) {
                     spans.push(Span::styled(format!("  {}", app.spinner()), dim()));
@@ -741,13 +867,32 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(panel("Details", Color::Magenta), detail_area);
         return;
     }
+    let usage = app.recent_usage();
+    let counts = match app.eco_tab {
+        EcoTab::Skills => Some(&usage.skills),
+        EcoTab::Agents => Some(&usage.agents),
+        EcoTab::Commands => Some(&usage.commands),
+        _ => None,
+    };
     let items: Vec<ListItem> = list
         .iter()
         .map(|item| {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(item.name.clone(), Style::new().bold()),
                 Span::styled(format!("  {}", item.source), dim()),
-            ]))
+            ];
+            if let Some(map) = counts {
+                let n = crate::app::UsageCounts::count(map, &item.name);
+                spans.push(if n > 0 {
+                    Span::styled(
+                        format!("  {}", plural(n as u64, "use")),
+                        Style::new().fg(Color::Cyan),
+                    )
+                } else {
+                    Span::styled("  unused", dim())
+                });
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let selected_item = app.eco_states[tab_index]
@@ -1110,6 +1255,198 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+// ---- Inspector ---------------------------------------------------------------
+
+/// Downsamples `values` to `width` buckets, keeping each bucket's peak.
+fn downsample(values: &[u64], width: usize) -> Vec<u64> {
+    if values.len() <= width || width == 0 {
+        return values.to_vec();
+    }
+    (0..width)
+        .map(|i| {
+            let start = i * values.len() / width;
+            let end = ((i + 1) * values.len() / width).max(start + 1);
+            values[start..end].iter().copied().max().unwrap_or(0)
+        })
+        .collect()
+}
+
+fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(session) = app.selected_session() else {
+        frame.render_widget(
+            message("Select a session first.", panel("Inspect", Color::Cyan)),
+            area,
+        );
+        return;
+    };
+    let block = panel("", Color::Cyan).title(
+        Line::from(format!(" {} ", session.title))
+            .bold()
+            .fg(Color::Cyan),
+    );
+    let Some(a) = app.analysis(session) else {
+        let text = format!("{} Analyzing the conversation…", app.spinner());
+        frame.render_widget(message(text, block), area);
+        return;
+    };
+    let block = block.title(
+        Line::from(format!(" {} ", session.project_path))
+            .fg(Color::DarkGray)
+            .right_aligned(),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [chart_area, body] =
+        Layout::vertical([Constraint::Length(8), Constraint::Min(3)]).areas(inner);
+
+    // Context per request.
+    let points: Vec<u64> = a.context.iter().map(|p| p.tokens).collect();
+    let compactions = a.context.iter().filter(|p| p.after_compaction).count();
+    let peak = points.iter().copied().max().unwrap_or(0);
+    let data = downsample(&points, chart_area.width.saturating_sub(2) as usize);
+    let chart = ratatui::widgets::Sparkline::default()
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(dim())
+                .title(Line::from(vec![
+                    Span::styled("Context per request  ", Style::new().bold()),
+                    Span::styled(
+                        format!(
+                            "{} requests · first {} · peak {} · now {} · {} compaction(s)",
+                            points.len(),
+                            human_tokens(a.first_context().unwrap_or(0)),
+                            human_tokens(peak),
+                            human_tokens(points.last().copied().unwrap_or(0)),
+                            compactions
+                        ),
+                        dim(),
+                    ),
+                ])),
+        )
+        .data(&data)
+        .style(Style::new().fg(Color::Cyan));
+    frame.render_widget(chart, chart_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let section = |lines: &mut Vec<Line>, title: &str| {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            title.to_string(),
+            Style::new().fg(Color::LightMagenta).bold(),
+        )));
+    };
+
+    section(&mut lines, "Tools");
+    let mut tools: Vec<(&String, &crate::analysis::ToolStat)> = a.tools.iter().collect();
+    tools.sort_by_key(|(_, t)| std::cmp::Reverse(t.calls));
+    if tools.is_empty() {
+        lines.push(Line::from(Span::styled("  no tool calls", dim())));
+    }
+    for (name, t) in tools {
+        let name = tool_label(name);
+        let rate = if t.calls > 0 {
+            t.errors as f64 / t.calls as f64 * 100.0
+        } else {
+            0.0
+        };
+        let color = if t.errors == 0 {
+            Color::DarkGray
+        } else if rate >= 20.0 {
+            Color::Red
+        } else {
+            Color::Yellow
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "  {:<40}",
+                name.chars().take(40).collect::<String>()
+            )),
+            Span::styled(format!("{:>5} calls", t.calls), Style::new().bold()),
+            Span::styled(
+                format!("   {:>3} failed ({rate:.0}%)", t.errors),
+                Style::new().fg(color),
+            ),
+        ]));
+    }
+
+    section(&mut lines, &format!("Subagents ({})", a.subagents.len()));
+    if a.subagents.is_empty() {
+        lines.push(Line::from(Span::styled("  none", dim())));
+    }
+    let mut subagents: Vec<&crate::analysis::Subagent> = a.subagents.iter().collect();
+    subagents.sort_by_key(|s| std::cmp::Reverse(s.usage.processed()));
+    for sub in subagents {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ├ {}", sub.agent_type),
+                Style::new().fg(Color::Cyan).bold(),
+            ),
+            Span::raw(format!("  {}", sub.description)),
+            Span::styled(
+                format!(
+                    "  · {}{} · {} tools · {} tokens",
+                    sub.model,
+                    if sub.background { " · background" } else { "" },
+                    sub.tool_calls,
+                    human_tokens(sub.usage.processed())
+                ),
+                dim(),
+            ),
+        ]));
+    }
+
+    section(&mut lines, &format!("Files edited ({})", a.edits.len()));
+    let mut edits: Vec<(&String, &Option<chrono::DateTime<Local>>)> = a.edits.iter().collect();
+    edits.sort_by_key(|(_, at)| std::cmp::Reverse(**at));
+    if edits.is_empty() {
+        lines.push(Line::from(Span::styled("  none", dim())));
+    }
+    for (file, at) in edits {
+        let when = at
+            .map(|t| t.format("%b %d %H:%M").to_string())
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {}", paths::display(std::path::Path::new(file)))),
+            Span::styled(format!("  {when}"), dim()),
+        ]));
+    }
+
+    section(&mut lines, "Used");
+    for (label, map) in [
+        ("skills", &a.skills),
+        ("subagents", &a.agents),
+        ("MCP servers", &a.mcp_servers),
+        ("commands", &a.commands),
+    ] {
+        let mut items: Vec<(&String, &u32)> = map.iter().collect();
+        items.sort_by_key(|(k, v)| (std::cmp::Reverse(**v), (*k).clone()));
+        let text = if items.is_empty() {
+            "—".to_string()
+        } else {
+            items
+                .iter()
+                .map(|(k, v)| format!("{k} ×{v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {label:<12}"), dim()),
+            Span::raw(text),
+        ]));
+    }
+
+    let visible = body.height as usize;
+    let last_page = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
+    app.inspect_scroll = app.inspect_scroll.min(last_page);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.inspect_scroll, 0)),
+        body,
+    );
+}
+
 // ---- Help --------------------------------------------------------------------
 
 fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1419,6 +1756,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
                     (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
+                    (View::Inspect, _) => vec![
+                        key(" v "),
+                        hint(" read conversation  "),
+                        key(" Esc "),
+                        hint(" back  "),
+                    ],
                     (View::Transcript, _) => vec![
                         key(" / "),
                         hint(" search  "),
@@ -1680,5 +2023,21 @@ mod tests {
         assert_eq!(hard_wrap("abcdef", 4), ["abcd", "ef"]);
         assert_eq!(hard_wrap("", 4), [""]);
         assert_eq!(hard_wrap("naïveté", 3), ["naï", "vet", "é"]);
+    }
+
+    #[test]
+    fn labels_tools_and_tokens() {
+        assert_eq!(
+            tool_label("mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot"),
+            "chrome-devtools › take_screenshot"
+        );
+        assert_eq!(
+            tool_label("mcp__playwright__browser_click"),
+            "playwright › browser_click"
+        );
+        assert_eq!(tool_label("Bash"), "Bash");
+        assert_eq!(parse_tokens("~1,067"), 1067);
+        assert_eq!(plural(1, "use"), "1 use");
+        assert_eq!(plural(3, "use"), "3 uses");
     }
 }

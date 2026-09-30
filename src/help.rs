@@ -55,9 +55,11 @@ const VIEWS: &[ViewHelp] = &[
     ViewHelp {
         name: "1 · Dashboard",
         shows: "Every Claude Code session on this machine, newest first, with what's open right now \
-                (▲ needs you, ● working, ● waiting). Beside it, the selected session's project: the \
-                instruction files Claude Code loads there and its MCP servers' health. Below, the \
-                session's context, tokens, cost, prompt cache and your plan usage with a forecast.",
+                (▲ needs you, ● working, ● waiting; ⚠ when two open sessions share a folder). Beside \
+                it, the selected session's project: the instruction files Claude Code loads there, its \
+                git state, how many tokens a session there starts with, and its MCP servers' health. \
+                Below, the session's context, tokens, cost, prompt cache and your plan usage with a \
+                forecast.",
         keys: &[
             ("↑/↓  j/k", "move between sessions"),
             (
@@ -65,6 +67,10 @@ const VIEWS: &[ViewHelp] = &[
                 "resume the session in Claude Code (claude --resume)",
             ),
             ("v", "read its conversation"),
+            (
+                "i",
+                "inspect it: context per request, tools and failures, files, subagents",
+            ),
             ("p", "send it a one-off prompt (claude -p --resume)"),
             ("/", "filter by title, path, branch, tag or note"),
             ("f", "search the text of every conversation"),
@@ -93,8 +99,9 @@ const VIEWS: &[ViewHelp] = &[
     ViewHelp {
         name: "2 · Ecosystem",
         shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
-                user, project, claude.ai and plugin scope. Plugins show their always-on token cost per \
-                session.",
+                user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
+                days. Plugins show their always-on token cost per session, and the ones you never use \
+                are flagged with what they cost you.",
         keys: &[
             ("←/→  Tab", "switch tab"),
             ("Enter", "details"),
