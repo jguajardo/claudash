@@ -93,6 +93,7 @@ claudash                       # open the dashboard
 claudash --no-notify           # no desktop notifications or bell
 claudash --context-limit 200k  # context window to assume when the status line hasn't reported one
 claudash setup                 # connect the status line and hooks (see above)
+claudash doctor                # check claudash's connection to Claude Code
 claudash export <ID> [-o FILE] # a conversation as Markdown
 claudash --help
 ```
@@ -117,7 +118,7 @@ claudash --help
 | `←` `→` | Previous / next ecosystem tab |
 | `Space` | Enable or disable the selected plugin |
 | `r` | Reload sessions and re-check MCP servers and the ecosystem |
-| `?` | Show all keys |
+| `?` | Help: what claudash is, whether it's set up (the `doctor` checks), every view and key, and what changes things |
 | `q`, `Ctrl+C` | Quit |
 
 ### Configuration

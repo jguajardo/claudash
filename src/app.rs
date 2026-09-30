@@ -16,7 +16,8 @@ use ratatui::{
 };
 
 use crate::{
-    claude_cli::{self, PromptReply},
+    claude_cli::{self, LiveSession, PromptReply},
+    doctor,
     ecosystem::{self, Ecosystem},
     history::History,
     hooks::{self, Activity},
@@ -49,6 +50,8 @@ pub enum View {
     Usage,
     /// A session's conversation, full screen.
     Transcript,
+    /// Everything claudash does, and whether it's set up.
+    Help,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -306,8 +309,8 @@ pub struct App {
     /// Session to resume; handled by `run`, which owns the terminal.
     pending_resume: Option<(String, PathBuf)>,
     /// Open sessions (ID -> "busy"/"idle") from `claude agents --json`.
-    pub live: HashMap<String, String>,
-    live_job: Option<Job<Result<HashMap<String, String>, String>>>,
+    pub live: HashMap<String, LiveSession>,
+    live_job: Option<Job<Result<HashMap<String, LiveSession>, String>>>,
     pub statusline: statusline::Store,
     /// Last hook event per session, from `claudash hook`.
     pub hook_states: HashMap<String, hooks::State>,
@@ -345,6 +348,13 @@ pub struct App {
     // Conversations.
     pub transcript: Option<TranscriptView>,
     find_job: Option<(String, Job<Vec<Hit>>)>,
+
+    // Help.
+    pub doctor: Option<Vec<doctor::Check>>,
+    doctor_job: Option<Job<Vec<doctor::Check>>>,
+    pub help_scroll: u16,
+    /// View to return to when the help closes.
+    help_from: View,
 
     // Organization.
     pub library: Library,
@@ -394,10 +404,16 @@ impl App {
             prompt_job: None,
             transcript: None,
             find_job: None,
+            doctor: None,
+            doctor_job: None,
+            help_scroll: 0,
+            help_from: View::Dashboard,
             library: Library::load(),
             history: History::load(),
             monthly: false,
         };
+        app.doctor_job = Some(Job::spawn(doctor::run));
+        app.maybe_welcome();
         let expired = library::purge_expired();
         if expired > 0 {
             app.show_flash(
@@ -482,7 +498,7 @@ impl App {
         self.check_plan_alerts();
         self.reload_hook_states();
         if self.live_job.is_none() {
-            self.live_job = Some(Job::spawn(claude_cli::live_sessions));
+            self.live_job = Some(Job::spawn(|| claude_cli::live_sessions(false)));
         }
         self.refreshed_at = Instant::now();
     }
@@ -496,8 +512,12 @@ impl App {
     /// from `claude agents --json`. `None` for sessions that aren't open.
     pub fn activity(&self, id: &str) -> Option<Activity> {
         let live = self.live.get(id)?;
+        // Claude Code's own "waiting on a permission" wins; hooks refine the rest.
+        if live.needs_you() {
+            return Some(Activity::NeedsYou);
+        }
         match self.hook_states.get(id).map(hooks::State::activity) {
-            Some(Activity::Ended) | None => Some(match live.as_str() {
+            Some(Activity::Ended) | None => Some(match live.status.as_str() {
                 "busy" => Activity::Working,
                 _ => Activity::Waiting,
             }),
@@ -892,6 +912,56 @@ impl App {
         }
     }
 
+    /// The first time claudash opens without the status line or hooks connected,
+    /// explain what it is and what `claudash setup` adds. Shown once.
+    fn maybe_welcome(&mut self) {
+        let Some(marker) = library::data_dir().map(|d| d.join("welcomed")) else {
+            return;
+        };
+        if marker.exists() {
+            return;
+        }
+        let (statusline, hooks) = crate::setup::installed();
+        if statusline && hooks == hooks::EVENTS.len() {
+            return;
+        }
+        let lines = [
+            "claudash is a control panel for Claude Code: every session on this machine,",
+            "what's open and what needs you, each project's instructions and MCP servers,",
+            "your plan usage, conversations, plugins and more, on one screen.",
+            "",
+            "It can also act for you: resume or prompt a session, tag and note sessions,",
+            "move old ones to a trash, search every conversation, toggle plugins.",
+            "",
+            "To get alerts when a session needs you, plan usage and cache diagnostics,",
+            "connect it to Claude Code once from a terminal:",
+            "",
+            "    claudash setup           shows what it would change",
+            "    claudash setup --apply   makes the change (backs up settings.json first)",
+            "",
+            "Press ? any time for everything claudash can do. Esc closes this.",
+        ];
+        self.popup = Some(Popup::Text {
+            title: " Welcome to claudash ".into(),
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            scroll: 0,
+        });
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(marker, "");
+    }
+
+    fn toggle_help(&mut self) {
+        if self.view == View::Help {
+            self.view = self.help_from;
+        } else {
+            self.help_from = self.view;
+            self.help_scroll = 0;
+            self.view = View::Help;
+        }
+    }
+
     pub fn prompt_running(&self) -> bool {
         self.prompt_job.is_some()
     }
@@ -1108,6 +1178,13 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some(job) = &self.doctor_job
+            && let Some(result) = job.poll()
+        {
+            self.doctor = result.ok();
+            self.doctor_job = None;
+        }
+
         if let Some((query, job)) = &self.find_job
             && let Some(result) = job.poll()
         {
@@ -1226,6 +1303,9 @@ impl App {
 
     /// `r`: reloads everything and re-checks the selected project from scratch.
     fn refresh_all(&mut self) {
+        if self.doctor_job.is_none() {
+            self.doctor_job = Some(Job::spawn(doctor::run));
+        }
         self.refresh();
         if let Some(project) = self.project.take() {
             self.mcp_cache.remove(&project.cwd);
@@ -1265,7 +1345,7 @@ impl App {
             KeyCode::Char('2') => return self.view = View::Ecosystem,
             KeyCode::Char('3') => return self.view = View::Usage,
             KeyCode::Char('r') => return self.refresh_all(),
-            KeyCode::Char('?') => return self.popup = Some(help_popup()),
+            KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
         }
         match self.view {
@@ -1280,6 +1360,22 @@ impl App {
                 _ => {}
             },
             View::Transcript => self.handle_transcript_key(key.code),
+            View::Help => match key.code {
+                KeyCode::Esc => self.toggle_help(),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    self.help_scroll = self.help_scroll.saturating_add(15)
+                }
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(15),
+                KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => self.help_scroll = u16::MAX,
+                _ => {}
+            },
         }
     }
 
@@ -1763,53 +1859,6 @@ pub fn textwrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn help_popup() -> Popup {
-    let lines = [
-        "Views",
-        "  1  Dashboard    2  Ecosystem    3  Usage",
-        "",
-        "Everywhere",
-        "  r  reload sessions, re-check MCP and ecosystem",
-        "  ?  this help            q / Ctrl+C  quit",
-        "",
-        "Dashboard · sessions",
-        "  ↑/↓ j/k   move                 /      search",
-        "  Enter     resume in Claude Code",
-        "  p         send a one-off prompt (claude -p --resume)",
-        "  d         move the session to the trash (asks first)",
-        "  t / n / * tags · note · star (search finds tags and notes)",
-        "  T / C     trash (restore or delete for good) · bulk cleanup",
-        "  v         read the conversation      f  search all conversations",
-        "  Tab       move to the MCP list",
-        "",
-        "Dashboard · MCP",
-        "  ↑/↓       move      Enter  show the server's latest log",
-        "  Tab/Esc   back to sessions",
-        "",
-        "Ecosystem",
-        "  ←/→ Tab   switch tab (Skills, Agents, Commands, Hooks, Plugins)",
-        "  Enter     details           Space  enable/disable plugin",
-        "",
-        "Conversation (v)",
-        "  ↑/↓ PgUp/PgDn g/G  scroll    o  show/hide tool output",
-        "  /  search   n/N  next/previous match   e  export to Markdown",
-        "",
-        "Usage",
-        "  m         days / months",
-        "",
-        "Popups",
-        "  ↑/↓ PgUp/PgDn  scroll     Esc  close",
-        "",
-        "Plan usage and the real context window come from Claude Code's",
-        "status line and hooks: run `claudash setup` to enable them.",
-    ];
-    Popup::Text {
-        title: " Keys ".into(),
-        lines: lines.iter().map(|s| s.to_string()).collect(),
-        scroll: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1884,6 +1933,7 @@ mod tests {
                 View::Ecosystem,
                 View::Usage,
                 View::Transcript,
+                View::Help,
             ] {
                 for tab in EcoTab::ALL {
                     for popup in 0..6 {
@@ -1892,7 +1942,11 @@ mod tests {
                         app.monthly = popup % 2 == 0;
                         app.popup = match popup {
                             0 => None,
-                            1 => Some(help_popup()),
+                            1 => Some(Popup::Text {
+                                title: " t ".into(),
+                                lines: vec!["a line".into(); 50],
+                                scroll: u16::MAX,
+                            }),
                             2 => Some(Popup::Trash {
                                 items: Vec::new(),
                                 state: ListState::default(),
@@ -1928,7 +1982,14 @@ mod tests {
         };
         app.flash = None;
         app.seen_activity = Some(HashMap::new());
-        app.live = HashMap::from([(id.clone(), "busy".into())]);
+        app.live = HashMap::from([(
+            id.clone(),
+            LiveSession {
+                session_id: id.clone(),
+                status: "busy".into(),
+                ..Default::default()
+            },
+        )]);
         app.hook_states =
             HashMap::from([(id.clone(), state("Notification", Some("permission_prompt")))]);
         // First time this session is seen: no alert, even though it needs you.

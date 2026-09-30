@@ -44,6 +44,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Ecosystem => draw_ecosystem(frame, app, body),
         View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
+        View::Help => draw_help(frame, app, body),
     }
     draw_footer(frame, app, footer);
     draw_popup(frame, app);
@@ -116,6 +117,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" {label} "), style));
         spans.push(Span::raw(" "));
     }
+    if app.view == View::Help {
+        spans.push(Span::styled(
+            " help ",
+            Style::new().fg(Color::White).bg(HIGHLIGHT).bold(),
+        ));
+    }
     if app.view == View::Transcript {
         spans.push(Span::styled(
             " conversation ",
@@ -124,7 +131,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), left);
     frame.render_widget(
-        Paragraph::new(Line::from("? keys ").dark_gray().right_aligned()),
+        Paragraph::new(Line::from("? help ").dark_gray().right_aligned()),
         right,
     );
 }
@@ -202,6 +209,9 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             if let Some((text, color)) = marker {
                 title.push(Span::styled(text, Style::new().fg(color).bold()));
+            }
+            if app.live.get(&s.id).is_some_and(|l| l.is_background()) {
+                title.push(Span::styled("  bg", dim()));
             }
             let mut detail = vec![Span::styled(
                 format!("  {}", s.project_path),
@@ -1100,6 +1110,24 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+// ---- Help --------------------------------------------------------------------
+
+fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
+    let lines = crate::help::lines(app);
+    let block = panel("Help", Color::LightMagenta);
+    let visible = block.inner(area).height as usize;
+    let last_page = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
+    app.help_scroll = app.help_scroll.min(last_page);
+    let block =
+        block.title_bottom(Line::from(" ↑/↓ PgUp/PgDn scroll · ? or Esc close ").right_aligned());
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((app.help_scroll, 0)),
+        area,
+    );
+}
+
 // ---- Conversation ------------------------------------------------------------
 
 /// Builds the screen rows for a conversation at `width` columns.
@@ -1390,6 +1418,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         hint(" toggle plugin  "),
                     ],
                     (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
+                    (View::Help, _) => vec![key(" Esc "), hint(" back  ")],
                     (View::Transcript, _) => vec![
                         key(" / "),
                         hint(" search  "),

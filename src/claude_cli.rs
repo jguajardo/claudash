@@ -6,6 +6,7 @@
 //! launch the full path; since Rust 1.77 the standard library runs `.cmd`/`.bat`
 //! through `cmd.exe` with safely escaped arguments.
 
+use serde::Deserialize;
 use std::{
     collections::HashMap,
     env,
@@ -23,37 +24,108 @@ const PROGRAM: &str = "claude";
 /// If it isn't found on `PATH`, the bare name is used so that spawning fails
 /// with the usual "not found" error.
 pub fn command() -> Command {
-    static RESOLVED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let resolved = RESOLVED.get_or_init(|| {
-        let path = env::var_os("PATH")?;
-        find_executable(PROGRAM, &path, &executable_extensions())
-    });
-    match resolved {
+    match path() {
         Some(path) => Command::new(path),
         None => Command::new(PROGRAM),
     }
 }
 
-/// Sessions open right now, from `claude agents --json`: session ID -> status
-/// (`busy` while Claude is working, `idle` while it waits for input).
-pub fn live_sessions() -> Result<HashMap<String, String>, String> {
+/// Where `claude` was found on `PATH`, if it was.
+pub fn path() -> Option<&'static PathBuf> {
+    static RESOLVED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    RESOLVED.get_or_init(|| which(PROGRAM)).as_ref()
+}
+
+/// Finds a program on `PATH` (honoring `PATHEXT` on Windows).
+pub fn which(program: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    find_executable(program, &path, &executable_extensions())
+}
+
+/// A session Claude Code reports as open, from `claude agents --json`
+/// (<https://code.claude.com/docs/en/agent-view>).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct LiveSession {
+    #[serde(rename = "sessionId", default)]
+    pub session_id: String,
+    /// Short ID used by `claude attach/logs/stop/respawn` (background sessions).
+    pub id: Option<String>,
+    /// "interactive" or "background".
+    #[serde(default)]
+    pub kind: String,
+    /// "busy", "waiting" (on a permission or other input) or "idle".
+    #[serde(default)]
+    pub status: String,
+    /// "working", "blocked", "done", "failed" or "stopped" (background sessions).
+    pub state: Option<String>,
+    /// Why a blocked session waits, such as "permission prompt".
+    #[serde(rename = "waitingFor")]
+    pub waiting_for: Option<String>,
+    pub pid: Option<u32>,
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+}
+
+impl LiveSession {
+    /// Waiting for a permission decision or other input only you can give.
+    pub fn needs_you(&self) -> bool {
+        self.status == "waiting" || self.state.as_deref() == Some("blocked")
+    }
+
+    pub fn is_background(&self) -> bool {
+        self.kind == "background"
+    }
+}
+
+/// Sessions Claude Code reports as open (and, with `all`, finished background
+/// sessions), keyed by session ID.
+pub fn live_sessions(all: bool) -> Result<HashMap<String, LiveSession>, String> {
+    let mut args = vec!["agents", "--json"];
+    if all {
+        args.push("--all");
+    }
     let output = command()
-        .args(["agents", "--json"])
+        .args(&args)
         .output()
         .map_err(|e| format!("Could not run `claude agents`: {e}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    let list: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    parse_live(&output.stdout)
+}
+
+fn parse_live(json: &[u8]) -> Result<HashMap<String, LiveSession>, String> {
+    let list: Vec<LiveSession> = serde_json::from_slice(json).map_err(|e| e.to_string())?;
     Ok(list
-        .iter()
-        .filter_map(|s| {
-            let id = s["sessionId"].as_str()?;
-            let status = s["status"].as_str().unwrap_or("open");
-            Some((id.to_string(), status.to_string()))
-        })
+        .into_iter()
+        .filter(|s| !s.session_id.is_empty())
+        .map(|s| (s.session_id.clone(), s))
         .collect())
+}
+
+/// `claude --version`, e.g. "2.1.285".
+pub fn version() -> Option<String> {
+    let output = command().arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .next()
+        .filter(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(str::to_owned)
+}
+
+/// Compares dotted versions: `at_least("2.1.285", "2.1.277")` is true.
+pub fn at_least(version: &str, minimum: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|p| {
+                p.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    parse(version) >= parse(minimum)
 }
 
 /// Result of a one-off prompt sent to an existing session.
@@ -194,5 +266,23 @@ mod tests {
             stdout.trim(),
             "args=--resume 0fb00c9a-2bf4-4096-ba7e-c46880a43b21"
         );
+    }
+
+    #[test]
+    fn parses_agents_json_and_versions() {
+        let live = parse_live(
+            br#"[{"pid":1,"sessionId":"a","kind":"interactive","status":"busy"},
+                 {"id":"7c5d","sessionId":"b","kind":"background","state":"blocked",
+                  "status":"waiting","waitingFor":"permission prompt"},
+                 {"status":"idle"}]"#,
+        )
+        .unwrap();
+        assert_eq!(live.len(), 2);
+        assert!(!live["a"].needs_you());
+        assert!(live["b"].needs_you() && live["b"].is_background());
+        assert_eq!(live["b"].id.as_deref(), Some("7c5d"));
+        assert!(at_least("2.1.285", "2.1.277"));
+        assert!(!at_least("2.1.99", "2.1.277"));
+        assert!(at_least("3.0.0", "2.1.277"));
     }
 }

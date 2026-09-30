@@ -46,6 +46,32 @@ fn is_ours(command: &str, sub: &str) -> bool {
     command.contains("claudash") && command.contains(sub)
 }
 
+/// What `claudash setup --apply` has registered in the user settings:
+/// (status line, number of hook events out of [`hooks::EVENTS`]).
+pub fn installed() -> (bool, usize) {
+    let settings: Option<Value> = crate::paths::claude_home()
+        .and_then(|home| fs::read_to_string(home.join("settings.json")).ok())
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let Some(settings) = settings else {
+        return (false, 0);
+    };
+    let statusline = settings["statusLine"]["command"]
+        .as_str()
+        .is_some_and(|c| is_ours(c, " statusline"));
+    let hooks = hooks::EVENTS
+        .iter()
+        .filter(|event| {
+            settings["hooks"][**event]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                .any(|h| h["command"].as_str().is_some_and(|c| is_ours(c, " hook")))
+        })
+        .count();
+    (statusline, hooks)
+}
+
 /// Applies (or removes) claudash's entries. Returns what changed, in words.
 fn update(settings: &mut Map<String, Value>, exe: &str, mode: Mode) -> Vec<String> {
     let mut changes = Vec::new();

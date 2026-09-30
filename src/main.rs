@@ -1,6 +1,8 @@
 mod app;
 mod claude_cli;
+mod doctor;
 mod ecosystem;
+mod help;
 mod history;
 mod hooks;
 mod instructions;
@@ -27,6 +29,7 @@ Usage:
   claudash setup [--apply | --remove]    connect claudash to Claude Code (status
                                          line + hooks); shows the changes first
   claudash statusline [-- <COMMAND>...]  status line command for Claude Code
+  claudash doctor                        check claudash's connection to Claude Code
   claudash hook                          hook command for Claude Code
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
                                          without -o)
@@ -47,6 +50,7 @@ enum Cli {
     Setup(setup::Mode),
     Statusline { wrapped: Vec<String> },
     Hook,
+    Doctor,
     Export { id: String, output: Option<String> },
 }
 
@@ -87,6 +91,7 @@ fn parse_args(args: impl IntoIterator<Item = String>, env: Option<String>) -> Re
                 };
             }
             "hook" => return Ok(Cli::Hook),
+            "doctor" => return Ok(Cli::Doctor),
             "export" => {
                 let rest: Vec<String> = args.collect();
                 return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -155,6 +160,10 @@ fn main() -> std::io::Result<()> {
         Ok(Cli::Setup(mode)) => return exit_on_error("setup", setup::run(mode)),
         Ok(Cli::Statusline { wrapped }) => return statusline::run(&wrapped),
         Ok(Cli::Hook) => return hooks::run(),
+        Ok(Cli::Doctor) => {
+            doctor::print();
+            return Ok(());
+        }
         Ok(Cli::Export { id, output }) => {
             return exit_on_error("export", export(&id, output.as_deref()));
         }
@@ -270,6 +279,7 @@ mod tests {
         );
         assert!(parse(&["setup", "--bogus"]).is_err());
         assert_eq!(parse(&["hook"]), Ok(Cli::Hook));
+        assert_eq!(parse(&["doctor"]), Ok(Cli::Doctor));
         assert_eq!(
             parse(&["export", "abc"]),
             Ok(Cli::Export {
