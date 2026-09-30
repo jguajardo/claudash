@@ -2,16 +2,17 @@
 //!
 //! That command already resolves every configuration source (`~/.claude.json`,
 //! the project's `.mcp.json`, plugins and claude.ai connectors) and health-checks
-//! each server. It takes several seconds, so it runs on a separate thread and
-//! the result comes back over a channel.
+//! each server. Project-scoped servers depend on the directory it runs in, so
+//! it runs in the selected session's project folder. It takes several seconds,
+//! so the dashboard runs it on a background thread.
 //!
 //! Line format:
 //!   `<name>: <command or URL> - <symbol> <status>[ — <detail>]`
 //! Only name and status are kept: the command/URL may contain credentials.
 
 use std::{
-    sync::mpsc::{self, Receiver},
-    thread,
+    fs,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub enum McpStatus {
 }
 
 pub struct McpServer {
+    /// Name as `claude mcp list` prints it, e.g. `plugin:context7:context7`.
+    pub full_name: String,
     /// Display name, without the source prefix (`plugin:x:`, `claude.ai `).
     pub name: String,
     /// Where it comes from: "local", "claude.ai" or the plugin name.
@@ -33,18 +36,11 @@ pub struct McpServer {
 
 pub type McpResult = Result<Vec<McpServer>, String>;
 
-/// Runs `claude mcp list` in the background.
-pub fn spawn_check() -> Receiver<McpResult> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(run_check());
-    });
-    rx
-}
-
-fn run_check() -> McpResult {
+/// Runs `claude mcp list` in `cwd`. Takes several seconds; call it off the UI thread.
+pub fn check(cwd: &Path) -> McpResult {
     let output = crate::claude_cli::command()
         .args(["mcp", "list"])
+        .current_dir(cwd)
         .output()
         .map_err(|e| format!("Could not run `claude mcp list`: {e}"))?;
     if !output.status.success() {
@@ -67,8 +63,10 @@ fn parse_line(line: &str) -> Option<McpServer> {
     // and the status starts after the last " - ".
     let (full_name, rest) = line.split_once(": ")?;
     let (_target, status_text) = rest.rsplit_once(" - ")?;
-    let (source, name) = split_source(full_name.trim());
+    let full_name = full_name.trim();
+    let (source, name) = split_source(full_name);
     Some(McpServer {
+        full_name: full_name.to_string(),
         name,
         source,
         status: parse_status(status_text.trim()),
@@ -77,7 +75,7 @@ fn parse_line(line: &str) -> Option<McpServer> {
 
 fn split_source(full_name: &str) -> (String, String) {
     if let Some(rest) = full_name.strip_prefix("plugin:") {
-        // plugin:<plugin>:<servidor>
+        // plugin:<plugin>:<server>
         return match rest.split_once(':') {
             Some((plugin, server)) => (plugin.to_string(), server.to_string()),
             None => ("plugin".to_string(), rest.to_string()),
@@ -106,6 +104,90 @@ fn parse_status(text: &str) -> McpStatus {
     } else {
         McpStatus::Unknown(text.to_string())
     }
+}
+
+/// How many log lines to show.
+const LOG_LINES: usize = 200;
+
+/// Where Claude Code writes MCP server logs for a project (observed, not
+/// documented): `<cache>/claude-cli-nodejs/<project>/mcp-logs-<server>/`, one
+/// JSONL file per connection, where `<project>` and `<server>` have every
+/// non-alphanumeric character replaced by `-`.
+fn log_dir(cwd: &Path, full_name: &str) -> Option<PathBuf> {
+    let mut root = dirs::cache_dir()?.join("claude-cli-nodejs");
+    if cfg!(windows) {
+        root.push("Cache");
+    }
+    let project = sanitize(&cwd.to_string_lossy());
+    Some(
+        root.join(project)
+            .join(format!("mcp-logs-{}", sanitize(full_name))),
+    )
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The last lines of the newest log for `full_name` in project `cwd`,
+/// formatted as `HH:MM:SS  level  message`. Returns the log file and its lines.
+pub fn read_log(cwd: &Path, full_name: &str) -> Result<(PathBuf, Vec<String>), String> {
+    let dir = log_dir(cwd, full_name).ok_or("Could not find the cache directory")?;
+    let newest = fs::read_dir(&dir)
+        .map_err(|_| {
+            format!(
+                "No logs yet for this server in {}",
+                crate::paths::display(&dir)
+            )
+        })?
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "jsonl" || ext == "txt")
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+        .ok_or_else(|| {
+            format!(
+                "No logs yet for this server in {}",
+                crate::paths::display(&dir)
+            )
+        })?;
+    let text = fs::read_to_string(&newest).map_err(|e| e.to_string())?;
+
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(entry) => {
+                let time = entry["timestamp"]
+                    .as_str()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| {
+                        t.with_timezone(&chrono::Local)
+                            .format("%H:%M:%S")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                let (level, message) = match (entry["error"].as_str(), entry["debug"].as_str()) {
+                    (Some(e), _) => ("error", e),
+                    (None, Some(d)) => ("debug", d),
+                    _ => ("", raw),
+                };
+                let mut parts = message.lines();
+                lines.push(format!(
+                    "{time:8}  {level:5}  {}",
+                    parts.next().unwrap_or("")
+                ));
+                lines.extend(parts.map(|p| format!("{:17}{p}", "")));
+            }
+            Err(_) => lines.push(raw.to_string()),
+        }
+    }
+    let skip = lines.len().saturating_sub(LOG_LINES);
+    Ok((newest, lines.split_off(skip)))
 }
 
 #[cfg(test)]
@@ -141,7 +223,16 @@ postgres: npx -y server-postgres postgresql://u:p@host/db - ✔ Connected
         assert_eq!(servers[3].name, "google calendar");
         assert_eq!(servers[3].status, McpStatus::NotConfigured);
 
+        assert_eq!(servers[1].full_name, "plugin:vercel:vercel");
         assert_eq!(servers[4].source, "local");
         assert_eq!(servers[4].name, "postgres");
+    }
+
+    #[test]
+    fn log_dir_follows_claude_codes_naming() {
+        let dir = log_dir(Path::new("/home/me/my_app"), "claude.ai Google Drive").unwrap();
+        assert!(dir.ends_with("-home-me-my-app/mcp-logs-claude-ai-Google-Drive"));
+        let dir = log_dir(Path::new("/p"), "plugin:context7:context7").unwrap();
+        assert!(dir.ends_with("mcp-logs-plugin-context7-context7"));
     }
 }

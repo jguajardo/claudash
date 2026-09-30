@@ -7,10 +7,12 @@
 //! through `cmd.exe` with safely escaped arguments.
 
 use std::{
+    collections::HashMap,
     env,
     ffi::{OsStr, OsString},
-    path::PathBuf,
-    process::Command,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::OnceLock,
 };
 
@@ -30,6 +32,71 @@ pub fn command() -> Command {
         Some(path) => Command::new(path),
         None => Command::new(PROGRAM),
     }
+}
+
+/// Sessions open right now, from `claude agents --json`: session ID -> status
+/// (`busy` while Claude is working, `idle` while it waits for input).
+pub fn live_sessions() -> Result<HashMap<String, String>, String> {
+    let output = command()
+        .args(["agents", "--json"])
+        .output()
+        .map_err(|e| format!("Could not run `claude agents`: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    Ok(list
+        .iter()
+        .filter_map(|s| {
+            let id = s["sessionId"].as_str()?;
+            let status = s["status"].as_str().unwrap_or("open");
+            Some((id.to_string(), status.to_string()))
+        })
+        .collect())
+}
+
+/// Result of a one-off prompt sent to an existing session.
+pub struct PromptReply {
+    pub text: String,
+    pub is_error: bool,
+    pub cost_usd: Option<f64>,
+    /// Tool calls Claude wanted to make but wasn't allowed to.
+    pub permission_denials: usize,
+}
+
+/// Sends `prompt` to session `id` with `claude -p --resume`, in `cwd`.
+///
+/// The prompt goes through stdin so it can't be mistaken for a flag. Headless
+/// runs can't ask for permission: tools that need approval are denied and
+/// reported in `permission_denials`.
+pub fn run_prompt(id: &str, cwd: &Path, prompt: &str) -> Result<PromptReply, String> {
+    let mut child = command()
+        .args(["-p", "--resume", id, "--output-format", "json"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run `claude -p`: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("Could not send the prompt: {e}"))?;
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!("`claude -p` failed: {}", stderr.trim())
+    })?;
+    Ok(PromptReply {
+        text: json["result"].as_str().unwrap_or_default().to_string(),
+        is_error: json["is_error"]
+            .as_bool()
+            .unwrap_or(!output.status.success()),
+        cost_usd: json["total_cost_usd"].as_f64(),
+        permission_denials: json["permission_denials"].as_array().map_or(0, Vec::len),
+    })
 }
 
 /// Extensions to try: those in `PATHEXT` on Windows; none elsewhere.

@@ -7,16 +7,22 @@
 //!
 //! Token usage comes from `message.usage` of each assistant response. A single
 //! response is written over several lines (one per content block) with the
-//! same `requestId`, so usage is deduplicated by that field.
+//! same `requestId`, so usage is deduplicated by that field. Subagents write
+//! their own transcripts to `<session-id>/subagents/*.jsonl`; they count toward
+//! daily usage but not toward the main conversation's context.
+//!
+//! Claude Code documents this format as internal, so parsing is lenient: lines
+//! that don't match are skipped rather than treated as errors.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
+use chrono::{DateTime, Local, NaiveDate};
 use serde::Deserialize;
 
 #[derive(Clone)]
@@ -43,6 +49,8 @@ pub struct SessionTokens {
     pub model: Option<String>,
     /// Accumulated cost from the last `cost-state` record, if any.
     pub cost_usd: Option<f64>,
+    /// Usage per local calendar day, subagents included.
+    pub daily: BTreeMap<NaiveDate, Usage>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -63,7 +71,12 @@ impl Usage {
         self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
     }
 
-    fn add(&mut self, other: &Usage) {
+    /// Tokens actually processed, leaving out cache reads (which dwarf the rest).
+    pub fn processed(&self) -> u64 {
+        self.input_tokens + self.cache_creation_input_tokens + self.output_tokens
+    }
+
+    pub fn add(&mut self, other: &Usage) {
         self.input_tokens += other.input_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
@@ -90,16 +103,13 @@ struct Record {
     message: Option<Message>,
     #[serde(rename = "totalCostUSD")]
     total_cost_usd: Option<f64>,
+    timestamp: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Message {
     model: Option<String>,
     usage: Option<Usage>,
-}
-
-pub fn projects_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".claude").join("projects"))
 }
 
 /// Loads every session, newest first.
@@ -148,8 +158,8 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     let mut last_prompt = None;
     let mut cwd = None;
     let mut git_branch = None;
-    // requestId -> usage; arrival order tells us which response came last.
-    let mut usage_by_request: HashMap<String, Usage> = HashMap::new();
+    // requestId -> (usage, day). Main conversation only.
+    let mut usage_by_request: HashMap<String, (Usage, Option<NaiveDate>)> = HashMap::new();
     let mut last_usage: Option<Usage> = None;
     let mut model = None;
     let mut cost_usd = None;
@@ -180,7 +190,8 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
                     && msg.model.as_deref() != Some("<synthetic>")
                 {
                     if let Some(req) = record.request_id {
-                        usage_by_request.insert(req, usage);
+                        let day = record.timestamp.as_deref().and_then(local_day);
+                        usage_by_request.insert(req, (usage, day));
                     }
                     last_usage = Some(usage);
                     model = msg.model;
@@ -195,8 +206,19 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     }
 
     let mut total = Usage::default();
-    for usage in usage_by_request.values() {
+    for (usage, _) in usage_by_request.values() {
         total.add(usage);
+    }
+    // Daily usage adds the subagents, deduplicated against the main file.
+    let mut all_requests = usage_by_request;
+    for (req, entry) in subagent_usage(&path.with_extension("")) {
+        all_requests.entry(req).or_insert(entry);
+    }
+    let mut daily: BTreeMap<NaiveDate, Usage> = BTreeMap::new();
+    for (usage, day) in all_requests.values() {
+        if let Some(day) = day {
+            daily.entry(*day).or_default().add(usage);
+        }
     }
     let context_used = last_usage.map(|u| u.context()).unwrap_or(0);
 
@@ -211,7 +233,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
         id,
         path: path.to_path_buf(),
         title,
-        project_path: shorten_home(&project_path),
+        project_path: crate::paths::display(Path::new(&project_path)),
         cwd: cwd.map(PathBuf::from),
         git_branch,
         modified,
@@ -221,15 +243,74 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             context_used,
             model,
             cost_usd,
+            daily,
         },
     })
 }
 
-fn shorten_home(path: &str) -> String {
-    match dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned)) {
-        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
-        _ => path.to_string(),
+/// Usage of every response in `<session-dir>/subagents/*.jsonl`, by requestId.
+fn subagent_usage(session_dir: &Path) -> HashMap<String, (Usage, Option<NaiveDate>)> {
+    let mut usage = HashMap::new();
+    let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else {
+        return usage;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"type\":\"assistant\"") {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<Record>(&line) else {
+                continue;
+            };
+            if let (Some(req), Some(msg)) = (record.request_id, record.message)
+                && let Some(u) = msg.usage
+                && msg.model.as_deref() != Some("<synthetic>")
+            {
+                let day = record.timestamp.as_deref().and_then(local_day);
+                usage.insert(req, (u, day));
+            }
+        }
     }
+    usage
+}
+
+/// Local calendar day of an RFC 3339 timestamp such as `2026-09-29T23:25:05.989Z`.
+fn local_day(timestamp: &str) -> Option<NaiveDate> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|t| t.with_timezone(&Local).date_naive())
+}
+
+/// Deletes a session: its transcript, the sibling directory with subagent
+/// transcripts and tool results, and the per-session state Claude Code keeps
+/// under its config directory (`file-history/<id>` checkpoints and
+/// `session-env/<id>`). Removing the transcript is what takes it out of
+/// `claude --resume`.
+pub fn delete(session: &Session) -> io::Result<()> {
+    fs::remove_file(&session.path)?;
+    let mut dirs = vec![session.path.with_extension("")];
+    // Session IDs are UUIDs; never build a path from anything else.
+    if let Some(home) = crate::paths::claude_home()
+        && !session.id.is_empty()
+        && session
+            .id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        dirs.push(home.join("file-history").join(&session.id));
+        dirs.push(home.join("session-env").join(&session.id));
+    }
+    for dir in dirs.into_iter().filter(|d| d.is_dir()) {
+        fs::remove_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 /// "5 min ago", "3 h ago", "yesterday", "4 days ago"...
@@ -276,11 +357,11 @@ mod tests {
                 .to_string(),
             // Same request written twice (two content blocks).
             format!(
-                r#"{{"type":"assistant","requestId":"r1","message":{{"model":"m","usage":{}}}}}"#,
+                r#"{{"type":"assistant","requestId":"r1","timestamp":"2026-01-02T12:00:00Z","message":{{"model":"m","usage":{}}}}}"#,
                 usage(10, 100, 5)
             ),
             format!(
-                r#"{{"type":"assistant","requestId":"r1","message":{{"model":"m","usage":{}}}}}"#,
+                r#"{{"type":"assistant","requestId":"r1","timestamp":"2026-01-02T12:00:00Z","message":{{"model":"m","usage":{}}}}}"#,
                 usage(10, 100, 5)
             ),
             // Subagent: doesn't count.
@@ -289,12 +370,22 @@ mod tests {
                 usage(999, 0, 999)
             ),
             format!(
-                r#"{{"type":"assistant","requestId":"r2","message":{{"model":"m","usage":{}}}}}"#,
+                r#"{{"type":"assistant","requestId":"r2","timestamp":"2026-01-02T12:00:00Z","message":{{"model":"m","usage":{}}}}}"#,
                 usage(20, 300, 7)
             ),
             r#"{"type":"cost-state","totalCostUSD":1.5}"#.to_string(),
         ];
         fs::write(&file, lines.join("\n")).unwrap();
+        // A subagent transcript: counts toward daily usage only.
+        fs::create_dir_all(dir.join("abc/subagents")).unwrap();
+        fs::write(
+            dir.join("abc/subagents/agent-1.jsonl"),
+            format!(
+                r#"{{"type":"assistant","isSidechain":true,"requestId":"s2","timestamp":"2026-01-02T12:00:00Z","message":{{"model":"m","usage":{}}}}}"#,
+                usage(1, 0, 2)
+            ),
+        )
+        .unwrap();
 
         let meta = fs::metadata(&file).unwrap();
         let s = parse_session(&file, "x", meta.modified().unwrap(), meta.len()).unwrap();
@@ -306,5 +397,10 @@ mod tests {
         assert_eq!(s.tokens.total.output_tokens, 12);
         assert_eq!(s.tokens.context_used, 320);
         assert_eq!(s.tokens.cost_usd, Some(1.5));
+
+        let day = local_day("2026-01-02T12:00:00Z").unwrap();
+        let daily = s.tokens.daily[&day];
+        assert_eq!(daily.input_tokens, 31);
+        assert_eq!(daily.output_tokens, 14);
     }
 }

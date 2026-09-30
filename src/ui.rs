@@ -1,0 +1,1058 @@
+//! Rendering.
+
+use std::collections::{BTreeMap, HashMap};
+
+use chrono::{Duration as Days, Local, NaiveDate, TimeZone};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Flex, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
+    widgets::{
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, HighlightSpacing, List,
+        ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap,
+    },
+};
+
+use crate::{
+    app::{App, EcoTab, Focus, Input, McpSnapshot, Popup, View},
+    ecosystem::Item,
+    mcp::McpStatus,
+    paths,
+    sessions::{self, Usage, human_tokens},
+    statusline::Window,
+};
+
+const HIGHLIGHT: Color = Color::Rgb(60, 40, 70);
+
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+
+    draw_header(frame, app, header);
+    match app.view {
+        View::Dashboard => draw_dashboard(frame, app, body),
+        View::Ecosystem => draw_ecosystem(frame, app, body),
+        View::Usage => draw_usage(frame, app, body),
+    }
+    draw_footer(frame, app, footer);
+    draw_popup(frame, app);
+}
+
+fn panel(title: &str, accent: Color) -> Block<'_> {
+    Block::default()
+        .title(Line::from(format!(" {title} ")).bold().fg(accent))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(accent))
+        .padding(Padding::horizontal(1))
+}
+
+fn focused(block: Block<'_>, is_focused: bool) -> Block<'_> {
+    if is_focused {
+        block.border_type(BorderType::Thick)
+    } else {
+        block
+    }
+}
+
+fn dim() -> Style {
+    Style::new().fg(Color::DarkGray)
+}
+
+fn message<'a>(text: impl Into<String>, block: Block<'a>) -> Paragraph<'a> {
+    Paragraph::new(text.into())
+        .style(dim().italic())
+        .wrap(Wrap { trim: true })
+        .block(block)
+}
+
+/// Green below 60%, yellow below 85%, red above.
+fn level_color(ratio: f64) -> Color {
+    match ratio {
+        r if r < 0.6 => Color::Green,
+        r if r < 0.85 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(10)]).areas(area);
+    let tabs = [
+        (View::Dashboard, "1 Dashboard"),
+        (View::Ecosystem, "2 Ecosystem"),
+        (View::Usage, "3 Usage"),
+    ];
+    let mut spans = vec![
+        Span::styled(
+            " ◆ claudash ",
+            Style::new().fg(Color::Black).bg(Color::LightMagenta).bold(),
+        ),
+        Span::raw("  "),
+    ];
+    for (view, label) in tabs {
+        let style = if app.view == view {
+            Style::new().fg(Color::White).bg(HIGHLIGHT).bold()
+        } else {
+            dim()
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::raw(" "));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), left);
+    frame.render_widget(
+        Paragraph::new(Line::from("? keys ").dark_gray().right_aligned()),
+        right,
+    );
+}
+
+// ---- Dashboard ---------------------------------------------------------------
+
+fn draw_dashboard(frame: &mut Frame, app: &mut App, area: Rect) {
+    let [top, tokens] = Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).areas(area);
+    let [sessions, right] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
+    let project_lines = project_lines(app);
+    // Borders + content, but never more than half of the column.
+    let project_height = (project_lines.len() as u16 + 2)
+        .min(right.height / 2)
+        .max(3);
+    let [project, mcp] =
+        Layout::vertical([Constraint::Length(project_height), Constraint::Min(3)]).areas(right);
+
+    draw_sessions(frame, app, sessions);
+    draw_project(frame, app, project, project_lines);
+    draw_mcp(frame, app, mcp);
+    draw_tokens(frame, app, tokens);
+}
+
+fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
+    let count = if app.filter.is_empty() {
+        format!(" {} sessions ", app.sessions.len())
+    } else {
+        format!(" {}/{} sessions ", app.visible.len(), app.sessions.len())
+    };
+    let mut block =
+        panel("Sessions", Color::LightMagenta).title_bottom(Line::from(count).right_aligned());
+    block = focused(block, app.focus == Focus::Sessions);
+    if !app.filter.is_empty() {
+        block = block.title(Line::from(format!(" filter: {} ", app.filter)).fg(Color::Yellow));
+    }
+
+    if app.visible.is_empty() {
+        let msg = match &app.sessions_error {
+            Some(e) => e.clone(),
+            None if !app.sessions.is_empty() => "No sessions match the filter.".into(),
+            None => "No sessions in ~/.claude/projects yet.".into(),
+        };
+        frame.render_widget(message(msg, block), area);
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .visible
+        .iter()
+        .map(|&i| &app.sessions[i])
+        .map(|s| {
+            let mut title = vec![Span::styled(s.title.as_str(), Style::new().bold())];
+            match app.live.get(&s.id).map(String::as_str) {
+                Some("busy") => {
+                    title.push(Span::styled("  ● working", Style::new().fg(Color::Green)))
+                }
+                Some(_) => title.push(Span::styled("  ● open", Style::new().fg(Color::Cyan))),
+                None => {}
+            }
+            let mut detail = vec![Span::styled(
+                format!("  {}", s.project_path),
+                Style::new().fg(Color::Gray),
+            )];
+            if let Some(branch) = &s.git_branch {
+                detail.push(Span::styled(
+                    format!("  {branch}"),
+                    Style::new().fg(Color::Cyan),
+                ));
+            }
+            detail.push(Span::styled(
+                format!("  · {}", sessions::relative_age(s.modified)),
+                dim().italic(),
+            ));
+            ListItem::new(vec![Line::from(title), Line::from(detail)])
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(list, area, &mut app.session_state);
+}
+
+/// Instruction files Claude Code loads for the selected project.
+fn project_lines(app: &App) -> Vec<Line<'static>> {
+    let Some(project) = &app.project else {
+        let msg = app.selected_project_dir().err().unwrap_or_default();
+        return vec![Line::from(msg).dark_gray().italic()];
+    };
+    let mut lines: Vec<Line> = project
+        .instructions
+        .files
+        .iter()
+        .map(|file| {
+            let name = match file.path.strip_prefix(&project.cwd) {
+                Ok(rel) => rel.display().to_string(),
+                Err(_) => paths::display(&file.path),
+            };
+            let mut spans = match file.skipped {
+                None => vec![
+                    Span::styled("● ", Style::new().fg(Color::Green)),
+                    Span::raw(name),
+                ],
+                Some(_) => vec![
+                    Span::styled("○ ", dim()),
+                    Span::styled(name, dim().crossed_out()),
+                ],
+            };
+            spans.push(Span::styled(format!("  {}", file.scope.label()), dim()));
+            if let Some(reason) = file.skipped {
+                spans.push(Span::styled(
+                    format!("  ({reason})"),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    if !project.instructions.has_project_instructions() {
+        lines.push(Line::from(vec![
+            Span::styled("○ ", Style::new().fg(Color::Yellow)),
+            Span::styled(
+                "No CLAUDE.md or AGENTS.md · run /init",
+                Style::new().fg(Color::Yellow),
+            ),
+        ]));
+    }
+    lines
+}
+
+fn draw_project(frame: &mut Frame, app: &App, area: Rect, lines: Vec<Line<'static>>) {
+    let mut block = panel("Project", Color::Green);
+    if let Some(project) = &app.project {
+        block = block.title(
+            Line::from(format!(" {} ", paths::display(&project.cwd)))
+                .fg(Color::DarkGray)
+                .right_aligned(),
+        );
+        let mode = project.instructions.mode;
+        if mode != crate::instructions::Mode::default() {
+            block = block.title_bottom(
+                Line::from(format!(" instructions: {} ", mode.as_str())).right_aligned(),
+            );
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_mcp(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = focused(panel("MCP Status", Color::Cyan), app.focus == Focus::Mcp);
+    let Some(project) = &app.project else {
+        let msg = message(
+            "Select a session to check its project's MCP servers.",
+            block,
+        );
+        frame.render_widget(msg, area);
+        return;
+    };
+    let checking = app.mcp_checking(&project.cwd);
+    let snapshot = app.mcp_cache.get(&project.cwd);
+    let spinner = app.spinner();
+
+    let footer = match (checking, snapshot) {
+        (true, _) => format!(" {spinner} checking… "),
+        (
+            false,
+            Some(McpSnapshot {
+                result: Ok(servers),
+                checked_at,
+            }),
+        ) => {
+            let online = servers
+                .iter()
+                .filter(|s| s.status == McpStatus::Connected)
+                .count();
+            format!(
+                " {online}/{} online · {}s ago ",
+                servers.len(),
+                checked_at.elapsed().as_secs()
+            )
+        }
+        _ => String::new(),
+    };
+    let block = block.title_bottom(Line::from(footer).right_aligned());
+
+    let servers = match snapshot.map(|s| &s.result) {
+        Some(Ok(servers)) => servers,
+        Some(Err(error)) => {
+            let msg = Paragraph::new(error.as_str())
+                .style(Style::new().fg(Color::Red))
+                .wrap(Wrap { trim: true })
+                .block(block);
+            frame.render_widget(msg, area);
+            return;
+        }
+        None => {
+            let text = if checking {
+                "Running `claude mcp list` in this project…"
+            } else {
+                "Waiting to check this project…"
+            };
+            frame.render_widget(message(format!("{spinner} {text}"), block), area);
+            return;
+        }
+    };
+    if servers.is_empty() {
+        frame.render_widget(message("No MCP servers configured.", block), area);
+        return;
+    }
+
+    let items: Vec<ListItem> = servers
+        .iter()
+        .map(|s| {
+            let (dot, label, color) = match &s.status {
+                McpStatus::Connected => ("●", "ONLINE", Color::Green),
+                McpStatus::NeedsAuth => ("◐", "AUTH", Color::Yellow),
+                McpStatus::Failed(_) => ("✘", "ERROR", Color::Red),
+                McpStatus::NotConfigured => ("○", "NOT SET", Color::DarkGray),
+                McpStatus::Unknown(_) => ("?", "UNKNOWN", Color::Gray),
+            };
+            let name: String = s.name.chars().take(18).collect();
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{dot} "), Style::new().fg(color)),
+                Span::raw(format!("{name:<19}")),
+                Span::styled(format!("{label:<11}"), Style::new().fg(color).bold()),
+                Span::styled(format!(" {}", s.source), dim()),
+            ]))
+        })
+        .collect();
+    let mut list = List::new(items).block(block);
+    if app.focus == Focus::Mcp {
+        list = list
+            .highlight_style(Style::new().bg(HIGHLIGHT))
+            .highlight_symbol("▶ ")
+            .highlight_spacing(HighlightSpacing::Always);
+    }
+    frame.render_stateful_widget(list, area, &mut app.mcp_state);
+}
+
+/// Context window usage of the selected session, its totals and plan usage.
+fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel("Token Usage", Color::Yellow);
+    let Some(session) = app.selected_session() else {
+        frame.render_widget(message("Select a session to see its usage.", block), area);
+        return;
+    };
+    let t = &session.tokens;
+    let block = block.title(
+        Line::from(format!(" {} ", session.title))
+            .fg(Color::DarkGray)
+            .right_aligned(),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [gauge_area, stats_area, plan_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    // The status line reports the real window size; otherwise use the setting.
+    let reported = app
+        .statusline
+        .sessions
+        .get(&session.id)
+        .and_then(|s| s.context_window.context_window_size)
+        .filter(|&size| size > 0);
+    let limit = reported.unwrap_or(app.context_limit);
+    let ratio = t.context_used as f64 / limit as f64;
+    let label = format!(
+        "Context {:.1}%  ({} / {}{})",
+        ratio * 100.0,
+        human_tokens(t.context_used),
+        human_tokens(limit),
+        if reported.is_some() {
+            ", from status line"
+        } else {
+            ""
+        },
+    );
+    let gauge = Gauge::default()
+        .gauge_style(
+            Style::new()
+                .fg(level_color(ratio))
+                .bg(Color::Rgb(40, 40, 40)),
+        )
+        .ratio(ratio.clamp(0.0, 1.0))
+        .label(Span::styled(label, Style::new().fg(Color::White).bold()))
+        .use_unicode(true);
+    frame.render_widget(gauge, gauge_area);
+
+    let value = Style::new().fg(Color::White).bold();
+    let stat = |name: &'static str, n: u64| {
+        [
+            Span::styled(name, dim()),
+            Span::styled(human_tokens(n), value),
+            Span::raw("   "),
+        ]
+    };
+    let mut stats: Vec<Span> = [
+        stat("input ", t.total.input_tokens),
+        stat("cache write ", t.total.cache_creation_input_tokens),
+        stat("cache read ", t.total.cache_read_input_tokens),
+        stat("output ", t.total.output_tokens),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some(cost) = t.cost_usd {
+        stats.push(Span::styled("cost ", dim()));
+        stats.push(Span::styled(format!("${cost:.2}"), value.fg(Color::Green)));
+    }
+    let model = Line::from(vec![
+        Span::styled("model ", dim()),
+        Span::styled(
+            t.model.as_deref().unwrap_or("—"),
+            Style::new().fg(Color::Cyan),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(vec![Line::from(stats), model]), stats_area);
+    frame.render_widget(Paragraph::new(plan_line(app)), plan_area);
+}
+
+/// Current plan windows reported by the status line: (label, window).
+fn plan_windows(app: &App) -> Vec<(&'static str, Window)> {
+    let Some((limits, _)) = &app.statusline.rate_limits else {
+        return Vec::new();
+    };
+    [("5h", limits.five_hour), ("7d", limits.seven_day)]
+        .into_iter()
+        .filter_map(|(label, w)| w.filter(Window::is_current).map(|w| (label, w)))
+        .collect()
+}
+
+fn reset_time(window: &Window) -> String {
+    let Some(at) = Local.timestamp_opt(window.resets_at, 0).single() else {
+        return String::new();
+    };
+    if at.date_naive() == Local::now().date_naive() {
+        at.format("%H:%M").to_string()
+    } else {
+        at.format("%a %H:%M").to_string()
+    }
+}
+
+fn plan_line(app: &App) -> Line<'static> {
+    let windows = plan_windows(app);
+    if windows.is_empty() {
+        let hint = if app.statusline.configured {
+            "plan usage: not reported yet (Pro/Max only, after a session's first reply)"
+        } else {
+            "plan usage: run `claudash statusline --setup` to enable"
+        };
+        return Line::from(Span::styled(hint, dim().italic()));
+    }
+    let mut spans = vec![Span::styled("plan ", dim())];
+    for (label, w) in windows {
+        let color = level_color(w.used_percentage / 100.0);
+        spans.push(Span::styled(format!("{label} "), dim()));
+        spans.push(Span::styled(
+            format!("{:.0}%", w.used_percentage),
+            Style::new().fg(color).bold(),
+        ));
+        spans.push(Span::styled(
+            format!(" (resets {})   ", reset_time(&w)),
+            dim(),
+        ));
+    }
+    Line::from(spans)
+}
+
+// ---- Ecosystem ---------------------------------------------------------------
+
+fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
+    let [tabs_area, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
+    let titles: Vec<String> = EcoTab::ALL
+        .iter()
+        .map(|&tab| format!("{} ({})", tab.title(), app.eco_len(tab)))
+        .collect();
+    let selected = EcoTab::ALL
+        .iter()
+        .position(|&t| t == app.eco_tab)
+        .unwrap_or(0);
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .style(dim())
+        .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT).bold())
+        .divider(" ");
+    frame.render_widget(tabs, tabs_area);
+
+    let [list_area, detail_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
+    let mut scope = match &app.project {
+        Some(p) => format!(" user + {} ", paths::display(&p.cwd)),
+        None => " user scope ".to_string(),
+    };
+    if app.eco_loading() && app.eco.is_some() {
+        scope = format!(" {} reloading ·{scope}", app.spinner());
+    }
+    let block =
+        panel(app.eco_tab.title(), Color::Magenta).title_bottom(Line::from(scope).right_aligned());
+
+    let Some((_, eco)) = &app.eco else {
+        let text = format!(
+            "{} Loading skills, agents, hooks and plugins…",
+            app.spinner()
+        );
+        frame.render_widget(message(text, block), list_area);
+        frame.render_widget(panel("Details", Color::Magenta), detail_area);
+        return;
+    };
+
+    let tab_index = selected;
+    if app.eco_tab == EcoTab::Plugins {
+        if let Some(error) = &eco.plugin_error {
+            frame.render_widget(message(error.clone(), block), list_area);
+            frame.render_widget(panel("Details", Color::Magenta), detail_area);
+            return;
+        }
+        let toggling = app.toggling_plugin();
+        let items: Vec<ListItem> = eco
+            .plugins
+            .iter()
+            .map(|p| {
+                let (dot, color) = if p.enabled {
+                    ("●", Color::Green)
+                } else {
+                    ("○", Color::DarkGray)
+                };
+                let mut spans = vec![
+                    Span::styled(format!("{dot} "), Style::new().fg(color)),
+                    Span::styled(p.short_name().to_string(), Style::new().bold()),
+                    Span::styled(format!("  {}", p.version), dim()),
+                ];
+                if let Some(Ok(details)) = app.plugin_details.get(&p.id)
+                    && let Some(tokens) = crate::ecosystem::always_on_tokens(details)
+                {
+                    spans.push(Span::styled(
+                        format!("  {tokens} tok/session"),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                }
+                if toggling == Some(p.id.as_str()) {
+                    spans.push(Span::styled(format!("  {}", app.spinner()), dim()));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        render_list(
+            frame,
+            items,
+            block,
+            list_area,
+            &mut app.eco_states[tab_index],
+        );
+        draw_plugin_details(frame, app, detail_area);
+        return;
+    }
+
+    let list = match app.eco_tab {
+        EcoTab::Skills => &eco.skills,
+        EcoTab::Agents => &eco.agents,
+        EcoTab::Commands => &eco.commands,
+        _ => &eco.hooks,
+    };
+    if list.is_empty() {
+        let text = format!("No {} found.", app.eco_tab.title().to_lowercase());
+        frame.render_widget(message(text, block), list_area);
+        frame.render_widget(panel("Details", Color::Magenta), detail_area);
+        return;
+    }
+    let items: Vec<ListItem> = list
+        .iter()
+        .map(|item| {
+            ListItem::new(Line::from(vec![
+                Span::styled(item.name.clone(), Style::new().bold()),
+                Span::styled(format!("  {}", item.source), dim()),
+            ]))
+        })
+        .collect();
+    let selected_item = app.eco_states[tab_index]
+        .selected()
+        .and_then(|i| list.get(i))
+        .cloned();
+    render_list(
+        frame,
+        items,
+        block,
+        list_area,
+        &mut app.eco_states[tab_index],
+    );
+    draw_item_details(frame, selected_item.as_ref(), detail_area);
+}
+
+fn render_list(
+    frame: &mut Frame,
+    items: Vec<ListItem>,
+    block: Block,
+    area: Rect,
+    state: &mut ratatui::widgets::ListState,
+) {
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::new().bg(HIGHLIGHT))
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(list, area, state);
+}
+
+fn draw_item_details(frame: &mut Frame, item: Option<&Item>, area: Rect) {
+    let block = panel("Details", Color::Magenta);
+    let Some(item) = item else {
+        frame.render_widget(block, area);
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(item.name.clone(), Style::new().bold())),
+        Line::from(vec![
+            Span::styled("source  ", dim()),
+            Span::raw(item.source.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("file    ", dim()),
+            Span::raw(paths::display(&item.path)),
+        ]),
+        Line::default(),
+        Line::from(item.description.clone()),
+    ];
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_plugin_details(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel("Details", Color::Magenta);
+    let Some(plugin) = app.selected_plugin() else {
+        frame.render_widget(block, area);
+        return;
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(plugin.id.clone(), Style::new().bold())),
+        Line::from(vec![
+            Span::styled("status  ", dim()),
+            if plugin.enabled {
+                Span::styled("enabled", Style::new().fg(Color::Green))
+            } else {
+                Span::styled("disabled", dim())
+            },
+            Span::styled(
+                format!("   scope {}   version {}", plugin.scope, plugin.version),
+                dim(),
+            ),
+        ]),
+    ];
+    if !plugin.mcp_servers.is_empty() {
+        let names: Vec<&str> = plugin.mcp_servers.keys().map(String::as_str).collect();
+        lines.push(Line::from(vec![
+            Span::styled("mcp     ", dim()),
+            Span::raw(names.join(", ")),
+        ]));
+    }
+    if !plugin.description.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(plugin.description.clone()));
+    }
+    lines.push(Line::default());
+    match app.plugin_details.get(&plugin.id) {
+        Some(Ok(details)) => {
+            // Everything after the header: inventory and projected token cost.
+            let body = details
+                .lines()
+                .skip_while(|l| !l.starts_with("Component inventory"));
+            lines.extend(body.map(|l| Line::from(l.to_string())));
+        }
+        Some(Err(e)) => lines.push(Line::from(Span::styled(
+            e.clone(),
+            Style::new().fg(Color::Red),
+        ))),
+        None => lines.push(Line::from(Span::styled(
+            format!("{} claude plugin details…", app.spinner()),
+            dim(),
+        ))),
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Space to enable/disable · Enter for the full report",
+        dim().italic(),
+    )));
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
+    frame.render_widget(paragraph, area);
+}
+
+// ---- Usage -------------------------------------------------------------------
+
+fn daily_totals(app: &App) -> BTreeMap<NaiveDate, Usage> {
+    let mut days: BTreeMap<NaiveDate, Usage> = BTreeMap::new();
+    for session in &app.sessions {
+        for (day, usage) in &session.tokens.daily {
+            days.entry(*day).or_default().add(usage);
+        }
+    }
+    days
+}
+
+fn sum_since(days: &BTreeMap<NaiveDate, Usage>, since: NaiveDate) -> Usage {
+    let mut total = Usage::default();
+    for usage in days.range(since..).map(|(_, u)| u) {
+        total.add(usage);
+    }
+    total
+}
+
+fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
+    let [plan_area, chart_area, bottom] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(7),
+    ])
+    .areas(area);
+    draw_plan(frame, app, plan_area);
+
+    let today = Local::now().date_naive();
+    let days = daily_totals(app);
+    // Each bar takes 4 columns (3 wide + 1 gap) inside the borders.
+    let n = ((chart_area.width.saturating_sub(4)) / 4).clamp(1, 30) as i64;
+    let bars: Vec<Bar> = (0..n)
+        .rev()
+        .map(|back| today - Days::days(back))
+        .map(|day| {
+            let tokens = days.get(&day).map_or(0, Usage::processed);
+            let style = if day == today {
+                Style::new().fg(Color::Yellow)
+            } else {
+                Style::new().fg(Color::Cyan)
+            };
+            Bar::default()
+                .value(tokens)
+                .text_value(String::new())
+                .label(Line::from(day.format("%d").to_string()))
+                .style(style)
+        })
+        .collect();
+    let peak = (0..n)
+        .map(|back| {
+            days.get(&(today - Days::days(back)))
+                .map_or(0, Usage::processed)
+        })
+        .max()
+        .unwrap_or(0);
+    let chart = BarChart::default()
+        .block(
+            panel("Tokens per day", Color::Cyan).title_bottom(
+                Line::from(format!(
+                    " input + cache write + output · last {n} days · peak {} ",
+                    human_tokens(peak)
+                ))
+                .right_aligned(),
+            ),
+        )
+        .bar_width(3)
+        .bar_gap(1)
+        .data(BarGroup::default().bars(&bars));
+    frame.render_widget(chart, chart_area);
+
+    let [totals_area, projects_area] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(bottom);
+
+    let header = Row::new(["", "input", "cache write", "cache read", "output"]).style(dim());
+    let rows = [
+        ("Today", today),
+        ("7 days", today - Days::days(6)),
+        ("30 days", today - Days::days(29)),
+    ]
+    .map(|(label, since)| {
+        let u = sum_since(&days, since);
+        Row::new([
+            label.to_string(),
+            human_tokens(u.input_tokens),
+            human_tokens(u.cache_creation_input_tokens),
+            human_tokens(u.cache_read_input_tokens),
+            human_tokens(u.output_tokens),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(12),
+            Constraint::Length(11),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(
+        panel("Totals", Color::Yellow)
+            .title_bottom(Line::from(" all sessions incl. subagents ").right_aligned()),
+    );
+    frame.render_widget(table, totals_area);
+
+    // Top projects over the last 7 days.
+    let week = today - Days::days(6);
+    let mut per_project: HashMap<&str, u64> = HashMap::new();
+    for s in &app.sessions {
+        let tokens: u64 = s
+            .tokens
+            .daily
+            .range(week..)
+            .map(|(_, u)| u.processed())
+            .sum();
+        if tokens > 0 {
+            *per_project.entry(s.project_path.as_str()).or_default() += tokens;
+        }
+    }
+    let mut ranked: Vec<(&str, u64)> = per_project.into_iter().collect();
+    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let lines: Vec<Line> = ranked
+        .iter()
+        .take(5)
+        .map(|(project, tokens)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>7}  ", human_tokens(*tokens)),
+                    Style::new().bold(),
+                ),
+                Span::raw(project.to_string()),
+            ])
+        })
+        .collect();
+    let block = panel("Top projects · 7 days", Color::Green);
+    if lines.is_empty() {
+        frame.render_widget(
+            message("No usage in the last 7 days.", block),
+            projects_area,
+        );
+    } else {
+        frame.render_widget(Paragraph::new(lines).block(block), projects_area);
+    }
+}
+
+fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel("Plan usage", Color::LightMagenta);
+    let windows = plan_windows(app);
+    if windows.is_empty() {
+        let text = if app.statusline.configured {
+            "Claude Code hasn't reported plan usage yet. It's only sent to Pro and Max \
+             subscribers, after the first reply of a session."
+        } else {
+            "Plan usage comes from Claude Code's status line. Run `claudash statusline --setup` \
+             for the one-line settings change."
+        };
+        frame.render_widget(message(text, block), area);
+        return;
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical(vec![Constraint::Length(1); windows.len()]).split(inner);
+    for ((label, w), row) in windows.iter().zip(rows.iter()) {
+        let ratio = w.used_percentage / 100.0;
+        let name = if *label == "5h" { "5-hour " } else { "7-day  " };
+        let gauge = Gauge::default()
+            .gauge_style(
+                Style::new()
+                    .fg(level_color(ratio))
+                    .bg(Color::Rgb(40, 40, 40)),
+            )
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label(format!(
+                "{name} {:.0}%  · resets {}",
+                w.used_percentage,
+                reset_time(w)
+            ))
+            .use_unicode(true);
+        frame.render_widget(gauge, *row);
+    }
+}
+
+// ---- Footer and popups ----------------------------------------------------------
+
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let key = |k: &'static str| Span::styled(k, Style::new().fg(Color::Black).bg(Color::Gray));
+    let hint = |t: &'static str| Span::raw(t).dark_gray();
+
+    let line = match &app.input {
+        Some(Input::Search) => Line::from(vec![
+            Span::styled(" / ", Style::new().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(format!(" {}", app.filter)),
+            Span::styled("▌", Style::new().fg(Color::Yellow)),
+            hint("   Enter keep · Esc clear"),
+        ]),
+        Some(Input::Prompt { text, .. }) => Line::from(vec![
+            Span::styled(" prompt ", Style::new().fg(Color::Black).bg(Color::Cyan)),
+            Span::raw(format!(" {text}")),
+            Span::styled("▌", Style::new().fg(Color::Cyan)),
+            hint("   Enter send · Esc cancel"),
+        ]),
+        None => {
+            if let Some((msg, is_error, _)) = &app.flash {
+                let color = if *is_error { Color::Red } else { Color::Green };
+                Line::from(Span::styled(
+                    format!(" {msg}"),
+                    Style::new().fg(color).bold(),
+                ))
+            } else if app.prompt_running() {
+                Line::from(Span::styled(
+                    format!(" {} waiting for Claude's reply…", app.spinner()),
+                    Style::new().fg(Color::Cyan),
+                ))
+            } else {
+                let mut spans = match (app.view, app.focus) {
+                    (View::Dashboard, Focus::Sessions) => vec![
+                        key(" Enter "),
+                        hint(" resume  "),
+                        key(" / "),
+                        hint(" search  "),
+                        key(" p "),
+                        hint(" prompt  "),
+                        key(" d "),
+                        hint(" delete  "),
+                        key(" Tab "),
+                        hint(" MCP  "),
+                    ],
+                    (View::Dashboard, Focus::Mcp) => vec![
+                        key(" Enter "),
+                        hint(" server log  "),
+                        key(" Tab "),
+                        hint(" sessions  "),
+                    ],
+                    (View::Ecosystem, _) => vec![
+                        key(" ←/→ "),
+                        hint(" tab  "),
+                        key(" Enter "),
+                        hint(" details  "),
+                        key(" Space "),
+                        hint(" toggle plugin  "),
+                    ],
+                    (View::Usage, _) => vec![key(" Esc "), hint(" dashboard  ")],
+                };
+                spans.extend([key(" r "), hint(" reload  "), key(" q "), hint(" quit")]);
+                Line::from(spans)
+            }
+        }
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Splits a line into pieces of at most `width` characters.
+fn hard_wrap(line: &str, width: usize) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars.chunks(width).map(|c| c.iter().collect()).collect()
+}
+
+fn centered(area: Rect, width: Constraint, height: Constraint) -> Rect {
+    let [area] = Layout::vertical([height]).flex(Flex::Center).areas(area);
+    let [area] = Layout::horizontal([width]).flex(Flex::Center).areas(area);
+    area
+}
+
+fn draw_popup(frame: &mut Frame, app: &mut App) {
+    match &mut app.popup {
+        None => {}
+        Some(Popup::Text {
+            title,
+            lines,
+            scroll,
+        }) => {
+            let area = centered(
+                frame.area(),
+                Constraint::Percentage(85),
+                Constraint::Percentage(80),
+            );
+            frame.render_widget(Clear, area);
+            // Wrap to the popup's inner width up front (borders + padding take 4
+            // columns), so scrolling and the counter work in screen rows.
+            let width = area.width.saturating_sub(4).max(1) as usize;
+            let rows: Vec<String> = lines.iter().flat_map(|l| hard_wrap(l, width)).collect();
+            // Don't scroll past the last page: the end of a log should fill the popup.
+            let visible = area.height.saturating_sub(2) as usize;
+            let last_page = rows.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
+            *scroll = (*scroll).min(last_page);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(Color::Cyan))
+                .padding(Padding::horizontal(1))
+                .title(Line::from(title.clone()).bold().fg(Color::Cyan))
+                .title_bottom(
+                    Line::from(format!(
+                        " {}-{} of {} · ↑/↓ PgUp/PgDn scroll · Esc close ",
+                        (*scroll as usize + 1).min(rows.len()),
+                        (*scroll as usize + visible).min(rows.len()),
+                        rows.len()
+                    ))
+                    .right_aligned(),
+                );
+            let text: Vec<Line> = rows.into_iter().map(Line::from).collect();
+            let paragraph = Paragraph::new(text).block(block).scroll((*scroll, 0));
+            frame.render_widget(paragraph, area);
+        }
+        Some(Popup::ConfirmDelete { title, .. }) => {
+            let area = centered(frame.area(), Constraint::Length(64), Constraint::Length(8));
+            frame.render_widget(Clear, area);
+            let lines = vec![
+                Line::from(vec![
+                    Span::raw("Delete "),
+                    Span::styled(format!("\"{title}\""), Style::new().bold()),
+                    Span::raw("?"),
+                ]),
+                Line::default(),
+                Line::from("This removes its transcript, subagent transcripts and").dark_gray(),
+                Line::from("checkpoints. It can't be undone.").dark_gray(),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red)),
+                    Span::raw(" delete   "),
+                    Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
+                    Span::raw(" cancel"),
+                ]),
+            ];
+            let paragraph = Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .block(panel("Delete session", Color::Red));
+            frame.render_widget(paragraph, area);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hard_wraps_by_characters() {
+        assert_eq!(hard_wrap("abcdef", 4), ["abcd", "ef"]);
+        assert_eq!(hard_wrap("", 4), [""]);
+        assert_eq!(hard_wrap("naïveté", 3), ["naï", "vet", "é"]);
+    }
+}
