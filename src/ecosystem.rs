@@ -59,12 +59,17 @@ pub struct Ecosystem {
     pub plugins: Vec<Plugin>,
     /// Why the plugin list couldn't be read, if it couldn't.
     pub plugin_error: Option<String>,
+    /// Permission rules from every settings file that applies.
+    pub permissions: Vec<crate::permissions::Rule>,
 }
 
 /// Scans everything available for a session running in `project`. Runs
 /// `claude plugin list --json`, so call it off the UI thread.
 pub fn load(project: Option<&Path>) -> Ecosystem {
-    let mut eco = Ecosystem::default();
+    let mut eco = Ecosystem {
+        permissions: crate::permissions::load(project),
+        ..Default::default()
+    };
     let home = crate::paths::claude_home();
 
     let (plugins, plugin_error) = match list_plugins() {

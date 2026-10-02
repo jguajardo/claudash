@@ -80,6 +80,10 @@ pub struct Analysis {
     pub prompts: Vec<PromptCost>,
     /// Replies and their output tokens per day (main session).
     pub replies: BTreeMap<NaiveDate, (u32, u64)>,
+    /// Risky things the session or its subagents did.
+    pub audit: Vec<crate::audit::Event>,
+    /// Credentials that appear in the transcript (masked).
+    pub secrets: Vec<crate::audit::Secret>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -294,6 +298,7 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
         return (Usage::default(), 0);
     };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
+        crate::audit::find_secrets(&line, &mut out.secrets);
         let relevant = line.contains("\"type\":\"assistant\"")
             || line.contains("\"tool_result\"")
             || line.contains("compact_boundary")
@@ -349,6 +354,13 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                         tool_names.insert(id.to_string(), name.clone());
                         labels.insert(id.to_string(), output_label(&name, input));
                     }
+                    crate::audit::check_tool(
+                        &name,
+                        input,
+                        record["cwd"].as_str(),
+                        at,
+                        &mut out.audit,
+                    );
                     match name.as_str() {
                         "Skill" => {
                             if let Some(skill) =

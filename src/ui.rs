@@ -268,6 +268,9 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::new().fg(Color::Red),
                 ));
             }
+            if app.analysis(s).is_some_and(|a| !a.secrets.is_empty()) {
+                title.push(Span::styled("  🔑 secret", Style::new().fg(Color::Red)));
+            }
             let mut detail = vec![Span::styled(
                 format!("  {}", s.project_path),
                 Style::new().fg(Color::Gray),
@@ -868,6 +871,110 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
             &mut app.eco_states[tab_index],
         );
         draw_plugin_details(frame, app, detail_area);
+        return;
+    }
+
+    if app.eco_tab == EcoTab::Permissions {
+        let rules = eco.permissions.clone();
+        if rules.is_empty() {
+            frame.render_widget(
+                message(
+                    "No permission rules: Claude Code asks before anything that needs it.",
+                    block,
+                ),
+                list_area,
+            );
+            frame.render_widget(panel("Details", Color::Magenta), detail_area);
+            return;
+        }
+        let severity_color = |s: crate::audit::Severity| match s {
+            crate::audit::Severity::High => Color::Red,
+            crate::audit::Severity::Medium => Color::Yellow,
+            crate::audit::Severity::Low => Color::Cyan,
+        };
+        let items: Vec<ListItem> = rules
+            .iter()
+            .map(|r| {
+                let mut spans = vec![
+                    Span::styled(format!("{:<6}", r.kind.label()), dim()),
+                    Span::styled(r.rule.clone(), Style::new().bold()),
+                    Span::styled(format!("  {}", r.scope), dim()),
+                ];
+                if let Some((severity, _)) = &r.flag {
+                    spans.push(Span::styled(
+                        format!("  ⚠ {}", severity.label()),
+                        Style::new().fg(severity_color(*severity)),
+                    ));
+                }
+                if r.kind == crate::permissions::Kind::Allow
+                    && app.rule_used(&r.rule) == Some(false)
+                {
+                    spans.push(Span::styled("  unused", dim()));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let selected = app.eco_states[tab_index]
+            .selected()
+            .and_then(|i| rules.get(i))
+            .cloned();
+        render_list(
+            frame,
+            items,
+            block,
+            list_area,
+            &mut app.eco_states[tab_index],
+        );
+        let mut lines = Vec::new();
+        if let Some(r) = selected {
+            lines.push(Line::from(Span::styled(
+                r.rule.clone(),
+                Style::new().bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("{} · {} settings", r.kind.label(), r.scope),
+                dim(),
+            )));
+            lines.push(Line::from(Span::styled(paths::display(&r.file), dim())));
+            lines.push(Line::default());
+            match &r.flag {
+                Some((severity, why)) => lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", severity.label()),
+                        Style::new().fg(Color::Black).bg(severity_color(*severity)),
+                    ),
+                    Span::raw(format!("  {why}")),
+                ])),
+                None => lines.push(Line::from(Span::styled("Nothing to flag.", dim()))),
+            }
+            if r.kind == crate::permissions::Kind::Allow {
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    match app.rule_used(&r.rule) {
+                        Some(true) => {
+                            format!("Used in the last {} days.", crate::app::USAGE_WINDOW_DAYS)
+                        }
+                        Some(false) => format!(
+                            "Not used in the last {} days: removing it costs nothing.",
+                            crate::app::USAGE_WINDOW_DAYS
+                        ),
+                        None => "claudash can't tell whether this rule was used.".into(),
+                    },
+                    dim(),
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "Change rules with /permissions in Claude Code, or edit the file.",
+                dim().italic(),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(panel("Details", Color::Magenta)),
+            detail_area,
+        );
         return;
     }
 
@@ -1873,6 +1980,36 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
                 Span::styled(format!(": {} and no open session", what.join(", ")), dim()),
             ])
         }
+        Problem::Secrets { session, found } => {
+            let place = if session.is_empty() {
+                "your prompt history (~/.claude/history.jsonl)".to_string()
+            } else {
+                format!("session \"{session}\"")
+            };
+            Line::from(vec![
+                Span::styled("🔑 ", Style::new().fg(Color::Red)),
+                Span::styled(
+                    format!("credentials in {place}"),
+                    Style::new().fg(Color::Red),
+                ),
+                Span::styled(
+                    format!(
+                        ": {} · rotate them; D trashes the session",
+                        found.join(", ")
+                    ),
+                    dim(),
+                ),
+            ])
+        }
+        Problem::Risky {
+            session,
+            what,
+            detail,
+        } => Line::from(vec![
+            Span::styled("⚠ ", Style::new().fg(Color::Red)),
+            Span::styled(what.to_string(), Style::new().fg(Color::Red)),
+            Span::styled(format!(" in \"{session}\": {detail}"), dim()),
+        ]),
         Problem::StaleChange {
             framework,
             id,
@@ -2371,6 +2508,48 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::new().fg(color),
             ),
         ]));
+    }
+
+    section(&mut lines, "Audit");
+    let mut events: Vec<&crate::audit::Event> = a.audit.iter().collect();
+    events.sort_by_key(|e| e.severity);
+    events.dedup_by(|x, y| x.what == y.what && x.detail == y.detail);
+    if events.is_empty() && a.secrets.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  nothing risky: no dangerous commands, no edits outside the project, no secrets",
+            dim(),
+        )));
+    }
+    for s in &a.secrets {
+        lines.push(Line::from(vec![
+            Span::styled("  🔑 ", Style::new().fg(Color::Red)),
+            Span::styled(
+                format!("{} {}", s.kind, s.masked),
+                Style::new().fg(Color::Red),
+            ),
+            Span::styled(format!("  in {} · rotate it", s.place), dim()),
+        ]));
+    }
+    for e in events.iter().take(15) {
+        let color = match e.severity {
+            crate::audit::Severity::High => Color::Red,
+            crate::audit::Severity::Medium => Color::Yellow,
+            crate::audit::Severity::Low => Color::Cyan,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<7}", e.severity.label()),
+                Style::new().fg(color),
+            ),
+            Span::styled(format!("{:<34}", e.what), Style::new().bold()),
+            Span::styled(e.detail.chars().take(90).collect::<String>(), dim()),
+        ]));
+    }
+    if events.len() > 15 {
+        lines.push(Line::from(Span::styled(
+            format!("  and {} more", events.len() - 15),
+            dim(),
+        )));
     }
 
     section(&mut lines, "Tool output that entered the context");

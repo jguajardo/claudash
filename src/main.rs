@@ -1,5 +1,6 @@
 mod analysis;
 mod app;
+mod audit;
 mod claude_cli;
 mod config;
 mod doctor;
@@ -14,6 +15,7 @@ mod library;
 mod mcp;
 mod notify;
 mod paths;
+mod permissions;
 mod projects;
 mod prompts;
 mod report;
@@ -335,7 +337,10 @@ fn export(id: &str, output: Option<&str>) -> std::io::Result<()> {
             )));
         }
     };
-    let markdown = app::session_markdown(session)?;
+    let (markdown, removed) = audit::redact(&app::session_markdown(session)?);
+    if removed > 0 {
+        eprintln!("Removed {removed} secret(s) from the export (API keys, tokens or private keys)");
+    }
     match output {
         Some(file) => {
             std::fs::write(file, markdown)?;

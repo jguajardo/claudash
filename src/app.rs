@@ -97,15 +97,17 @@ pub enum EcoTab {
     Commands,
     Hooks,
     Plugins,
+    Permissions,
 }
 
 impl EcoTab {
-    pub const ALL: [EcoTab; 5] = [
+    pub const ALL: [EcoTab; 6] = [
         EcoTab::Skills,
         EcoTab::Agents,
         EcoTab::Commands,
         EcoTab::Hooks,
         EcoTab::Plugins,
+        EcoTab::Permissions,
     ];
 
     pub fn title(self) -> &'static str {
@@ -115,6 +117,7 @@ impl EcoTab {
             EcoTab::Commands => "Commands",
             EcoTab::Hooks => "Hooks",
             EcoTab::Plugins => "Plugins",
+            EcoTab::Permissions => "Permissions",
         }
     }
 
@@ -424,6 +427,15 @@ pub enum Problem {
     },
     /// A worktree whose directory is gone.
     MissingWorktree { path: PathBuf },
+    /// API keys or tokens in a session's transcript (or in your prompt history
+    /// when `session` is empty).
+    Secrets { session: String, found: Vec<String> },
+    /// Something risky a session did lately.
+    Risky {
+        session: String,
+        what: &'static str,
+        detail: String,
+    },
     /// A spec change with tasks left that nobody touched for a while.
     StaleChange {
         framework: &'static str,
@@ -439,6 +451,9 @@ pub enum Problem {
         next: String,
     },
 }
+
+/// Risky commands listed in Problems at most; the inspector has them all.
+const MAX_RISKY_PROBLEMS: usize = 5;
 
 /// Days without changes before a spec change with tasks left counts as stale.
 const STALE_CHANGE_DAYS: u64 = 14;
@@ -614,7 +629,7 @@ pub struct App {
     pub eco: Option<(Option<PathBuf>, Ecosystem)>,
     eco_job: Option<(Option<PathBuf>, Job<Ecosystem>)>,
     pub eco_tab: EcoTab,
-    pub eco_states: [ListState; 5],
+    pub eco_states: [ListState; 6],
     /// `claude plugin details` output per plugin ID.
     pub plugin_details: HashMap<String, Result<String, String>>,
     details_job: Option<(String, Job<Result<String, String>>)>,
@@ -661,6 +676,9 @@ pub struct App {
     /// What each session that needs you is waiting on, by session ID, with
     /// the transcript size it was read at.
     pub pending: HashMap<String, (u64, transcript::PendingTool)>,
+    /// Credentials found in `~/.claude/history.jsonl`, checked once at start.
+    pub history_secrets: Vec<crate::audit::Secret>,
+    history_secrets_job: Option<Job<Vec<crate::audit::Secret>>>,
     /// Re-check the project's MCP servers once the running command ends.
     mcp_recheck: bool,
     /// An interactive review whose session is running in the terminal.
@@ -751,6 +769,8 @@ impl App {
             pending_review: None,
             mcp_recheck: false,
             pending: HashMap::new(),
+            history_secrets: Vec::new(),
+            history_secrets_job: None,
             library: Library::load(),
             history: History::load(),
             monthly: false,
@@ -758,6 +778,17 @@ impl App {
             token_savers: None,
         };
         app.doctor_job = Some(Job::spawn(doctor::run));
+        app.history_secrets_job = Some(Job::spawn(|| {
+            let mut found = Vec::new();
+            if let Some(file) = paths::claude_home().map(|h| h.join("history.jsonl"))
+                && let Ok(text) = std::fs::read_to_string(file)
+            {
+                for line in text.lines() {
+                    crate::audit::find_secrets(line, &mut found);
+                }
+            }
+            found
+        }));
         app.maybe_welcome();
         let expired = library::purge_expired();
         if expired > 0 {
@@ -1351,6 +1382,52 @@ impl App {
                 file: file.to_string(),
                 sessions,
             });
+        }
+
+        // Credentials in transcripts and in the prompt history.
+        for s in &self.sessions {
+            if let Some(a) = self.analysis(s)
+                && !a.secrets.is_empty()
+            {
+                problems.push(Problem::Secrets {
+                    session: s.title.clone(),
+                    found: a
+                        .secrets
+                        .iter()
+                        .map(|x| format!("{} {} in {}", x.kind, x.masked, x.place))
+                        .collect(),
+                });
+            }
+        }
+        if !self.history_secrets.is_empty() {
+            problems.push(Problem::Secrets {
+                session: String::new(),
+                found: self
+                    .history_secrets
+                    .iter()
+                    .map(|x| format!("{} {}", x.kind, x.masked))
+                    .collect(),
+            });
+        }
+        // The most severe things done in the last week.
+        let week = chrono::Local::now() - chrono::Duration::days(7);
+        let mut risky = 0;
+        for s in &self.sessions {
+            let Some(a) = self.analysis(s) else {
+                continue;
+            };
+            for e in a.audit.iter().filter(|e| {
+                e.severity == crate::audit::Severity::High && e.at.is_some_and(|t| t >= week)
+            }) {
+                if risky < MAX_RISKY_PROBLEMS {
+                    problems.push(Problem::Risky {
+                        session: s.title.clone(),
+                        what: e.what,
+                        detail: e.detail.clone(),
+                    });
+                }
+                risky += 1;
+            }
         }
 
         // Spec changes: once per change id, even when worktrees repeat it.
@@ -2087,9 +2164,18 @@ impl App {
         let Some(view) = &self.transcript else {
             return;
         };
-        let result = export_markdown(view);
-        match result {
-            Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
+        match export_markdown(view) {
+            Ok((path, 0)) => {
+                self.show_flash(format!("Exported to {}", paths::display(&path)), false)
+            }
+            Ok((path, n)) => self.show_flash(
+                format!(
+                    "Exported to {}, with {} removed",
+                    paths::display(&path),
+                    plural_secrets(n)
+                ),
+                false,
+            ),
             Err(e) => self.show_flash(format!("Could not export: {e}"), true),
         }
     }
@@ -2342,7 +2428,8 @@ impl App {
                 chrono::Local::now().format("%Y-%m-%d"),
                 review.branch.replace('/', "-")
             ));
-            std::fs::write(&path, review::markdown(review)).map(|()| path)
+            let (text, _) = crate::audit::redact(&review::markdown(review));
+            std::fs::write(&path, text).map(|()| path)
         });
         match result {
             Ok(path) => self.show_flash(format!("Exported to {}", paths::display(&path)), false),
@@ -2645,7 +2732,44 @@ impl App {
             EcoTab::Commands => eco.commands.len(),
             EcoTab::Hooks => eco.hooks.len(),
             EcoTab::Plugins => eco.plugins.len(),
+            EcoTab::Permissions => eco.permissions.len(),
         }
+    }
+
+    /// Whether an allow rule matched anything in the last 30 days; `None` when
+    /// claudash can't tell (file and domain patterns).
+    pub fn rule_used(&self, rule: &str) -> Option<bool> {
+        let window = Duration::from_secs(USAGE_WINDOW_DAYS * 86_400);
+        let recent = self
+            .sessions
+            .iter()
+            .filter(|s| s.modified.elapsed().is_ok_and(|age| age <= window))
+            .filter_map(|s| self.analysis(s));
+        if let Some(inner) = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) {
+            let prefix = inner.trim_end_matches(":*").trim_end_matches('*').trim();
+            if prefix.is_empty() {
+                return None;
+            }
+            let mut recent = recent;
+            return Some(recent.any(|a| {
+                a.tool_output.keys().any(|(_, label)| {
+                    label.strip_prefix("Bash: ").is_some_and(|key| {
+                        key == prefix
+                            || key.starts_with(&format!("{prefix} "))
+                            || prefix.starts_with(&format!("{key} "))
+                    })
+                })
+            }));
+        }
+        if rule.contains('(') {
+            return None;
+        }
+        let mut recent = recent;
+        Some(recent.any(|a| {
+            a.tools.keys().any(|t| {
+                t == rule || (rule.ends_with('*') && t.starts_with(rule.trim_end_matches('*')))
+            })
+        }))
     }
 
     pub fn selected_plugin(&self) -> Option<&ecosystem::Plugin> {
@@ -2739,6 +2863,12 @@ impl App {
     // ---- Background jobs ----------------------------------------------------
 
     fn poll_jobs(&mut self) {
+        if let Some(job) = &self.history_secrets_job
+            && let Some(result) = job.poll()
+        {
+            self.history_secrets = result.unwrap_or_default();
+            self.history_secrets_job = None;
+        }
         if let Some((repo, name, job)) = &self.branches_job
             && let Some(result) = job.poll()
         {
@@ -3896,7 +4026,17 @@ fn exports_dir() -> io::Result<PathBuf> {
 }
 
 /// Writes `view` as Markdown to the exports folder and returns the file.
-fn export_markdown(view: &TranscriptView) -> io::Result<PathBuf> {
+/// "1 secret" / "3 secrets".
+fn plural_secrets(n: usize) -> String {
+    if n == 1 {
+        "1 secret".into()
+    } else {
+        format!("{n} secrets")
+    }
+}
+
+/// Writes the conversation with any credentials masked; returns how many.
+fn export_markdown(view: &TranscriptView) -> io::Result<(PathBuf, usize)> {
     let dir = exports_dir()?;
     let slug: String = view
         .title
@@ -3916,8 +4056,9 @@ fn export_markdown(view: &TranscriptView) -> io::Result<PathBuf> {
         .join("-");
     let date = chrono::Local::now().format("%Y-%m-%d");
     let path = dir.join(format!("{date}-{slug}.md"));
-    std::fs::write(&path, markdown_for(view))?;
-    Ok(path)
+    let (text, removed) = crate::audit::redact(&markdown_for(view));
+    std::fs::write(&path, text)?;
+    Ok((path, removed))
 }
 
 pub fn markdown_for(view: &TranscriptView) -> String {

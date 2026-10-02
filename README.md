@@ -108,6 +108,14 @@ The session inspector (`i`) shows the same for one session. Tool output is measu
 
 Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin, with how often each skill, subagent and command was used in the last 30 days. Plugins show their projected always-on token cost per session from `claude plugin details` and how often anything they provide was used, so plugins that cost tokens in every session without being used stand out, with their total. `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
 
+### Security
+
+claudash reads what Claude already did and points out what deserves a second look. It blocks nothing; that's what Claude Code's permissions are for.
+
+- **Secrets in transcripts.** Claude Code keeps conversations in plain text for 30 days, so an API key you pasted or a token a command printed stays on disk. claudash looks for Anthropic, OpenAI, GitHub, GitLab, AWS, Google, Slack, Stripe, npm and crates.io keys and private keys in every transcript and in your prompt history. Sessions that have one are marked `🔑 secret`, and Problems lists them (masked, never in full) so you can rotate the key and trash the session with `D`. Exports (`e`, `claudash export`) replace any credential with a masked note.
+- **Risky actions.** The inspector (`i`) has an Audit section with what the session and its subagents did: force pushes, `curl … | sh`, `sudo`, recursive deletes, `git reset --hard` and other ways to lose work, publishing, destructive SQL, reading `.env` or SSH keys, and editing files outside the project. Problems shows the most severe ones from the last week.
+- **Permission rules.** Ecosystem's Permissions tab merges the allow, ask and deny rules from managed, user, project and local settings and flags the ones worth a look: `Bash` with no restriction, `bypassPermissions`, rules such as `Bash(curl:*)` or `Bash(git push *)` that let Claude run any command of that kind without asking, allows that a deny overrides, repeats, and allow rules nothing used in 30 days.
+
 ### From the command line and status bars
 
 ```sh

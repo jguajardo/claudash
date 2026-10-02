@@ -104,14 +104,17 @@ const VIEWS: &[ViewHelp] = &[
         shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
                 user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
                 days. Plugins show their always-on token cost per session, and the ones you never use \
-                are flagged with what they cost you.",
+                are flagged with what they cost you. Permissions merges the allow, ask and deny \
+                rules from every settings file and flags broad, contradictory and unused ones.",
         contexts: &[Context::Ecosystem],
     },
     ViewHelp {
         name: "Inspector (i)",
         shows: "One session in depth: its context per request with compactions, every tool with its \
                 failure rate, its subagents by usage (running ones marked), the files it edited and the \
-                skills, subagents, MCP servers and commands it used.",
+                skills, subagents, MCP servers and commands it used. Audit lists risky things it \
+                did (force pushes, curl | sh, sudo, deletes, edits outside the project, reading \
+                secrets files) and any API key or token in its transcript.",
         contexts: &[Context::Inspect],
     },
     ViewHelp {
