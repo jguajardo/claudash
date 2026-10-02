@@ -94,7 +94,9 @@ const VIEWS: &[ViewHelp] = &[
     ViewHelp {
         name: "5 · Usage",
         shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
-                projects. Kept beyond Claude Code's 30-day cleanup.",
+                projects. Kept beyond Claude Code's 30-day cleanup. Tab shows where tokens go: tool \
+                output that entered the context by command, the costliest prompts, and reply length \
+                against the previous 30 days.",
         contexts: &[Context::Usage],
     },
     ViewHelp {

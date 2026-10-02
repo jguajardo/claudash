@@ -675,6 +675,10 @@ pub struct App {
     pub history: History,
     /// Usage view shows months instead of days.
     pub monthly: bool,
+    /// Usage view shows where tokens go instead of the overview.
+    pub usage_tokens: bool,
+    /// Token savers installed (caveman, rtk), found when that page opens.
+    pub token_savers: Option<Vec<String>>,
 }
 
 impl App {
@@ -750,6 +754,8 @@ impl App {
             library: Library::load(),
             history: History::load(),
             monthly: false,
+            usage_tokens: false,
+            token_savers: None,
         };
         app.doctor_job = Some(Job::spawn(doctor::run));
         app.maybe_welcome();
@@ -3064,6 +3070,12 @@ impl App {
             View::Usage => match key.code {
                 KeyCode::Esc => self.view = View::Sessions,
                 KeyCode::Char('m') => self.monthly = !self.monthly,
+                KeyCode::Tab => {
+                    self.usage_tokens = !self.usage_tokens;
+                    if self.token_savers.is_none() {
+                        self.token_savers = Some(token_savers());
+                    }
+                }
                 _ => {}
             },
             View::Transcript => self.handle_transcript_key(key.code),
@@ -3760,6 +3772,106 @@ impl App {
 }
 
 /// `<documents>/claudash-exports/` (or `~/claudash-exports/`), created if needed.
+/// Where tokens went over the last days, from every session's analysis.
+#[derive(Default)]
+pub struct TokenReport {
+    /// Tool output that entered the context, by tool (Bash by command).
+    pub outputs: Vec<(String, analysis::OutputStat)>,
+    /// The most expensive prompts: session title, project, prompt.
+    pub prompts: Vec<(String, String, analysis::PromptCost)>,
+    /// (replies, output tokens) in the window and in the 30 days before it.
+    pub replies: ((u32, u64), (u32, u64)),
+    /// (tool calls, output bytes) in the window and in the 30 days before it.
+    pub tool_calls: ((u32, u64), (u32, u64)),
+}
+
+impl App {
+    pub fn token_report(&self, days: i64) -> TokenReport {
+        let today = chrono::Local::now().date_naive();
+        let start = today - chrono::Days::new(days as u64 - 1);
+        let prior_start = start - chrono::Days::new(30);
+        let mut report = TokenReport::default();
+        let mut outputs: HashMap<String, analysis::OutputStat> = HashMap::new();
+        for session in &self.sessions {
+            let Some(a) = self.analysis(session) else {
+                continue;
+            };
+            for ((day, label), stat) in &a.tool_output {
+                let slot = if *day >= start {
+                    let o = outputs.entry(label.clone()).or_default();
+                    o.calls += stat.calls;
+                    o.bytes += stat.bytes;
+                    &mut report.tool_calls.0
+                } else if *day >= prior_start {
+                    &mut report.tool_calls.1
+                } else {
+                    continue;
+                };
+                slot.0 += stat.calls;
+                slot.1 += stat.bytes;
+            }
+            for (day, (n, output)) in &a.replies {
+                let slot = if *day >= start {
+                    &mut report.replies.0
+                } else if *day >= prior_start {
+                    &mut report.replies.1
+                } else {
+                    continue;
+                };
+                slot.0 += n;
+                slot.1 += output;
+            }
+            for p in &a.prompts {
+                if p.at.is_some_and(|t| t.date_naive() >= start) {
+                    report.prompts.push((
+                        session.title.clone(),
+                        session.project_path.clone(),
+                        p.clone(),
+                    ));
+                }
+            }
+        }
+        report.outputs = outputs.into_iter().collect();
+        report
+            .outputs
+            .sort_by_key(|(_, s)| std::cmp::Reverse(s.bytes));
+        report
+            .prompts
+            .sort_by_key(|(_, _, p)| std::cmp::Reverse(p.usage.processed()));
+        report.prompts.truncate(15);
+        report
+    }
+}
+
+/// Token savers that are installed: caveman (a skill or plugin) and rtk (a
+/// command, often wired in as a hook).
+fn token_savers() -> Vec<String> {
+    let mut found = Vec::new();
+    let home = paths::claude_home();
+    let mentions = |file: PathBuf, what: &str| {
+        std::fs::read_to_string(file).is_ok_and(|t| t.to_lowercase().contains(what))
+    };
+    let caveman = home.as_ref().is_some_and(|h| {
+        std::fs::read_dir(h.join("skills"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("caveman"))
+            || mentions(h.join("plugins/installed_plugins.json"), "caveman")
+            || mentions(h.join("settings.json"), "caveman")
+    });
+    if caveman {
+        found.push("caveman".to_string());
+    }
+    let rtk_hook = home
+        .as_ref()
+        .is_some_and(|h| mentions(h.join("settings.json"), "rtk "));
+    if claude_cli::which("rtk").is_some() || rtk_hook {
+        found.push(if rtk_hook { "rtk (hook)" } else { "rtk" }.to_string());
+    }
+    found
+}
+
 /// Branches whose name, subject or author contain every word of `query`.
 fn branch_matches(branches: &[Branch], query: &str) -> Vec<usize> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();

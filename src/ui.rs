@@ -1091,7 +1091,187 @@ fn usage_bars(
     }
 }
 
+/// Days the "where tokens go" page covers.
+const TOKEN_WINDOW_DAYS: i64 = 7;
+
+/// "+12%" / "−8%" from `before` to `now`; empty when there's nothing before.
+fn change(now: f64, before: f64) -> String {
+    if before <= 0.0 {
+        return String::new();
+    }
+    let pct = (now - before) / before * 100.0;
+    if pct >= 0.0 {
+        format!("+{pct:.0}%")
+    } else {
+        format!("−{:.0}%", -pct)
+    }
+}
+
+fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
+    let report = app.token_report(TOKEN_WINDOW_DAYS);
+    let [summary_area, body] =
+        Layout::vertical([Constraint::Length(5), Constraint::Min(6)]).areas(area);
+
+    let per = |total: u64, n: u32| if n > 0 { total as f64 / n as f64 } else { 0.0 };
+    let ((r_now, o_now), (r_before, o_before)) = report.replies;
+    let ((c_now, b_now), (c_before, b_before)) = report.tool_calls;
+    let reply_now = per(o_now, r_now);
+    let reply_before = per(o_before, r_before);
+    let call_now = per(b_now, c_now) / 4.0;
+    let call_before = per(b_before, c_before) / 4.0;
+    let compare = |now: f64, before: f64| -> Vec<Span<'static>> {
+        if before <= 0.0 {
+            return Vec::new();
+        }
+        let delta = change(now, before);
+        let color = if now <= before {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
+        vec![
+            Span::styled(format!("   previous 30 days: {before:.0}  "), dim()),
+            Span::styled(delta, Style::new().fg(color)),
+        ]
+    };
+    let mut reply_line = vec![
+        Span::styled("Replies      ", dim()),
+        Span::raw(format!(
+            "{r_now} in {TOKEN_WINDOW_DAYS} days · {reply_now:.0} output tokens per reply"
+        )),
+    ];
+    reply_line.extend(compare(reply_now, reply_before));
+    let mut tool_line = vec![
+        Span::styled("Tool output  ", dim()),
+        Span::raw(format!(
+            "{c_now} calls · ~{call_now:.0} tokens per call into the context"
+        )),
+    ];
+    tool_line.extend(compare(call_now, call_before));
+    let savers = match app.token_savers.as_deref() {
+        Some([]) | None => Line::from(vec![
+            Span::styled("Savers       ", dim()),
+            Span::styled(
+                "none installed (caveman shortens replies, rtk shortens command output)",
+                dim(),
+            ),
+        ]),
+        Some(found) => Line::from(vec![
+            Span::styled("Savers       ", dim()),
+            Span::styled(
+                format!("{} installed", found.join(", ")),
+                Style::new().fg(Color::Green),
+            ),
+            Span::styled(
+                " · the change against the previous 30 days shows what they save",
+                dim(),
+            ),
+        ]),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(reply_line), Line::from(tool_line), savers]).block(panel(
+            &format!("Where tokens go · last {TOKEN_WINDOW_DAYS} days"),
+            Color::Cyan,
+        )),
+        summary_area,
+    );
+
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
+    let total: u64 = report
+        .outputs
+        .iter()
+        .map(|(_, s)| s.bytes)
+        .sum::<u64>()
+        .max(1);
+    let label_width = left.width.saturating_sub(40).clamp(10, 40) as usize;
+    let rows: Vec<Line> = report
+        .outputs
+        .iter()
+        .take(left.height.saturating_sub(2) as usize)
+        .map(|(label, s)| {
+            let share = s.bytes as f64 / total as f64;
+            let bar = "█".repeat((share * 10.0).round() as usize);
+            let label = match label.strip_prefix("Bash: ") {
+                Some(cmd) => format!("$ {cmd}"),
+                None => tool_label(label),
+            };
+            let label: String = label.chars().take(label_width).collect();
+            Line::from(vec![
+                Span::raw(format!("{label:<label_width$} ")),
+                Span::styled(
+                    format!("{:>7} ", human_tokens(s.tokens())),
+                    Style::new().bold(),
+                ),
+                Span::styled(
+                    format!(
+                        "{:>5} calls {:>6}/call ",
+                        s.calls,
+                        human_tokens(s.tokens() / s.calls.max(1) as u64)
+                    ),
+                    dim(),
+                ),
+                Span::styled(bar, Style::new().fg(Color::Cyan)),
+            ])
+        })
+        .collect();
+    let block = panel("Tool output into the context", Color::Cyan)
+        .title_bottom(Line::from(" ~4 bytes per token ").right_aligned());
+    if rows.is_empty() {
+        frame.render_widget(message("No tool calls in these days.", block), left);
+    } else {
+        frame.render_widget(Paragraph::new(rows).block(block), left);
+    }
+
+    let width = right.width.saturating_sub(4) as usize;
+    let mut lines = Vec::new();
+    for (title, project, p) in &report.prompts {
+        if lines.len() + 2 > right.height.saturating_sub(2) as usize {
+            break;
+        }
+        let text: String = p
+            .text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(width.saturating_sub(10))
+            .collect();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:>7} ", human_tokens(p.usage.processed())),
+                Style::new().fg(Color::Yellow).bold(),
+            ),
+            Span::raw(text),
+        ]));
+        let when =
+            p.at.map(|t| t.format("%b %d %H:%M").to_string())
+                .unwrap_or_default();
+        let meta: String = format!(
+            "        {when} · {} · {} · {}",
+            plural(p.requests as u64, "request"),
+            title,
+            project
+        )
+        .chars()
+        .take(width)
+        .collect();
+        lines.push(Line::from(Span::styled(meta, dim())));
+    }
+    let block = panel("Costliest prompts", Color::Yellow).title_bottom(
+        Line::from(" tokens processed by every request a prompt caused ").right_aligned(),
+    );
+    if lines.is_empty() {
+        frame.render_widget(message("No prompts in these days.", block), right);
+    } else {
+        frame.render_widget(Paragraph::new(lines).block(block), right);
+    }
+}
+
 fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
+    if app.usage_tokens {
+        return draw_token_report(frame, app, area);
+    }
     let [plan_area, chart_area, bottom] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(8),
@@ -2189,6 +2369,70 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(
                 format!("   {:>3} failed ({rate:.0}%)", t.errors),
                 Style::new().fg(color),
+            ),
+        ]));
+    }
+
+    section(&mut lines, "Tool output that entered the context");
+    let mut outputs: BTreeMap<&str, crate::analysis::OutputStat> = BTreeMap::new();
+    for ((_, label), stat) in &a.tool_output {
+        let o = outputs.entry(label.as_str()).or_default();
+        o.calls += stat.calls;
+        o.bytes += stat.bytes;
+    }
+    let mut outputs: Vec<(&str, crate::analysis::OutputStat)> = outputs.into_iter().collect();
+    outputs.sort_by_key(|(_, s)| std::cmp::Reverse(s.bytes));
+    if outputs.is_empty() {
+        lines.push(Line::from(Span::styled("  none", dim())));
+    }
+    for (label, stat) in outputs.iter().take(8) {
+        let label = match label.strip_prefix("Bash: ") {
+            Some(cmd) => format!("$ {cmd}"),
+            None => tool_label(label),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "  {:<40}",
+                label.chars().take(40).collect::<String>()
+            )),
+            Span::styled(
+                format!("{:>8}", human_tokens(stat.tokens())),
+                Style::new().bold(),
+            ),
+            Span::styled(
+                format!(
+                    "   {} · ~4 bytes per token",
+                    plural(stat.calls as u64, "call")
+                ),
+                dim(),
+            ),
+        ]));
+    }
+
+    section(&mut lines, "Costliest prompts");
+    let mut prompts: Vec<&crate::analysis::PromptCost> = a.prompts.iter().collect();
+    prompts.sort_by_key(|p| std::cmp::Reverse(p.usage.processed()));
+    if prompts.is_empty() {
+        lines.push(Line::from(Span::styled("  none", dim())));
+    }
+    for p in prompts.iter().take(5) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:>8}  ", human_tokens(p.usage.processed())),
+                Style::new().fg(Color::Yellow).bold(),
+            ),
+            Span::raw(
+                p.text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+            ),
+            Span::styled(
+                format!("  · {}", plural(p.requests as u64, "request")),
+                dim(),
             ),
         ]));
     }

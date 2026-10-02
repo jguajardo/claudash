@@ -378,6 +378,13 @@ pub const BINDINGS: &[Binding] = &[
     ),
     // Usage.
     key(Usage, "m", "days or months", Some("days/months"), ch('m')),
+    key(
+        Usage,
+        "Tab",
+        "where tokens go: tool output by command, costliest prompts, reply length",
+        Some("where tokens go"),
+        TAB,
+    ),
     // Ecosystem.
     key(Ecosystem, "←/→  Tab", "switch tab", Some("tab"), TAB),
     key(Ecosystem, "↑/↓", "move", None, None),

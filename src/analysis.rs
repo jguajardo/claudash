@@ -13,7 +13,7 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use serde_json::Value;
 
 use crate::sessions::Usage;
@@ -73,6 +73,176 @@ pub struct Analysis {
     pub invocations: Vec<String>,
     /// Files read or written by the session itself.
     pub touched: BTreeSet<String>,
+    /// Tool output that went into the context, per day and tool (Bash calls
+    /// by command), subagents included.
+    pub tool_output: BTreeMap<(NaiveDate, String), OutputStat>,
+    /// What each of your prompts cost, in order.
+    pub prompts: Vec<PromptCost>,
+    /// Replies and their output tokens per day (main session).
+    pub replies: BTreeMap<NaiveDate, (u32, u64)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OutputStat {
+    pub calls: u32,
+    pub bytes: u64,
+}
+
+impl OutputStat {
+    /// About four bytes per token.
+    pub fn tokens(&self) -> u64 {
+        self.bytes / 4
+    }
+}
+
+/// One prompt and the usage of every request it caused.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PromptCost {
+    pub at: Option<DateTime<Local>>,
+    pub text: String,
+    pub usage: Usage,
+    pub requests: u32,
+}
+
+/// Drops quoted strings and `$(…)` / backtick substitutions, so their words
+/// aren't mistaken for commands.
+fn scrub(command: &str) -> String {
+    let mut out = String::new();
+    let mut chars = command.chars().peekable();
+    let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(c),
+            (None, '$') if chars.peek() == Some(&'(') => {
+                chars.next();
+                depth += 1;
+            }
+            (None, '(') if depth > 0 => depth += 1,
+            (None, ')') if depth > 0 => depth -= 1,
+            (None, _) if depth > 0 => {}
+            (None, _) => out.push(c),
+        }
+    }
+    out
+}
+
+/// `cd x && FOO=1 cargo test --all 2>&1 | tail` -> `cargo test`.
+pub fn command_key(command: &str) -> String {
+    let script = scrub(command);
+    let segments = script
+        .split(['\n', ';', '|', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    for segment in segments {
+        let mut words = segment
+            .split_whitespace()
+            .filter(|w| !w.contains('='))
+            .skip_while(|w| {
+                matches!(
+                    *w,
+                    "sudo" | "env" | "time" | "timeout" | "nice" | "then" | "do"
+                )
+            })
+            .skip_while(|w| w.chars().all(|c| c.is_ascii_digit() || c == 's'));
+        let Some(program) = words.next() else {
+            continue; // Only assignments.
+        };
+        if matches!(
+            program,
+            "cd" | "export"
+                | ":"
+                | "set"
+                | "source"
+                | "."
+                | "done"
+                | "fi"
+                | "esac"
+                | "{"
+                | "}"
+                | "("
+                | ")"
+        ) || program.starts_with('>')
+            || program.starts_with('#')
+        {
+            continue;
+        }
+        if matches!(program, "for" | "while" | "until" | "if" | "case") {
+            return "shell loop or condition".into();
+        }
+        let program = program.trim_start_matches('(');
+        let program = program.rsplit('/').next().unwrap_or(program);
+        let is_word = |w: &&str| {
+            w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
+                && !w.starts_with('-')
+        };
+        let mut key = program.to_string();
+        if let Some(sub) = words.next().filter(is_word) {
+            key.push(' ');
+            key.push_str(sub);
+            if matches!(sub, "run" | "exec" | "x")
+                && let Some(third) = words.next().filter(is_word)
+            {
+                key.push(' ');
+                key.push_str(third);
+            }
+        }
+        return key;
+    }
+    "other".into()
+}
+
+/// Label for a tool's output: Bash by command, others by tool name.
+fn output_label(name: &str, input: &Value) -> String {
+    match (name, input["command"].as_str()) {
+        ("Bash", Some(command)) => format!("Bash: {}", command_key(command)),
+        _ => name.to_string(),
+    }
+}
+
+/// Text length of a tool result's content.
+fn result_bytes(content: &Value) -> u64 {
+    match content {
+        Value::String(s) => s.len() as u64,
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| b["text"].as_str().map_or(0, |t| t.len() as u64))
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// The prompt you typed, from a user record, if it is one: a slash command
+/// shows as `/name args`; tool results and Claude Code's own messages aren't.
+fn prompt_text(record: &Value) -> Option<String> {
+    if record["isMeta"].as_bool() == Some(true)
+        || record["isCompactSummary"].as_bool() == Some(true)
+    {
+        return None;
+    }
+    let content = &record["message"]["content"];
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks.iter().find(|b| b["type"].as_str() == Some("text"))?["text"]
+            .as_str()?
+            .to_string(),
+        _ => return None,
+    };
+    if let Some(rest) = text.split("<command-name>").nth(1) {
+        let name = rest.split("</command-name>").next()?;
+        let args = text
+            .split("<command-args>")
+            .nth(1)
+            .and_then(|a| a.split("</command-args>").next())
+            .unwrap_or_default();
+        return Some(format!("{name} {}", args.trim()).trim_end().to_string());
+    }
+    let text = text.trim();
+    (!text.is_empty() && !text.starts_with('<') && !text.starts_with("[Request interrupted"))
+        .then(|| text.to_string())
 }
 
 impl Analysis {
@@ -114,6 +284,10 @@ fn summarize(input: &Value) -> String {
 fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
     let mut usage_by_request: HashMap<String, Usage> = HashMap::new();
     let mut tool_names: HashMap<String, String> = HashMap::new();
+    let mut labels: HashMap<String, String> = HashMap::new();
+    // Which prompt each request answered, and the day it was made.
+    let mut request_prompt: HashMap<String, (Option<usize>, Option<NaiveDate>)> = HashMap::new();
+    let mut current_prompt: Option<usize> = None;
     let mut calls = 0u32;
     let mut pending_compaction = false;
     let Ok(file) = fs::File::open(path) else {
@@ -123,7 +297,8 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
         let relevant = line.contains("\"type\":\"assistant\"")
             || line.contains("\"tool_result\"")
             || line.contains("compact_boundary")
-            || line.contains("<command-name>");
+            || line.contains("<command-name>")
+            || (main && line.contains("\"type\":\"user\""));
         if !relevant {
             continue;
         }
@@ -147,6 +322,12 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                     let first_time = !usage_by_request.contains_key(req);
                     usage_by_request.insert(req.to_string(), usage);
                     if main && first_time {
+                        request_prompt.insert(
+                            req.to_string(),
+                            (current_prompt, at.map(|t| t.date_naive())),
+                        );
+                    }
+                    if main && first_time {
                         out.context.push(ContextPoint {
                             at,
                             tokens: usage.context(),
@@ -166,6 +347,7 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                     calls += 1;
                     if let Some(id) = block["id"].as_str() {
                         tool_names.insert(id.to_string(), name.clone());
+                        labels.insert(id.to_string(), output_label(&name, input));
                     }
                     match name.as_str() {
                         "Skill" => {
@@ -219,6 +401,30 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
             }
             Some("user") => {
                 let content = &record["message"]["content"];
+                if let Some(day) = at.map(|t| t.date_naive()) {
+                    for block in content.as_array().into_iter().flatten() {
+                        if block["type"].as_str() != Some("tool_result") {
+                            continue;
+                        }
+                        let id = block["tool_use_id"].as_str().unwrap_or_default();
+                        if let Some(label) = labels.get(id) {
+                            let stat = out.tool_output.entry((day, label.clone())).or_default();
+                            stat.calls += 1;
+                            stat.bytes += result_bytes(&block["content"]);
+                        }
+                    }
+                }
+                if main
+                    && record["isSidechain"].as_bool() != Some(true)
+                    && let Some(text) = prompt_text(&record)
+                {
+                    out.prompts.push(PromptCost {
+                        at,
+                        text: text.chars().take(200).collect(),
+                        ..Default::default()
+                    });
+                    current_prompt = Some(out.prompts.len() - 1);
+                }
                 if let Some(text) = content.as_str()
                     && let Some(rest) = text.split("<command-name>").nth(1)
                 {
@@ -263,8 +469,19 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
         }
     }
     let mut total = Usage::default();
-    for u in usage_by_request.values() {
+    for (req, u) in &usage_by_request {
         total.add(u);
+        if let Some((prompt, day)) = request_prompt.get(req) {
+            if let Some(p) = prompt.and_then(|i| out.prompts.get_mut(i)) {
+                p.usage.add(u);
+                p.requests += 1;
+            }
+            if let Some(day) = day {
+                let entry = out.replies.entry(*day).or_default();
+                entry.0 += 1;
+                entry.1 += u.output_tokens;
+            }
+        }
     }
     (total, calls)
 }
@@ -324,6 +541,76 @@ pub fn analyze_all(sessions: &[(PathBuf, SystemTime, u64)], previous: &Cache) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measures_tool_output_and_what_each_prompt_cost() {
+        let dir = std::env::temp_dir().join(format!("claudash-cost-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let t = "2026-01-01T10:00:00Z";
+        let lines = [
+            format!(
+                r#"{{"type":"user","timestamp":"{t}","message":{{"content":"run the tests"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"assistant","requestId":"r1","timestamp":"{t}","message":{{"model":"m","usage":{{"input_tokens":10,"output_tokens":5}},"content":[{{"type":"tool_use","id":"t1","name":"Bash","input":{{"command":"cargo test"}}}}]}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","timestamp":"{t}","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{}"}}]}}}}"#,
+                "x".repeat(400)
+            ),
+            format!(
+                r#"{{"type":"assistant","requestId":"r2","timestamp":"{t}","message":{{"model":"m","usage":{{"input_tokens":20,"output_tokens":7}},"content":[]}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","timestamp":"{t}","message":{{"content":"<command-name>/opsx:apply</command-name><command-args>add-login</command-args>"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"assistant","requestId":"r3","timestamp":"{t}","message":{{"model":"m","usage":{{"input_tokens":1,"output_tokens":1}},"content":[]}}}}"#
+            ),
+        ];
+        fs::write(dir.join("s.jsonl"), lines.join("\n")).unwrap();
+        let a = analyze(&dir.join("s.jsonl"));
+        fs::remove_dir_all(&dir).unwrap();
+
+        let day = DateTime::parse_from_rfc3339(t)
+            .unwrap()
+            .with_timezone(&Local)
+            .date_naive();
+        let out = a.tool_output[&(day, "Bash: cargo test".to_string())];
+        assert_eq!((out.calls, out.tokens()), (1, 100));
+        assert_eq!(a.prompts.len(), 2);
+        assert_eq!(a.prompts[0].text, "run the tests");
+        assert_eq!(
+            (a.prompts[0].requests, a.prompts[0].usage.output_tokens),
+            (2, 12)
+        );
+        assert_eq!(a.prompts[1].text, "/opsx:apply add-login");
+        assert_eq!(a.invocations, ["opsx:apply add-login"]);
+        assert_eq!(a.replies.values().next(), Some(&(3, 13)));
+    }
+
+    #[test]
+    fn names_commands_by_what_they_run() {
+        assert_eq!(
+            command_key("cd /x && FOO=1 cargo test --all 2>&1 | tail"),
+            "cargo test"
+        );
+        assert_eq!(command_key("npm run build"), "npm run build");
+        assert_eq!(command_key("timeout 60 git diff --stat"), "git diff");
+        assert_eq!(command_key("/usr/bin/ls -la"), "ls");
+        assert_eq!(command_key("python3 script.py"), "python3");
+        assert_eq!(
+            command_key("SP=/tmp/x; B=$(ls | wc) && cd $SP && cargo build -q"),
+            "cargo build"
+        );
+        assert_eq!(
+            command_key("export A=1\nfor f in *; do echo $f; done"),
+            "shell loop or condition"
+        );
+        assert_eq!(command_key("echo \"a | b && c\" | grep x"), "echo");
+        assert_eq!(command_key("A=1"), "other");
+    }
 
     #[test]
     fn reads_context_tools_edits_and_subagents() {

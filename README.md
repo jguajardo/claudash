@@ -96,6 +96,14 @@ Plan usage gauges with the forecast, a chart of tokens per day (or per month wit
 
 Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers: the charts keep your history after the transcripts are gone.
 
+`Tab` switches to **where tokens go** over the last 7 days, from your own transcripts:
+
+- **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
+- **Costliest prompts**: every prompt with the tokens processed by all the requests it caused, so you see which asks were expensive.
+- **Reply length and tool output per call** against the previous 30 days. If you install a token saver such as [caveman](https://github.com/JuliusBrussee/caveman) (shorter replies) or [rtk](https://github.com/rtk-ai/rtk) (shorter command output), claudash says it's installed and these numbers show what it actually saves you.
+
+The session inspector (`i`) shows the same for one session. Tool output is measured in characters and shown as about 4 per token; prompt costs are Claude Code's own token counts.
+
 ### 6 · Ecosystem
 
 Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin, with how often each skill, subagent and command was used in the last 30 days. Plugins show their projected always-on token cost per session from `claude plugin details` and how often anything they provide was used, so plugins that cost tokens in every session without being used stand out, with their total. `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
