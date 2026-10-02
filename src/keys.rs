@@ -209,6 +209,20 @@ pub const BINDINGS: &[Binding] = &[
     ),
     key(
         Mcp,
+        "a",
+        "sign in to the server (claude mcp login; opens the browser)",
+        Some("sign in"),
+        ch('a'),
+    ),
+    key(
+        Mcp,
+        "L",
+        "sign out of the server (claude mcp logout, asks first)",
+        None,
+        ch('L'),
+    ),
+    key(
+        Mcp,
         "Tab  Esc",
         "back to the sessions",
         Some("sessions"),
@@ -216,6 +230,13 @@ pub const BINDINGS: &[Binding] = &[
     ),
     // Activity.
     key(Activity, "↑/↓", "move between open sessions", None, None),
+    key(
+        Activity,
+        "Enter",
+        "what a session that needs you is asking to do (the command, the diff)",
+        Some("what it asks"),
+        ENTER,
+    ),
     key(
         Activity,
         "v",

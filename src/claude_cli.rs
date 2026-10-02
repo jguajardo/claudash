@@ -108,6 +108,20 @@ fn parse_live(json: &[u8]) -> Result<HashMap<String, LiveSession>, String> {
         .collect())
 }
 
+/// `claude mcp logout <server>` in `cwd`: clears the server's stored OAuth credentials.
+pub fn mcp_logout(server: &str, cwd: &Path) -> Result<String, String> {
+    let output = self::command()
+        .args(["mcp", "logout", server])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("Could not run `claude mcp logout`: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 /// Runs `claude <command> <id>` for a background session (`logs`, `stop`,
 /// `respawn`) and returns its output.
 pub fn background(command: &str, id: &str) -> Result<String, String> {

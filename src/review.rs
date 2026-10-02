@@ -53,6 +53,9 @@ pub struct Branch {
     pub when: i64,
     /// Commits on the branch that the base doesn't have.
     pub ahead: u32,
+    /// The branch checked out in your own checkout (its committed work),
+    /// to review before pushing. `reference` is then its commit.
+    pub local: bool,
 }
 
 /// What the branch picker shows for a repository.
@@ -67,7 +70,7 @@ pub struct Listing {
 
 /// Fetches and lists the remote's branches. Slow (network): call it off the
 /// UI thread.
-pub fn list(repo: &Path) -> Result<Listing, String> {
+pub fn list(repo: &Path, checkout: &Path) -> Result<Listing, String> {
     let remotes = git(repo, &["remote"])?;
     let remote = remotes
         .lines()
@@ -123,15 +126,49 @@ pub fn list(repo: &Path) -> Result<Listing, String> {
             author: author.to_string(),
             when: when.trim().parse().unwrap_or(0),
             ahead,
+            local: false,
         });
         if branches.len() >= MAX_BRANCHES {
             break;
         }
     }
+    if let Some(base) = &base
+        && let Some(local) = local_branch(checkout, base)
+    {
+        branches.insert(0, local);
+    }
     Ok(Listing {
         base,
         branches,
         fetch_error,
+    })
+}
+
+/// The branch checked out in `checkout`, when it has commits the base lacks.
+fn local_branch(checkout: &Path, base: &str) -> Option<Branch> {
+    let name = git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    let name = name.trim();
+    if name == "HEAD" {
+        return None; // Detached.
+    }
+    let ahead: u32 = git(checkout, &["rev-list", "--count", &format!("{base}..HEAD")])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if ahead == 0 {
+        return None;
+    }
+    let info = git(checkout, &["log", "-1", "--format=%H%x09%s%x09%an%x09%ct"]).ok()?;
+    let mut parts = info.trim().splitn(4, '\t');
+    Some(Branch {
+        name: name.to_string(),
+        reference: parts.next()?.to_string(),
+        subject: parts.next()?.to_string(),
+        author: parts.next()?.to_string(),
+        when: parts.next()?.parse().unwrap_or(0),
+        ahead,
+        local: true,
     })
 }
 
@@ -194,11 +231,16 @@ fn slug(text: &str) -> String {
 
 /// A worktree with the branch checked out (detached, so no local branch is
 /// created), made or updated for this review.
-pub fn prepare_worktree(repo: &Path, repo_name: &str, reference: &str) -> Result<PathBuf, String> {
+pub fn prepare_worktree(
+    repo: &Path,
+    repo_name: &str,
+    branch: &str,
+    reference: &str,
+) -> Result<PathBuf, String> {
     let dir = worktrees_dir()
         .ok_or("Could not find the cache directory")?
         .join(slug(repo_name))
-        .join(slug(reference));
+        .join(slug(branch));
     if dir.join(".git").exists() {
         git(&dir, &["checkout", "--quiet", "--detach", reference])?;
     } else {
@@ -559,11 +601,21 @@ mod tests {
             &["clone", "-q", &origin.to_string_lossy(), "clone"]
         ));
 
-        let listing = list(&clone).unwrap();
+        let listing = list(&clone, &clone).unwrap();
         assert_eq!(listing.base.as_deref(), Some("origin/develop"));
         let branch = &listing.branches[0];
         assert_eq!((branch.name.as_str(), branch.ahead), ("feature/x", 1));
         assert!(listing.branches.iter().all(|b| b.name != "develop"));
+
+        // A local branch with unpushed commits comes first.
+        assert!(run(&clone, &["checkout", "-q", "-b", "mine"]));
+        fs::write(clone.join("b.txt"), "b\n").unwrap();
+        assert!(run(&clone, &["add", "b.txt"]));
+        assert!(run(&clone, &["commit", "-q", "-m", "Add b"]));
+        let with_local = list(&clone, &clone).unwrap();
+        assert!(with_local.branches[0].local);
+        assert_eq!(with_local.branches[0].name, "mine");
+        assert!(run(&clone, &["checkout", "-q", "-"]));
 
         let stat = diff_stat(&clone, "origin/develop", "origin/feature/x").unwrap();
         assert_eq!((stat.commits, stat.files, stat.insertions), (1, 1, 2));

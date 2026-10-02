@@ -1351,7 +1351,21 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 let analysis = app.analysis(s);
                 let mut detail = vec![Span::raw("    ")];
-                if let Some(e) = analysis.and_then(|a| a.recent.last()) {
+                if let Some(tool) = app.pending_tool(&s.id) {
+                    let summary = crate::transcript::describe(tool)
+                        .into_iter()
+                        .find(|l| !l.is_empty())
+                        .unwrap_or_default();
+                    detail.push(Span::styled(
+                        format!(
+                            "asks: ⚙ {} {}",
+                            tool_label(&tool.name),
+                            summary.chars().take(70).collect::<String>()
+                        ),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                    detail.push(Span::styled("  · Enter to see it all", dim()));
+                } else if let Some(e) = analysis.and_then(|a| a.recent.last()) {
                     let ago =
                         e.at.map(|t| short_age((now - t).num_seconds()))
                             .unwrap_or_default();
@@ -2743,6 +2757,12 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 .map(|&i| {
                     let b = &listing.branches[i];
                     let mut first = vec![Span::styled(b.name.clone(), Style::new().bold())];
+                    if b.local {
+                        first.push(Span::styled(
+                            "  your checkout · review before pushing",
+                            Style::new().fg(Color::Yellow),
+                        ));
+                    }
                     if b.ahead > 0 {
                         first.push(Span::styled(
                             format!("  +{} commit(s)", b.ahead),
@@ -2836,6 +2856,14 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 Line::from(Span::styled(
                     "Checked out in a worktree of its own; your checkout isn't touched.",
                     dim(),
+                )),
+                Line::from(Span::styled(
+                    if task.reference.contains('/') {
+                        ""
+                    } else {
+                        "Your local branch: only committed work is reviewed."
+                    },
+                    Style::new().fg(Color::Yellow),
                 )),
                 Line::default(),
             ];

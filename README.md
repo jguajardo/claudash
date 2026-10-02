@@ -24,7 +24,7 @@ Six views, switched with `1`–`6`. Press `:` (or `Ctrl+P`) anywhere to find any
   - `D` moves the session to claudash's trash, after asking; `T` opens the trash to restore sessions or delete them for good, and anything left there is deleted after 30 days. `C` cleans up in bulk: pick a criterion (not used for 7/14/21 days, larger than 5/20 MB), check the list and move them all to the trash. Open and starred sessions are never included.
 - **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
 - **Project** also shows the folder's git state (branch, changed files, commits to push or pull), how many tokens sessions there start with before your first prompt, and a warning when two open sessions share the folder, since their edits can collide.
-- **MCP Status**: `claude mcp list` run in the selected project's folder, so project-scoped servers show up too, cached per project. Press `Tab` to move into the list and `Enter` to read a server's latest log, which usually says why it failed.
+- **MCP Status**: `claude mcp list` run in the selected project's folder, so project-scoped servers show up too, cached per project. Press `Tab` to move into the list and `Enter` to read a server's latest log, which usually says why it failed. For servers that need you to sign in (`AUTH`), such as claude.ai connectors (Gmail, Google Calendar, Atlassian…) or HTTP servers, `a` runs `claude mcp login` and re-checks the server when you're back; `L` signs out (`claude mcp logout`) after asking.
 - **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost, model, and how many subagents it ran and what they used.
   - **Cache diagnostics**: how much of the input was read from cache, flagged when cache writes dominate; with the status line, whether the cache is still warm and until when, its TTL, cache misses and their cause (such as `tools_changed` or `ttl_expired_5m`), and how many tokens the next reply re-caches once it goes cold.
   - **Plan usage**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
@@ -37,7 +37,7 @@ From any view:
 
 ### 2 · Activity
 
-What open sessions are doing right now, the ones that need you first: their state and why they wait (for example "permission prompt"), their last tool call, how full their context is and how many subagents are running. Below, a live feed of every tool call from sessions active in the last hour, with failures in red. It refreshes every 2 seconds while it's open, re-reading only the transcripts that changed.
+What open sessions are doing right now, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. Below, a live feed of every tool call from sessions active in the last hour, with failures in red. It refreshes every 2 seconds while it's open, re-reading only the transcripts that changed.
 
 Background sessions (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)) are listed too, with their state, including finished ones. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking. To dispatch new ones, use Claude Code's own `claude agents`.
 
@@ -58,7 +58,7 @@ On top, a **Problems** panel collects what can go wrong with several sessions at
 
 `b` on a repository reviews one of its branches the way you'd review a pull request, with Claude Code doing the reviewing:
 
-1. claudash runs `git fetch` and lists the remote's branches, newest first, with their last commit, author, how many commits they add and whether you've reviewed them. Type to search.
+1. claudash runs `git fetch` and lists the remote's branches, newest first, with their last commit, author, how many commits they add and whether you've reviewed them. Type to search. Your own checkout's branch comes first when it has commits the base doesn't, so you can review your work before pushing it (only committed work is reviewed).
 2. Pick one: it shows its size against the base (`develop`, or `main`, or `master`, whichever the remote has first) and asks how far to go:
    - **Static review**: Claude Code reads the commits, the diff and the code around it, in the background. It can only read files and run `git log`, `git diff` and `git show`; nothing runs and nothing changes.
    - **Review and run the tests** or **Review and start the project**: Claude Code opens in the terminal, reviews, then finds how to run the tests or start the project and does it, asking you before each command. The findings show when you exit.
@@ -173,6 +173,7 @@ A letter means the same thing in every view where it works, `Enter` opens or run
 | `t` · `c` · `*` | sessions | Tag · note · star |
 | `Tab` | | Next pane: MCP servers, background sessions, subagents in the inspector, ecosystem tabs |
 | `l` | MCP servers, background | Log |
+| `a` · `L` | MCP servers | Sign in (`claude mcp login`) · sign out (asks first) |
 | `o` · `n`/`N` · `e` | conversation | Tool output · next/previous match · export to Markdown |
 | `x` | logs | Errors only |
 | `m` | usage | Days or months |
@@ -224,6 +225,7 @@ These actions change things, and only run when you ask:
 - **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
 - **Stop, respawn or attach to a background session** (`S`, `R`, `Enter` in Activity): runs `claude stop`, `claude respawn` or `claude attach`.
 - **Remove or prune worktrees** (`D`, `P` in Projects): runs `git worktree remove` (without `--force`) or `git worktree prune`.
+- **Sign in to or out of an MCP server** (`a`, `L` in the MCP list): runs `claude mcp login` or `claude mcp logout`.
 - **Review a branch** (`b` in Projects): runs `git fetch`, adds a detached worktree under `~/.cache/claudash/reviews/` (or updates it for a second review), and runs Claude Code there: `claude -p` limited to reading files and `git log`/`diff`/`show` for a static review, or an interactive `claude` for the other modes. Reviews are saved in claudash's data directory.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 

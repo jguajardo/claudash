@@ -44,6 +44,111 @@ pub struct Entry {
     pub text: String,
 }
 
+/// A tool call Claude made that has no result yet: while a session waits for
+/// your permission, the call it waits on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingTool {
+    pub name: String,
+    pub input: Value,
+}
+
+/// How much of a transcript's end `pending_tool` reads.
+const TAIL_BYTES: u64 = 512 * 1024;
+
+/// The last tool call without a result, from the end of the transcript.
+pub fn pending_tool(path: &Path) -> Option<PendingTool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = String::new();
+    // Lossy: the cut may land inside a multi-byte character.
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw).ok()?;
+    tail.push_str(&String::from_utf8_lossy(&raw));
+    let mut lines = tail.lines();
+    if start > 0 {
+        lines.next(); // Partial first line.
+    }
+    pending_in(lines)
+}
+
+fn pending_in<'a>(lines: impl Iterator<Item = &'a str>) -> Option<PendingTool> {
+    let mut calls: Vec<(String, PendingTool)> = Vec::new();
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        for block in record["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            match block["type"].as_str() {
+                Some("tool_use") => calls.push((
+                    block["id"].as_str().unwrap_or_default().to_string(),
+                    PendingTool {
+                        name: block["name"].as_str().unwrap_or("tool").to_string(),
+                        input: block["input"].clone(),
+                    },
+                )),
+                Some("tool_result") => {
+                    let id = block["tool_use_id"].as_str().unwrap_or_default();
+                    calls.retain(|(call, _)| call != id);
+                }
+                _ => {}
+            }
+        }
+    }
+    calls.pop().map(|(_, tool)| tool)
+}
+
+/// What a pending tool call would do, for reading before you approve it.
+pub fn describe(tool: &PendingTool) -> Vec<String> {
+    let input = &tool.input;
+    let text = |key: &str| input[key].as_str().unwrap_or_default().to_string();
+    let mut out = Vec::new();
+    match tool.name.as_str() {
+        "Bash" => {
+            if !text("description").is_empty() {
+                out.push(text("description"));
+                out.push(String::new());
+            }
+            out.extend(text("command").lines().map(|l| format!("$ {l}")));
+        }
+        "Edit" | "MultiEdit" => {
+            out.push(text("file_path"));
+            let edits: Vec<&Value> = match input["edits"].as_array() {
+                Some(list) => list.iter().collect(),
+                None => vec![input],
+            };
+            for edit in edits {
+                out.push(String::new());
+                let old = edit["old_string"].as_str().unwrap_or_default();
+                let new = edit["new_string"].as_str().unwrap_or_default();
+                out.extend(old.lines().map(|l| format!("- {l}")));
+                out.extend(new.lines().map(|l| format!("+ {l}")));
+            }
+        }
+        "Write" => {
+            out.push(text("file_path"));
+            out.push(String::new());
+            out.extend(text("content").lines().map(|l| format!("+ {l}")));
+        }
+        _ => out.extend(
+            serde_json::to_string_pretty(input)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned),
+        ),
+    }
+    out
+}
+
 /// Reads a session transcript, or a subagent's (`<session>/subagents/*.jsonl`).
 pub fn load(path: &Path) -> io::Result<Vec<Entry>> {
     let file = fs::File::open(path)?;
@@ -380,6 +485,24 @@ pub fn snippet(text: &str, needle_lower: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_call_waiting_for_a_result() {
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"x"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"rm -rf build","description":"Clean"}}]}}"#,
+        ];
+        let pending = pending_in(lines.into_iter()).unwrap();
+        assert_eq!(pending.name, "Bash");
+        assert_eq!(describe(&pending), ["Clean", "", "$ rm -rf build"]);
+        assert!(pending_in(lines[..2].iter().copied()).is_none());
+        let edit = PendingTool {
+            name: "Edit".into(),
+            input: serde_json::json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"}),
+        };
+        assert_eq!(describe(&edit), ["a.rs", "", "- x", "+ y"]);
+    }
     use serde_json::json;
 
     fn parse(records: &[Value]) -> Vec<Entry> {

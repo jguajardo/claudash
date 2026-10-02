@@ -229,6 +229,11 @@ pub enum Confirm {
         main: PathBuf,
         path: PathBuf,
     },
+    /// Clear an MCP server's stored credentials.
+    McpLogout {
+        server: String,
+        cwd: PathBuf,
+    },
 }
 
 /// A line being typed in the footer.
@@ -633,6 +638,11 @@ pub struct App {
     branches_job: Option<(PathBuf, String, BranchesJob)>,
     /// Preparing the worktree, then (static mode) Claude's review.
     review_job: Option<(ReviewTask, ReviewJob)>,
+    /// What each session that needs you is waiting on, by session ID, with
+    /// the transcript size it was read at.
+    pub pending: HashMap<String, (u64, transcript::PendingTool)>,
+    /// Re-check the project's MCP servers once the running command ends.
+    mcp_recheck: bool,
     /// An interactive review whose session is running in the terminal.
     pending_review: Option<(ReviewTask, PathBuf)>,
 
@@ -713,6 +723,8 @@ impl App {
             branches_job: None,
             review_job: None,
             pending_review: None,
+            mcp_recheck: false,
+            pending: HashMap::new(),
             library: Library::load(),
             history: History::load(),
             monthly: false,
@@ -751,6 +763,9 @@ impl App {
             if let Some((args, cwd)) = self.pending_command.take() {
                 self.run_claude(terminal, &args, &cwd)?;
                 self.finish_interactive_review();
+                if std::mem::take(&mut self.mcp_recheck) {
+                    self.recheck_mcp();
+                }
             }
             if last_tick.elapsed() >= TICK_RATE {
                 self.on_tick();
@@ -956,6 +971,11 @@ impl App {
                 self.activity_state.select(Some(next));
             }
             KeyCode::Up | KeyCode::Char('k') => self.activity_state.select_previous(),
+            KeyCode::Enter => {
+                if let Some(id) = selected {
+                    self.show_pending(&id);
+                }
+            }
             KeyCode::Char('v') => {
                 if let Some(id) = selected {
                     self.select_session(&id);
@@ -1028,6 +1048,16 @@ impl App {
                     Err(e) => self.show_flash(format!("git refused: {e}"), true),
                 }
                 self.git_at = None;
+            }
+            Confirm::McpLogout { server, cwd } => {
+                if self.background_job.is_some() {
+                    return self.show_flash("Another command is running", true);
+                }
+                let what = format!("mcp logout {server}");
+                self.background_job = Some((
+                    what,
+                    Job::spawn(move || claude_cli::mcp_logout(&server, &cwd)),
+                ));
             }
             Confirm::RemoveReviewWorktree { main, path } => {
                 match git::remove_worktree(&main, &path) {
@@ -1323,11 +1353,12 @@ impl App {
             .copied();
         match code {
             KeyCode::Char('b') => {
-                let r = match row {
-                    Some(ProjectRow::Repo(r) | ProjectRow::Checkout(r, _)) => r,
+                let (r, c) = match row {
+                    Some(ProjectRow::Repo(r)) => (r, 0),
+                    Some(ProjectRow::Checkout(r, c)) => (r, c),
                     _ => return self.show_flash("Select a repository first", true),
                 };
-                self.open_branches(r);
+                self.open_branches(r, c);
             }
             KeyCode::Char('D') => {
                 let Some(ProjectRow::Checkout(r, c)) = row else {
@@ -1479,6 +1510,64 @@ impl App {
     fn reload_hook_states(&mut self) {
         (self.hook_states, self.hooks_configured) = hooks::load();
         self.check_activity_changes();
+        self.update_pending();
+    }
+
+    /// Reads what sessions that need you are waiting on (the end of their
+    /// transcript, again only when it grew).
+    fn update_pending(&mut self) {
+        let waiting: Vec<(String, PathBuf, u64)> = self
+            .sessions
+            .iter()
+            .filter(|s| self.activity(&s.id) == Some(Activity::NeedsYou))
+            .map(|s| {
+                let size = std::fs::metadata(&s.path).map_or(0, |m| m.len());
+                (s.id.clone(), s.path.clone(), size)
+            })
+            .collect();
+        self.pending
+            .retain(|id, _| waiting.iter().any(|(w, _, _)| w == id));
+        for (id, path, size) in waiting {
+            if self.pending.get(&id).is_some_and(|(read, _)| *read == size) {
+                continue;
+            }
+            match transcript::pending_tool(&path) {
+                Some(tool) => {
+                    self.pending.insert(id, (size, tool));
+                }
+                None => {
+                    self.pending.remove(&id);
+                }
+            }
+        }
+    }
+
+    pub fn pending_tool(&self, id: &str) -> Option<&transcript::PendingTool> {
+        self.pending.get(id).map(|(_, tool)| tool)
+    }
+
+    /// Shows in full what a session that needs you is asking to do.
+    fn show_pending(&mut self, id: &str) {
+        let Some(tool) = self.pending_tool(id).cloned() else {
+            return self.show_flash("It isn't waiting on a tool call", false);
+        };
+        let title = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map_or(String::new(), |s| s.title.clone());
+        let mut lines = vec![
+            format!("{title} wants to use {}:", tool.name),
+            String::new(),
+        ];
+        lines.extend(transcript::describe(&tool));
+        lines.push(String::new());
+        lines.push("Answer it in the session's own terminal.".into());
+        self.popup = Some(Popup::Text {
+            title: " What it's asking ".into(),
+            lines,
+            scroll: 0,
+        });
     }
 
     /// What an open session is doing: from its hooks when set up, otherwise
@@ -1930,15 +2019,17 @@ impl App {
     // ---- Branch reviews ----------------------------------------------------
 
     /// `b` in Projects: fetches and lists the repository's branches.
-    fn open_branches(&mut self, repo_index: usize) {
+    /// `checkout` is the one selected, whose own branch is offered first.
+    fn open_branches(&mut self, repo_index: usize, checkout: usize) {
         if self.branches_job.is_some() {
             return;
         }
         let repo = &self.projects.repos[repo_index];
         let main = repo.checkouts[0].path.clone();
+        let mine = repo.checkouts[checkout].path.clone();
         let name = repo.name.clone();
         let dir = main.clone();
-        self.branches_job = Some((main, name, Job::spawn(move || review::list(&dir))));
+        self.branches_job = Some((main, name, Job::spawn(move || review::list(&dir, &mine))));
     }
 
     pub fn fetching_branches(&self) -> bool {
@@ -1981,7 +2072,8 @@ impl App {
         }
         let t = task.clone();
         let job = Job::spawn(move || {
-            let worktree = review::prepare_worktree(&t.repo, &t.repo_name, &t.reference)?;
+            let worktree =
+                review::prepare_worktree(&t.repo, &t.repo_name, &t.branch, &t.reference)?;
             if t.mode != Mode::Static {
                 return Ok((worktree, None));
             }
@@ -2278,6 +2370,14 @@ impl App {
         }
     }
 
+    /// Checks the selected project's MCP servers again, now.
+    fn recheck_mcp(&mut self) {
+        if let Some(cwd) = self.project.as_ref().map(|p| p.cwd.clone()) {
+            self.mcp_cache.remove(&cwd);
+        }
+        self.skip_mcp_debounce();
+    }
+
     pub fn mcp_checking(&self, cwd: &Path) -> bool {
         self.mcp_job.as_ref().is_some_and(|(c, _)| c == cwd)
     }
@@ -2525,6 +2625,9 @@ impl App {
             match result.unwrap_or_else(|()| Err("No result".into())) {
                 Ok(_) => self.show_flash(format!("claude {what}: done"), false),
                 Err(e) => self.show_flash(format!("claude {what}: {e}"), true),
+            }
+            if what.starts_with("mcp ") {
+                self.recheck_mcp();
             }
             self.live_job = None;
             self.refreshed_at = Instant::now() - REFRESH_EVERY;
@@ -2943,6 +3046,31 @@ impl App {
         match code {
             KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Sessions,
             KeyCode::Enter | KeyCode::Char('l') => self.open_mcp_log(),
+            KeyCode::Char('a') | KeyCode::Char('L') => {
+                let (Some(project), Some(i)) = (&self.project, self.mcp_state.selected()) else {
+                    return;
+                };
+                let Some(server) = self.project_servers().and_then(|s| s.get(i)) else {
+                    return;
+                };
+                let (name, cwd) = (server.full_name.clone(), project.cwd.clone());
+                if code == KeyCode::Char('a') {
+                    self.pending_command = Some((vec!["mcp".into(), "login".into(), name], cwd));
+                    self.mcp_recheck = true;
+                } else {
+                    self.popup = Some(Popup::Confirm {
+                        title: "Sign out of MCP server".into(),
+                        lines: vec![
+                            format!("Sign out of {name}?"),
+                            String::new(),
+                            "This runs `claude mcp logout`, which clears its stored".into(),
+                            "credentials. Sign in again with a.".into(),
+                        ],
+                        yes: "sign out".into(),
+                        action: Confirm::McpLogout { server: name, cwd },
+                    });
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
                 let next = self
                     .mcp_state
@@ -3696,6 +3824,7 @@ mod tests {
                                         author: "Someone".into(),
                                         when: 0,
                                         ahead: 3,
+                                        local: true,
                                     }],
                                     fetch_error: None,
                                 },

@@ -196,7 +196,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     for text in [
         "Resume and prompt run Claude Code on the session (a prompt adds to its conversation).",
         "Trash moves the session's files out of ~/.claude into claudash's trash; T restores them.",
-        "Plugin toggles run `claude plugin enable/disable`.",
+        "Plugin toggles run `claude plugin enable/disable`; MCP sign-in and sign-out run `claude mcp login/logout`.",
         "Background session actions run `claude attach`, `stop` and `respawn`.",
         "Worktree removal runs `git worktree remove` without --force; prune runs `git worktree prune`.",
         "Branch reviews run `git fetch`, check the branch out in a worktree under claudash's cache \
