@@ -6,7 +6,7 @@
 //! format, so unknown records are skipped.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -69,6 +69,10 @@ pub struct Analysis {
     pub subagents: Vec<Subagent>,
     /// The latest tool calls, oldest first.
     pub recent: Vec<Event>,
+    /// Slash commands run, with their arguments (`opsx:apply add-login`).
+    pub invocations: Vec<String>,
+    /// Files read or written by the session itself.
+    pub touched: BTreeSet<String>,
 }
 
 impl Analysis {
@@ -187,6 +191,12 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                         continue;
                     }
                     out.tools.entry(name.clone()).or_default().calls += 1;
+                    if let Some(file) = input["file_path"]
+                        .as_str()
+                        .or(input["notebook_path"].as_str())
+                    {
+                        out.touched.insert(file.to_string());
+                    }
                     if matches!(
                         name.as_str(),
                         "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
@@ -215,6 +225,17 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                     let command = rest.split("</command-name>").next().unwrap_or_default();
                     if !command.is_empty() {
                         *out.commands.entry(command.to_string()).or_default() += 1;
+                        if main {
+                            let args = text
+                                .split("<command-args>")
+                                .nth(1)
+                                .and_then(|a| a.split("</command-args>").next())
+                                .unwrap_or_default()
+                                .trim();
+                            let name = command.trim_start_matches('/');
+                            out.invocations
+                                .push(format!("{name} {args}").trim_end().to_string());
+                        }
                     }
                 }
                 if !main {

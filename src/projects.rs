@@ -47,6 +47,8 @@ pub struct Model {
     pub repos: Vec<Repo>,
     /// Session folders outside any git repository.
     pub loose: Vec<PathBuf>,
+    /// Spec frameworks and their changes, per checkout or folder that has any.
+    pub specs: HashMap<PathBuf, crate::specs::ProjectSpecs>,
 }
 
 impl Model {
@@ -115,6 +117,20 @@ pub fn build(dirs: &[PathBuf]) -> (Model, Statuses) {
     }
     model.repos.sort_by_key(|r| r.name.to_lowercase());
     model.loose.sort();
+    let folders: Vec<PathBuf> = model
+        .repos
+        .iter()
+        .flat_map(|r| &r.checkouts)
+        .filter(|c| !c.prunable)
+        .map(|c| c.path.clone())
+        .chain(model.loose.iter().cloned())
+        .collect();
+    for dir in folders {
+        let specs = crate::specs::scan(&dir);
+        if !specs.frameworks.is_empty() {
+            model.specs.insert(dir, specs);
+        }
+    }
     (model, statuses)
 }
 

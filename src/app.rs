@@ -32,7 +32,7 @@ use crate::{
     prompts::{self, Prompt},
     review::{self, Branch, DiffStat, Findings, Listing, Mode, Review},
     sessions::{self, Session},
-    statusline,
+    specs, statusline,
     transcript::{self, Entry, Hit},
     ui,
 };
@@ -424,7 +424,24 @@ pub enum Problem {
     },
     /// A worktree whose directory is gone.
     MissingWorktree { path: PathBuf },
+    /// A spec change with tasks left that nobody touched for a while.
+    StaleChange {
+        framework: &'static str,
+        id: String,
+        done: usize,
+        total: usize,
+        days: u64,
+    },
+    /// A spec change whose tasks are all done, with the command to wrap it up.
+    FinishedChange {
+        framework: &'static str,
+        id: String,
+        next: String,
+    },
 }
+
+/// Days without changes before a spec change with tasks left counts as stale.
+const STALE_CHANGE_DAYS: u64 = 14;
 
 /// Uses per skill, subagent type, MCP server and command.
 #[derive(Default)]
@@ -617,6 +634,9 @@ pub struct App {
     git_job: Option<Job<(ProjectsModel, projects::Statuses)>>,
     pub projects: ProjectsModel,
     pub projects_state: ListState,
+    /// In Projects: the spec changes list has the keys instead of the tree.
+    pub specs_focus: bool,
+    pub specs_state: ListState,
     /// Show only sessions of this exact folder (set from the Projects view).
     pub folder_filter: Option<PathBuf>,
     git_at: Option<Instant>,
@@ -709,6 +729,8 @@ impl App {
             git_job: None,
             projects: ProjectsModel::default(),
             projects_state: ListState::default(),
+            specs_focus: false,
+            specs_state: ListState::default(),
             folder_filter: None,
             git_at: None,
             inspect_scroll: 0,
@@ -1325,6 +1347,36 @@ impl App {
             });
         }
 
+        // Spec changes: once per change id, even when worktrees repeat it.
+        let mut seen = HashSet::new();
+        for specs in self.projects.specs.values() {
+            for c in &specs.changes {
+                if !seen.insert((c.framework, c.id.clone())) {
+                    continue;
+                }
+                let days = c.modified.elapsed().map_or(0, |d| d.as_secs() / 86_400);
+                match c.stage {
+                    specs::Stage::Implementing if days >= STALE_CHANGE_DAYS => {
+                        problems.push(Problem::StaleChange {
+                            framework: c.framework.title(),
+                            id: c.id.clone(),
+                            done: c.done,
+                            total: c.total,
+                            days,
+                        })
+                    }
+                    specs::Stage::Complete if c.next.is_some() => {
+                        problems.push(Problem::FinishedChange {
+                            framework: c.framework.title(),
+                            id: c.id.clone(),
+                            next: c.next.clone().unwrap_or_default(),
+                        })
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         for repo in &self.projects.repos {
             for c in repo.checkouts.iter().filter(|c| !c.main) {
                 if c.prunable {
@@ -1344,7 +1396,129 @@ impl App {
         problems
     }
 
+    /// The selected Projects row's folder and its spec changes, if any.
+    pub fn selected_specs(&self) -> Option<(&Path, &specs::ProjectSpecs)> {
+        let rows = self.project_rows();
+        let row = self.projects_state.selected().and_then(|i| rows.get(i))?;
+        let dir = self.row_folder(*row)?;
+        self.projects.specs.get(dir).map(|s| (dir, s))
+    }
+
+    /// Sessions that worked on a change: they ran a command naming it, read or
+    /// wrote its files, or ran on its branch (spec-kit names branches after
+    /// features).
+    pub fn change_sessions(&self, dir: &Path, change: &specs::Change) -> Vec<&Session> {
+        let folder = change.path.to_string_lossy();
+        self.sessions
+            .iter()
+            .filter(|s| {
+                s.cwd
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with(dir) || dir.starts_with(c))
+            })
+            .filter(|s| {
+                s.git_branch.as_deref() == Some(change.id.as_str())
+                    || self.analysis(s).is_some_and(|a| {
+                        a.touched.iter().any(|f| f.starts_with(folder.as_ref()))
+                            || a.invocations
+                                .iter()
+                                .any(|i| i.split_whitespace().skip(1).any(|w| w == change.id))
+                    })
+            })
+            .collect()
+    }
+
+    fn handle_specs_key(&mut self, code: KeyCode) {
+        let Some((dir, specs)) = self.selected_specs() else {
+            self.specs_focus = false;
+            return;
+        };
+        let n = specs.changes.len();
+        let change = self
+            .specs_state
+            .selected()
+            .and_then(|i| specs.changes.get(i))
+            .cloned();
+        let dir = dir.to_path_buf();
+        match code {
+            KeyCode::Tab | KeyCode::Esc => self.specs_focus = false,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                let next = self
+                    .specs_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(n - 1));
+                self.specs_state.select(Some(next));
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.specs_state.select_previous(),
+            KeyCode::Enter => {
+                let Some(change) = change else {
+                    return;
+                };
+                let Some(next) = change.next.clone() else {
+                    return self.show_flash(
+                        format!(
+                            "No next step to run: {} drives it, or this project lacks its command",
+                            change.framework.title()
+                        ),
+                        false,
+                    );
+                };
+                // spec-kit's commands act on the feature of the current branch.
+                if change.framework == specs::Framework::SpecKit {
+                    let branch = git::status(&dir).and_then(|s| s.branch);
+                    if branch.as_deref() != Some(change.id.as_str()) {
+                        return self.show_flash(
+                            format!(
+                                "spec-kit works on the current branch's feature; switch to branch {} first",
+                                change.id
+                            ),
+                            true,
+                        );
+                    }
+                }
+                self.pending_command = Some((vec![next], dir));
+            }
+            KeyCode::Char('v') => {
+                let Some(change) = change else {
+                    return;
+                };
+                let mut lines = Vec::new();
+                for file in specs::files(&change) {
+                    lines.push(format!("── {} ──", paths::display(&file)));
+                    lines.extend(
+                        std::fs::read_to_string(&file)
+                            .unwrap_or_default()
+                            .lines()
+                            .map(str::to_owned),
+                    );
+                    lines.push(String::new());
+                }
+                self.popup = Some(Popup::Text {
+                    title: format!(" {} · {} ", change.framework.title(), change.id),
+                    lines,
+                    scroll: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn handle_projects_key(&mut self, code: KeyCode) {
+        if self.specs_focus {
+            return self.handle_specs_key(code);
+        }
+        if code == KeyCode::Tab {
+            if self
+                .selected_specs()
+                .is_some_and(|(_, s)| !s.changes.is_empty())
+            {
+                self.specs_focus = true;
+                if self.specs_state.selected().is_none() {
+                    self.specs_state.select(Some(0));
+                }
+            }
+            return;
+        }
         let rows = self.project_rows();
         let row = self
             .projects_state
@@ -2191,6 +2365,7 @@ impl App {
                 Context::Background
             }
             View::Activity => Context::Activity,
+            View::Projects if self.specs_focus => Context::Specs,
             View::Projects => Context::Projects,
             View::Logs => Context::Logs,
             View::Usage => Context::Usage,
@@ -2216,6 +2391,13 @@ impl App {
         }
         if !self.background.is_empty() {
             available.push(Context::Background);
+        }
+        if self.view == View::Projects
+            && self
+                .selected_specs()
+                .is_some_and(|(_, s)| !s.changes.is_empty())
+        {
+            available.push(Context::Specs);
         }
         let commands = keys::commands(self.context(), &available);
         let matches = (0..commands.len()).collect();
@@ -2256,7 +2438,17 @@ impl App {
                         self.background_state.select(Some(0));
                     }
                 }
-                Context::Projects => self.switch_view(View::Projects),
+                Context::Projects => {
+                    self.switch_view(View::Projects);
+                    self.specs_focus = false;
+                }
+                Context::Specs => {
+                    self.switch_view(View::Projects);
+                    self.specs_focus = true;
+                    if self.specs_state.selected().is_none() {
+                        self.specs_state.select(Some(0));
+                    }
+                }
                 Context::Logs => self.switch_view(View::Logs),
                 Context::Usage => self.switch_view(View::Usage),
                 Context::Ecosystem => self.switch_view(View::Ecosystem),
@@ -3766,6 +3958,26 @@ mod tests {
             rows: Vec::new(),
             rows_key: None,
         });
+        app.projects.loose = vec![PathBuf::from("/r")];
+        app.projects.specs.insert(
+            PathBuf::from("/r"),
+            specs::ProjectSpecs {
+                frameworks: vec![specs::Framework::OpenSpec],
+                changes: vec![specs::Change {
+                    framework: specs::Framework::OpenSpec,
+                    id: "add-a-very-long-change-name-here".into(),
+                    path: PathBuf::from("/r/openspec/changes/x"),
+                    done: 3,
+                    total: 7,
+                    stage: specs::Stage::Implementing,
+                    modified: std::time::SystemTime::UNIX_EPOCH,
+                    next: Some("/opsx:apply x".into()),
+                    next_label: Some("implement the tasks"),
+                }],
+            },
+        );
+        app.projects_state.select(Some(0));
+        app.specs_focus = true;
         let hit = Hit {
             session_id: "x".into(),
             title: "t".into(),

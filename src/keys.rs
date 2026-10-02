@@ -20,6 +20,8 @@ pub enum Context {
     /// The background session list in Activity.
     Background,
     Projects,
+    /// The spec changes list in Projects.
+    Specs,
     Logs,
     Usage,
     Ecosystem,
@@ -37,6 +39,7 @@ impl Context {
             Context::Activity => "Activity",
             Context::Background => "Background",
             Context::Projects => "Projects",
+            Context::Specs => "Specs",
             Context::Logs => "Logs",
             Context::Usage => "Usage",
             Context::Ecosystem => "Ecosystem",
@@ -293,6 +296,13 @@ pub const BINDINGS: &[Binding] = &[
     key(Projects, "↑/↓", "move", None, None),
     key(
         Projects,
+        "Tab",
+        "move to the project's spec changes (OpenSpec, spec-kit, Kiro, Task Master…)",
+        Some("specs"),
+        TAB,
+    ),
+    key(
+        Projects,
         "Enter",
         "show that folder's sessions (Esc there shows all again)",
         Some("its sessions"),
@@ -318,6 +328,29 @@ pub const BINDINGS: &[Binding] = &[
         "prune records of worktrees whose directory is gone (asks first)",
         Some("prune"),
         ch('P'),
+    ),
+    // Spec changes.
+    key(Specs, "↑/↓", "move between changes", None, None),
+    key(
+        Specs,
+        "Enter",
+        "run the next step with the framework's own command in Claude Code (e.g. /opsx:apply <id>)",
+        Some("next step"),
+        ENTER,
+    ),
+    key(
+        Specs,
+        "v",
+        "read the change: proposal, design, tasks",
+        Some("read"),
+        ch('v'),
+    ),
+    key(
+        Specs,
+        "Tab  Esc",
+        "back to the repositories",
+        Some("repositories"),
+        None,
     ),
     // Logs.
     key(Logs, "↑/↓", "choose a log", Some("log"), None),
@@ -475,6 +508,7 @@ mod tests {
         let globals: Vec<KeyCode> = for_context(Global).filter_map(|b| b.press).collect();
         for context in [
             Sessions,
+            Specs,
             Mcp,
             Activity,
             Background,

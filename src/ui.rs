@@ -1693,6 +1693,35 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
                 Span::styled(format!(": {} and no open session", what.join(", ")), dim()),
             ])
         }
+        Problem::StaleChange {
+            framework,
+            id,
+            done,
+            total,
+            days,
+        } => Line::from(vec![
+            Span::styled("◷ ", Style::new().fg(Color::Yellow)),
+            Span::styled(
+                format!("{framework} change {id}"),
+                Style::new().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!(": {done}/{total} tasks done, untouched for {days} days"),
+                dim(),
+            ),
+        ]),
+        Problem::FinishedChange {
+            framework,
+            id,
+            next,
+        } => Line::from(vec![
+            Span::styled("✓ ", Style::new().fg(Color::Green)),
+            Span::styled(
+                format!("{framework} change {id}"),
+                Style::new().fg(Color::Green),
+            ),
+            Span::styled(format!(": every task done; wrap it up with {next}"), dim()),
+        ]),
         Problem::MissingWorktree { path } => Line::from(vec![
             Span::styled("· ", dim()),
             Span::styled(
@@ -1947,12 +1976,103 @@ fn draw_projects(frame: &mut Frame, app: &mut App, area: Rect) {
         "Enter shows these sessions in the Sessions view",
         dim().italic(),
     )));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        detail_area,
+    let specs_area = match app.projects.specs.get(&dir) {
+        Some(specs) => {
+            let height =
+                (specs.changes.len().max(1) as u16 * 2 + 2).min(detail_area.height / 2 + 2);
+            let [top, bottom] = Layout::vertical([Constraint::Min(4), Constraint::Length(height)])
+                .areas(detail_area);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(block),
+                top,
+            );
+            Some((bottom, specs))
+        }
+        None => {
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(block),
+                detail_area,
+            );
+            None
+        }
+    };
+    let Some((area, specs)) = specs_area else {
+        return;
+    };
+    let names: Vec<&str> = specs.frameworks.iter().map(|f| f.title()).collect();
+    let block = focused(
+        panel("", Color::LightMagenta).title(
+            Line::from(format!(" Specs · {} ", names.join(", ")))
+                .bold()
+                .fg(Color::LightMagenta),
+        ),
+        app.specs_focus,
     );
+    if specs.changes.is_empty() {
+        frame.render_widget(message("No open changes or feature specs.", block), area);
+        return;
+    }
+    let width = area.width.saturating_sub(6) as usize;
+    let items: Vec<ListItem> = specs
+        .changes
+        .clone()
+        .iter()
+        .map(|c| {
+            let color = match c.stage {
+                crate::specs::Stage::Complete => Color::Green,
+                crate::specs::Stage::Implementing => Color::Yellow,
+                crate::specs::Stage::Planning => Color::Cyan,
+            };
+            let bar = match (c.done * 10).checked_div(c.total) {
+                Some(filled) => {
+                    let filled = filled.min(10);
+                    format!(
+                        "{}{} {}/{}",
+                        "█".repeat(filled),
+                        "░".repeat(10 - filled),
+                        c.done,
+                        c.total
+                    )
+                }
+                None => "no tasks yet".into(),
+            };
+            let sessions = app.change_sessions(&dir, c);
+            let tokens: u64 = sessions.iter().map(|s| s.tokens.total.processed()).sum();
+            let mut second = format!("  {} · {}", c.framework.title(), c.stage.label());
+            if !sessions.is_empty() {
+                second.push_str(&format!(
+                    " · {} · {} tokens",
+                    plural(sessions.len() as u64, "session"),
+                    sessions::human_tokens(tokens)
+                ));
+            }
+            if let (Some(next), Some(label)) = (&c.next, c.next_label) {
+                second.push_str(&format!(" · next: {label} ({next})"));
+            }
+            let second: String = second.chars().take(width).collect();
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("{:<24}", c.id), Style::new().bold()),
+                    Span::styled(bar, Style::new().fg(color)),
+                ]),
+                Line::from(Span::styled(second, dim())),
+            ])
+        })
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(if app.specs_focus {
+            Style::new().bg(HIGHLIGHT)
+        } else {
+            Style::new()
+        })
+        .highlight_symbol(if app.specs_focus { "▶ " } else { "  " })
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(list, area, &mut app.specs_state);
 }
 
 // ---- Inspector ---------------------------------------------------------------

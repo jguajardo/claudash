@@ -20,6 +20,7 @@ mod report;
 mod review;
 mod sessions;
 mod setup;
+mod specs;
 mod statusline;
 mod summary;
 mod transcript;

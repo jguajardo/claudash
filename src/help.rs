@@ -78,7 +78,9 @@ const VIEWS: &[ViewHelp] = &[
                 worktrees) and their git state, how many sessions each has and which are open. On \
                 top, problems: open sessions sharing a folder, the same file edited by two open \
                 sessions, worktrees with work but no session, and worktrees that no longer exist. \
-                From here, b reviews a branch: claudash fetches, checks it out in a worktree of its \
+                Projects that use OpenSpec, spec-kit, Kiro, Task Master or GSD show their changes \
+                with task progress; Tab moves there and Enter runs the next step with the \
+                framework's own command. From here, b reviews a branch: claudash fetches, checks it out in a worktree of its \
                 own and hands the review to Claude Code, then lists the findings by file and line.",
         contexts: &[Context::Projects],
     },

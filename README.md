@@ -54,6 +54,25 @@ On top, a **Problems** panel collects what can go wrong with several sessions at
 
 `D` removes the selected worktree with `git worktree remove` (never `--force`, so git refuses when it holds uncommitted changes), and `P` prunes the records of worktrees whose directory is gone. Both ask first.
 
+#### Specs
+
+If a project uses a spec-driven development framework, its changes show under the selected folder, with a progress bar of their tasks, their stage (planning, implementing, complete), the sessions that worked on them and what those cost in tokens. `Tab` moves into the list:
+
+- `Enter` runs the next step in Claude Code with the framework's own command, such as `/opsx:apply add-login` for OpenSpec or `/speckit-plan` for spec-kit. claudash only offers a command your project actually has, so it never invents one.
+- `v` shows the change's files: proposal, requirements, design, plan, tasks.
+
+| Framework | What claudash reads | Next step |
+| --- | --- | --- |
+| [OpenSpec](https://github.com/Fission-AI/OpenSpec) | `openspec/changes/<id>/` (archived ones left out) | `/opsx:apply`, `/opsx:archive`, `/opsx:update` |
+| [spec-kit](https://github.com/github/spec-kit) | `specs/NNN-name/` | `/speckit-plan`, `/speckit-tasks`, `/speckit-implement` (on the feature's own branch) |
+| Kiro and [cc-sdd](https://github.com/gotalab/cc-sdd) | `.kiro/specs/<feature>/` | `/kiro-spec-requirements`, `-design`, `-tasks`, `/kiro-impl` |
+| [spec-workflow-mcp](https://github.com/Pimzino/spec-workflow-mcp) | `.spec-workflow/specs/<feature>/tasks.md` | driven over MCP |
+| [Task Master](https://github.com/eyaltoledano/claude-task-master) | `.taskmaster/tasks/tasks.json`, per tag | driven over MCP |
+| [GSD](https://github.com/open-gsd/gsd-core) | `.planning/ROADMAP.md` | `/gsd-progress` |
+| BMAD, Agent OS | detected only | |
+
+The Problems panel also flags changes with tasks left that nobody touched for 14 days, and changes whose tasks are all done, with the command to wrap them up.
+
 #### Review a branch
 
 `b` on a repository reviews one of its branches the way you'd review a pull request, with Claude Code doing the reviewing:
