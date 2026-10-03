@@ -437,6 +437,37 @@ pub enum ActivityFocus {
     #[default]
     Open,
     Background,
+    /// The alerts in Now.
+    Alerts,
+}
+
+/// Where an alert takes you.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    /// A session's inspector, where its audit and secrets are.
+    Session(String),
+    /// Insights › Security (credentials in the prompt history).
+    InsightsSecurity,
+    /// A section of a project's page, with something in it selected: a
+    /// checkout path, a spec change ID or an MCP server's full name.
+    Project {
+        dir: PathBuf,
+        section: Section,
+        select: Option<String>,
+    },
+}
+
+/// Something in Now that needs a look, and where Enter takes you.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Alert {
+    Problem(Problem),
+    /// An MCP server checked in `dir` that failed or needs you to sign in.
+    Mcp {
+        dir: PathBuf,
+        name: String,
+        full_name: String,
+        failed: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -519,16 +550,24 @@ pub enum Problem {
     MissingWorktree { path: PathBuf },
     /// API keys or tokens in a session's transcript (or in your prompt history
     /// when `session` is empty).
-    Secrets { session: String, found: Vec<String> },
+    Secrets {
+        session: String,
+        /// Empty for the prompt history.
+        session_id: String,
+        found: Vec<String>,
+    },
     /// Something risky a session did lately.
     Risky {
         session: String,
+        session_id: String,
         what: &'static str,
         detail: String,
     },
     /// A spec change with tasks left that nobody touched for a while.
     StaleChange {
         framework: &'static str,
+        /// The folder whose specs have it.
+        dir: PathBuf,
         id: String,
         done: usize,
         total: usize,
@@ -537,6 +576,7 @@ pub enum Problem {
     /// A spec change whose tasks are all done, with the command to wrap it up.
     FinishedChange {
         framework: &'static str,
+        dir: PathBuf,
         id: String,
         next: String,
     },
@@ -746,6 +786,10 @@ pub struct App {
     pub specs_state: ListState,
     pub insights: InsightsSection,
     pub insights_scroll: u16,
+    /// Selected alert in Now.
+    pub alert_cursor: usize,
+    /// No colors (`NO_COLOR` or `colors = false` in the settings file).
+    pub no_color: bool,
     /// Where Esc goes from a conversation, the inspector or the logs.
     pub return_view: View,
     /// Show only sessions of this exact folder (set from the Projects view).
@@ -850,6 +894,8 @@ impl App {
             insights: InsightsSection::Usage,
             insights_scroll: 0,
             return_view: View::Sessions,
+            alert_cursor: 0,
+            no_color: false,
             folder_filter: None,
             git_at: None,
             inspect_scroll: 0,
@@ -1085,6 +1131,9 @@ impl App {
 
     fn handle_activity_key(&mut self, code: KeyCode) {
         if code == KeyCode::Tab {
+            // Open sessions → background sessions → alerts → open sessions,
+            // skipping what's empty.
+            let has_alerts = !self.alerts().is_empty();
             self.activity_focus = match self.activity_focus {
                 ActivityFocus::Open if !self.background.is_empty() => {
                     if self.background_state.selected().is_none() {
@@ -1092,9 +1141,15 @@ impl App {
                     }
                     ActivityFocus::Background
                 }
+                ActivityFocus::Open | ActivityFocus::Background if has_alerts => {
+                    ActivityFocus::Alerts
+                }
                 _ => ActivityFocus::Open,
             };
             return;
+        }
+        if self.activity_focus == ActivityFocus::Alerts {
+            return self.handle_alerts_key(code);
         }
         if self.activity_focus == ActivityFocus::Background {
             match code {
@@ -1467,6 +1522,7 @@ impl App {
                     a.secrets.iter().map(|x| x.kind).collect();
                 problems.push(Problem::Secrets {
                     session: s.title.clone(),
+                    session_id: s.id.clone(),
                     found: kinds.into_iter().map(str::to_owned).collect(),
                 });
             }
@@ -1474,6 +1530,7 @@ impl App {
         if !self.history_secrets.is_empty() {
             problems.push(Problem::Secrets {
                 session: String::new(),
+                session_id: String::new(),
                 found: self
                     .history_secrets
                     .iter()
@@ -1497,6 +1554,7 @@ impl App {
                 if risky < MAX_RISKY_PROBLEMS {
                     problems.push(Problem::Risky {
                         session: s.title.clone(),
+                        session_id: s.id.clone(),
                         what: e.what,
                         detail: e.detail.clone(),
                     });
@@ -1507,7 +1565,7 @@ impl App {
 
         // Spec changes: once per change id, even when worktrees repeat it.
         let mut seen = HashSet::new();
-        for specs in self.projects.specs.values() {
+        for (dir, specs) in &self.projects.specs {
             for c in &specs.changes {
                 if !seen.insert((c.framework, c.id.clone())) {
                     continue;
@@ -1517,6 +1575,7 @@ impl App {
                     specs::Stage::Implementing if days >= STALE_CHANGE_DAYS => {
                         problems.push(Problem::StaleChange {
                             framework: c.framework.title(),
+                            dir: dir.clone(),
                             id: c.id.clone(),
                             done: c.done,
                             total: c.total,
@@ -1526,6 +1585,7 @@ impl App {
                     specs::Stage::Complete if c.next.is_some() => {
                         problems.push(Problem::FinishedChange {
                             framework: c.framework.title(),
+                            dir: dir.clone(),
                             id: c.id.clone(),
                             next: c.next.clone().unwrap_or_default(),
                         })
@@ -2343,6 +2403,7 @@ impl App {
         match self.view {
             View::Sessions => Context::Sessions,
             View::Now if self.activity_focus == ActivityFocus::Background => Context::Background,
+            View::Now if self.activity_focus == ActivityFocus::Alerts => Context::Alerts,
             View::Now => Context::Now,
             View::Projects => match &self.project_page {
                 None => Context::Projects,
@@ -4280,6 +4341,12 @@ mod tests {
                                 action: Confirm::Trash("x".into()),
                             }),
                         };
+                        app.no_color = k % 2 == 0;
+                        app.activity_focus = if popup == 3 {
+                            ActivityFocus::Alerts
+                        } else {
+                            ActivityFocus::Open
+                        };
                         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
                         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                     }
@@ -4365,6 +4432,56 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.view == View::Sessions && !app.should_quit);
+    }
+
+    #[test]
+    fn alerts_take_you_where_they_point() {
+        let mut app = App::new(1_000_000, false);
+        app.projects.loose = vec![PathBuf::from("/r")];
+        let change = |id: &str| specs::Change {
+            framework: specs::Framework::OpenSpec,
+            id: id.into(),
+            path: PathBuf::from("/r/openspec/changes").join(id),
+            done: 1,
+            total: 2,
+            stage: specs::Stage::Implementing,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            next: None,
+            next_label: None,
+        };
+        app.projects.specs.insert(
+            PathBuf::from("/r"),
+            specs::ProjectSpecs {
+                frameworks: vec![specs::Framework::OpenSpec],
+                changes: vec![change("a"), change("b")],
+            },
+        );
+
+        // A stale change is among the alerts and goes to its Specs, selected.
+        let alerts = app.alerts();
+        let stale = alerts
+            .iter()
+            .position(|a| matches!(a, Alert::Problem(Problem::StaleChange { id, .. }) if id == "b"))
+            .expect("stale change alert");
+        app.view = View::Now;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.activity_focus == ActivityFocus::Alerts);
+        app.alert_cursor = stale;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.view == View::Projects);
+        let page = app.project_page.as_ref().unwrap();
+        assert_eq!((page.section, page.in_content), (Section::Specs, true));
+        assert_eq!(app.specs_state.selected(), Some(1));
+
+        // Credentials in the prompt history go to Insights › Security.
+        let history = Alert::Problem(Problem::Secrets {
+            session: String::new(),
+            session_id: String::new(),
+            found: vec![],
+        });
+        assert_eq!(app.alert_target(&history), Some(Target::InsightsSecurity));
+        app.go_to(Target::InsightsSecurity);
+        assert!(app.view == View::Insights && app.insights == InsightsSection::Security);
     }
 
     #[test]

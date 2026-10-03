@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use ratatui::{crossterm::event::KeyCode, widgets::TableState};
 
 use super::{
-    App, Confirm, InsightsSection, Popup, ProjectPage, Section, View, paths, specs, token_savers,
+    ActivityFocus, Alert, App, Confirm, InsightsSection, Popup, Problem, ProjectPage, Section,
+    Target, View, paths, specs, token_savers,
 };
+use crate::mcp::McpStatus;
 use crate::{projects::Repo, sessions::Session};
 
 /// A project in the Projects grid: a repository or a folder outside git.
@@ -20,6 +22,151 @@ pub struct Card {
 }
 
 impl App {
+    /// Everything Now flags, in order: problems across projects, then MCP
+    /// servers checked so far that failed or need you to sign in.
+    pub fn alerts(&self) -> Vec<Alert> {
+        let mut alerts: Vec<Alert> = self.problems().into_iter().map(Alert::Problem).collect();
+        let mut checked: Vec<(&PathBuf, &super::McpSnapshot)> = self.mcp_cache.iter().collect();
+        checked.sort_by_key(|(dir, _)| dir.as_path());
+        for (dir, snapshot) in checked {
+            let Ok(servers) = &snapshot.result else {
+                continue;
+            };
+            for s in servers {
+                let failed = match s.status {
+                    McpStatus::Failed(_) => true,
+                    McpStatus::NeedsAuth => false,
+                    _ => continue,
+                };
+                alerts.push(Alert::Mcp {
+                    dir: dir.clone(),
+                    name: s.name.clone(),
+                    full_name: s.full_name.clone(),
+                    failed,
+                });
+            }
+        }
+        alerts
+    }
+
+    /// Where Enter on an alert goes.
+    pub fn alert_target(&self, alert: &Alert) -> Option<Target> {
+        let project = |dir: &Path, section, select: Option<String>| {
+            Some(Target::Project {
+                dir: dir.to_path_buf(),
+                section,
+                select,
+            })
+        };
+        match alert {
+            Alert::Mcp { dir, full_name, .. } => {
+                project(dir, Section::Mcp, Some(full_name.clone()))
+            }
+            Alert::Problem(p) => match p {
+                Problem::SharedFolder { dir, .. } => project(dir, Section::Sessions, None),
+                Problem::SameFile { .. } => None,
+                Problem::IdleWorktree { path, .. } | Problem::MissingWorktree { path } => project(
+                    path,
+                    Section::Worktrees,
+                    Some(path.to_string_lossy().into_owned()),
+                ),
+                Problem::Secrets { session_id, .. } if session_id.is_empty() => {
+                    Some(Target::InsightsSecurity)
+                }
+                Problem::Secrets { session_id, .. } | Problem::Risky { session_id, .. } => {
+                    Some(Target::Session(session_id.clone()))
+                }
+                Problem::StaleChange { dir, id, .. } | Problem::FinishedChange { dir, id, .. } => {
+                    project(dir, Section::Specs, Some(id.clone()))
+                }
+            },
+        }
+    }
+
+    /// Takes you where an alert points.
+    pub fn go_to(&mut self, target: Target) {
+        match target {
+            Target::Session(id) => {
+                self.select_session(&id);
+                if self.selected_session().is_some_and(|s| s.id == id) {
+                    self.inspect_scroll = 0;
+                    self.inspect_sub = None;
+                    self.enter_subview(View::Inspect);
+                }
+            }
+            Target::InsightsSecurity => {
+                self.view = View::Insights;
+                self.insights = InsightsSection::Security;
+                self.insights_scroll = 0;
+            }
+            Target::Project {
+                dir,
+                section,
+                select,
+            } => {
+                self.open_project_of(&dir);
+                let Some(page) = &mut self.project_page else {
+                    return;
+                };
+                page.section = section;
+                let page_dir = page.dir.clone();
+                self.enter_section();
+                let Some(select) = select else {
+                    return;
+                };
+                match section {
+                    Section::Worktrees => {
+                        let index = self.repo_at(&page_dir).and_then(|r| {
+                            r.checkouts
+                                .iter()
+                                .position(|c| c.path.to_string_lossy() == select)
+                        });
+                        if let Some(page) = &mut self.project_page {
+                            page.worktrees_state.select(Some(index.unwrap_or(0)));
+                        }
+                    }
+                    Section::Specs => {
+                        let index = self
+                            .project_specs(&page_dir)
+                            .and_then(|s| s.changes.iter().position(|c| c.id == select));
+                        self.specs_state.select(Some(index.unwrap_or(0)));
+                    }
+                    Section::Mcp => {
+                        let index = self
+                            .project_servers()
+                            .and_then(|s| s.iter().position(|m| m.full_name == select));
+                        self.mcp_state.select(Some(index.unwrap_or(0)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub(super) fn handle_alerts_key(&mut self, code: KeyCode) {
+        let alerts = self.alerts();
+        let n = alerts.len();
+        match code {
+            KeyCode::Esc => self.activity_focus = ActivityFocus::Open,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                self.alert_cursor = (self.alert_cursor + 1).min(n - 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.alert_cursor = self.alert_cursor.saturating_sub(1)
+            }
+            KeyCode::Enter => {
+                let Some(alert) = alerts.get(self.alert_cursor.min(n.saturating_sub(1))) else {
+                    return;
+                };
+                match self.alert_target(alert) {
+                    Some(target) => self.go_to(target),
+                    None => self.show_flash("Look at the open sessions for this one", false),
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Every project, repositories first, then folders outside git.
     pub fn cards(&self) -> Vec<Card> {
         let mut cards: Vec<Card> = self

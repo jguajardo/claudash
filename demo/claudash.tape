@@ -24,7 +24,23 @@ Sleep 4s
 Enter
 Sleep 2.5s
 Escape
-Sleep 1s
+Sleep 800ms
+
+# Alerts take you where to act: here, a failing MCP server's section.
+Tab
+Tab
+Sleep 600ms
+Down
+Down
+Down
+Down
+Sleep 1.2s
+Enter
+Sleep 2.5s
+Escape
+Sleep 300ms
+Escape
+Sleep 300ms
 
 # Sessions: every session, its project and token usage.
 Type "2"

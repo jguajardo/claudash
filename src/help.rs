@@ -60,8 +60,9 @@ const VIEWS: &[ViewHelp] = &[
                 subagents are running; background sessions (claude --bg); alerts across projects \
                 (credentials in transcripts, risky commands, MCP servers that failed or need you to \
                 sign in, stale specs, forgotten worktrees); plan usage with a forecast; and a live \
-                feed of every tool call from the last hour.",
-        contexts: &[Context::Now, Context::Background],
+                feed of every tool call from the last hour. Tab moves into the alerts; Enter \
+                takes you where to act on one.",
+        contexts: &[Context::Now, Context::Background, Context::Alerts],
     },
     ViewHelp {
         name: "2 · Sessions",

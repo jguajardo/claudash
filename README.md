@@ -18,7 +18,7 @@ The screen claudash opens on: what needs a decision from you.
 
 - **Open sessions**, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes.
 - **Background sessions** (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)), finished ones included. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking.
-- **Needs a look**: alerts across projects. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so.
+- **Needs a look**: alerts across projects. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so. `Tab` moves into the alerts and `Enter` takes you to the place to act on one: the session's audit in the inspector, or the project's MCP servers, worktrees, specs or sessions, with that item selected.
 - **Plan**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
 - **Live feed** of every tool call from sessions active in the last hour, failures in red, refreshed every 2 seconds.
 
@@ -198,7 +198,7 @@ A letter means the same thing in every view where it works, `Enter` opens or run
 | `←` `→` | project cards, menus | Move between cards · into a section and back |
 | `Enter` | | Open or run the selected thing: what a session asks, resume, a project, a section, a log, the next spec step |
 | `Esc` | | Back · clear the filter |
-| `Tab` | | Next pane: background sessions, the session's project, subagents in the inspector, setup tabs |
+| `Tab` | | Next pane: background sessions and alerts in Now, the session's project, subagents in the inspector, setup tabs |
 | `/` | | Filter sessions · search the conversation · filter log lines |
 | `v` · `i` | sessions | Read the conversation · inspect it |
 | `p` | sessions | Send a one-off prompt |
@@ -224,6 +224,7 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 | View to open on | `view = "projects"` | `--view <NAME>` | | `now` |
 | Context window when the status line hasn't reported one | `context_limit = "200k"` | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Desktop notifications and bell | `notify = false` | `--no-notify` | | on |
+| Colors | `colors = false` | | [`NO_COLOR`](https://no-color.org) | on |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 
 Token values accept suffixes: `1M`, `200k`, `1.5m`, `500000`.

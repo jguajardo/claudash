@@ -543,7 +543,7 @@ fn draw_sessions_table(
     )
     .column_spacing(2)
     .row_highlight_style(if focused {
-        Style::new().bg(HIGHLIGHT)
+        Style::new().fg(Color::White).bg(HIGHLIGHT)
     } else {
         Style::new()
     })
@@ -635,7 +635,7 @@ fn draw_specs(frame: &mut Frame, app: &mut App, area: Rect, dir: &std::path::Pat
     let list = List::new(items)
         .block(block)
         .highlight_style(if focused {
-            Style::new().bg(HIGHLIGHT)
+            Style::new().fg(Color::White).bg(HIGHLIGHT)
         } else {
             Style::new()
         })
@@ -723,7 +723,7 @@ fn draw_worktrees(
     )
     .column_spacing(2)
     .row_highlight_style(if focused {
-        Style::new().bg(HIGHLIGHT)
+        Style::new().fg(Color::White).bg(HIGHLIGHT)
     } else {
         Style::new()
     })

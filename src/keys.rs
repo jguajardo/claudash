@@ -17,6 +17,8 @@ pub enum Context {
     Now,
     /// Background sessions in Now.
     Background,
+    /// Alerts in Now.
+    Alerts,
     Sessions,
     /// The project cards.
     Projects,
@@ -41,6 +43,7 @@ impl Context {
             Context::Global => "Everywhere",
             Context::Now => "Now",
             Context::Background => "Background",
+            Context::Alerts => "Alerts",
             Context::Sessions => "Sessions",
             Context::Projects => "Projects",
             Context::ProjectMenu => "Project",
@@ -182,8 +185,8 @@ pub const BINDINGS: &[Binding] = &[
     key(
         Now,
         "Tab",
-        "move to the background sessions",
-        Some("background"),
+        "move to the background sessions, then the alerts",
+        Some("next pane"),
         TAB,
     ),
     // Background sessions.
@@ -212,6 +215,22 @@ pub const BINDINGS: &[Binding] = &[
     ),
     key(
         Background,
+        "Tab  Esc",
+        "back to the open sessions",
+        Some("open sessions"),
+        None,
+    ),
+    // Alerts.
+    key(Alerts, "↑/↓", "move between alerts", None, None),
+    key(
+        Alerts,
+        "Enter",
+        "go to it: the session's audit, the project's MCP servers, worktrees or specs",
+        Some("go to it"),
+        ENTER,
+    ),
+    key(
+        Alerts,
         "Tab  Esc",
         "back to the open sessions",
         Some("open sessions"),
@@ -608,6 +627,7 @@ mod tests {
         for context in [
             Now,
             Background,
+            Alerts,
             Sessions,
             Projects,
             ProjectMenu,

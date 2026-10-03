@@ -33,6 +33,8 @@ mod now;
 mod projects;
 
 const HIGHLIGHT: Color = Color::Rgb(60, 40, 70);
+/// The empty part of a gauge.
+const GAUGE_TRACK: Color = Color::Rgb(40, 40, 40);
 /// Accent of claudash's own chrome: tabs, menus, selected cards.
 const ACCENT: Color = Color::LightMagenta;
 
@@ -125,6 +127,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_footer(frame, app, footer);
     draw_popup(frame, app);
+    if app.no_color {
+        strip_colors(frame.buffer_mut());
+    }
+}
+
+/// NO_COLOR: drops every color but keeps what color meant where it matters.
+/// Anything drawn on a background (selections, key labels, gauges) is shown
+/// reversed instead; bold, dim and the rest stay.
+fn strip_colors(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in buffer.content.iter_mut() {
+        // A gauge's track stays blank; its filled part is drawn with blocks.
+        if cell.bg != Color::Reset && cell.bg != GAUGE_TRACK {
+            cell.modifier.insert(Modifier::REVERSED);
+        }
+        cell.fg = Color::Reset;
+        cell.bg = Color::Reset;
+    }
 }
 
 /// A bordered panel; an empty `title` leaves room for a custom `.title(...)`.
@@ -375,7 +394,12 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::new()
+                .fg(Color::White)
+                .bg(HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("▶ ")
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(list, area, &mut app.session_state);
@@ -618,7 +642,7 @@ fn draw_mcp(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut list = List::new(items).block(block);
     if mcp_focus {
         list = list
-            .highlight_style(Style::new().bg(HIGHLIGHT))
+            .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
             .highlight_symbol("▶ ")
             .highlight_spacing(HighlightSpacing::Always);
     }
@@ -669,11 +693,7 @@ fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
         },
     );
     let gauge = Gauge::default()
-        .gauge_style(
-            Style::new()
-                .fg(level_color(ratio))
-                .bg(Color::Rgb(40, 40, 40)),
-        )
+        .gauge_style(Style::new().fg(level_color(ratio)).bg(GAUGE_TRACK))
         .ratio(ratio.clamp(0.0, 1.0))
         .label(Span::styled(label, Style::new().fg(Color::White).bold()))
         .use_unicode(true);
@@ -1162,7 +1182,7 @@ fn render_list(
 ) {
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().bg(HIGHLIGHT))
+        .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
         .highlight_symbol("▶ ")
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(list, area, state);
@@ -1653,11 +1673,7 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
         let ratio = w.used_percentage / 100.0;
         let name = if *label == "5h" { "5-hour " } else { "7-day  " };
         let gauge = Gauge::default()
-            .gauge_style(
-                Style::new()
-                    .fg(level_color(ratio))
-                    .bg(Color::Rgb(40, 40, 40)),
-            )
+            .gauge_style(Style::new().fg(level_color(ratio)).bg(GAUGE_TRACK))
             .ratio(ratio.clamp(0.0, 1.0))
             .label(format!(
                 "{name} {:.0}%  · resets {}",
@@ -1934,7 +1950,7 @@ fn draw_background(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut list = List::new(items).block(block);
     if app.activity_focus == crate::app::ActivityFocus::Background {
         list = list
-            .highlight_style(Style::new().bg(HIGHLIGHT))
+            .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
             .highlight_symbol("▶ ")
             .highlight_spacing(HighlightSpacing::Always);
     }
@@ -2098,7 +2114,7 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
                 Span::styled(format!(": {} and no open session", what.join(", ")), dim()),
             ])
         }
-        Problem::Secrets { session, found } => {
+        Problem::Secrets { session, found, .. } => {
             let place = if session.is_empty() {
                 "your prompt history".to_string()
             } else {
@@ -2117,6 +2133,7 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
             session,
             what,
             detail,
+            ..
         } => Line::from(vec![
             Span::styled("⚠ ", Style::new().fg(Color::Red)),
             Span::styled(what.to_string(), Style::new().fg(Color::Red)),
@@ -2134,6 +2151,7 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
             done,
             total,
             days,
+            ..
         } => Line::from(vec![
             Span::styled("◷ ", Style::new().fg(Color::Yellow)),
             Span::styled(
@@ -2149,6 +2167,7 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
             framework,
             id,
             next,
+            ..
         } => Line::from(vec![
             Span::styled("✓ ", Style::new().fg(Color::Green)),
             Span::styled(
@@ -2926,7 +2945,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             } else {
                 let list = List::new(items_view)
                     .block(block)
-                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                     .highlight_symbol("▶ ")
                     .highlight_spacing(HighlightSpacing::Always);
                 frame.render_stateful_widget(list, area, state);
@@ -3040,7 +3059,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             } else {
                 let list = List::new(items)
                     .block(block)
-                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                     .highlight_symbol("▶ ")
                     .highlight_spacing(HighlightSpacing::Always);
                 frame.render_stateful_widget(list, area, state);
@@ -3172,7 +3191,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             } else {
                 let list = List::new(items)
                     .block(block)
-                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                     .highlight_symbol("▶ ")
                     .highlight_spacing(HighlightSpacing::Always);
                 frame.render_stateful_widget(list, area, state);
@@ -3400,7 +3419,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                             })
                             .collect();
                         let list = List::new(items)
-                            .highlight_style(Style::new().bg(HIGHLIGHT))
+                            .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                             .highlight_symbol("▶ ")
                             .highlight_spacing(HighlightSpacing::Always);
                         frame.render_stateful_widget(list, list_area, state);
@@ -3460,7 +3479,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             } else {
                 let list = List::new(items)
                     .block(block)
-                    .highlight_style(Style::new().bg(HIGHLIGHT))
+                    .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                     .highlight_symbol("▶ ")
                     .highlight_spacing(HighlightSpacing::Always);
                 frame.render_stateful_widget(list, area, state);
@@ -3509,7 +3528,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 .title_bottom(Line::from(" Enter open at the match · Esc close ").right_aligned());
             let list = List::new(items)
                 .block(block)
-                .highlight_style(Style::new().bg(HIGHLIGHT))
+                .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
                 .highlight_symbol("▶ ")
                 .highlight_spacing(HighlightSpacing::Always);
             frame.render_stateful_widget(list, area, state);

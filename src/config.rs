@@ -15,6 +15,8 @@ pub struct Config {
     pub context_limit: Option<Limit>,
     /// Desktop notifications and bell.
     pub notify: Option<bool>,
+    /// `false` draws without colors, like the `NO_COLOR` environment variable.
+    pub colors: Option<bool>,
 }
 
 /// `context_limit = 1000000` or `context_limit = "1M"`.
@@ -71,6 +73,9 @@ pub const TEMPLATE: &str = "\
 # Desktop notifications and bell when a session needs you, finishes a reply or
 # your plan usage crosses 80% and 95%. --no-notify wins.
 # notify = true
+
+# Colors. false draws without them, like setting NO_COLOR.
+# colors = true
 ";
 
 pub fn path() -> Option<PathBuf> {
@@ -129,6 +134,7 @@ mod tests {
         assert_eq!(view_index(config.view.as_deref().unwrap()), Ok(3));
         assert_eq!(config.context_limit.unwrap().as_text(), "200k");
         assert_eq!(config.notify, Some(false));
+        assert_eq!(parse("colors = false").unwrap().colors, Some(false));
         assert_eq!(
             parse("context_limit = 500000").unwrap().context_limit,
             Some(Limit::Tokens(500_000))

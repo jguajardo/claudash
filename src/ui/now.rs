@@ -10,9 +10,13 @@ use ratatui::{
 };
 
 use super::{
-    card, dim, draw_activity, forecast_span, level_color, plan_windows, problem_line, reset_time,
+    ACCENT, GAUGE_TRACK, HIGHLIGHT, card, dim, draw_activity, forecast_span, level_color,
+    plan_windows, problem_line, reset_time,
 };
-use crate::{app::App, mcp::McpStatus, paths};
+use crate::{
+    app::{ActivityFocus, Alert, App},
+    paths,
+};
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
@@ -21,19 +25,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             .areas(area);
     draw_activity(frame, app, left);
 
-    let alerts = alert_lines(app);
+    let alerts = app.alerts();
     let plan_height = if plan_windows(app).is_empty() { 5 } else { 8 };
     let [alerts_area, plan_area] =
         Layout::vertical([Constraint::Min(6), Constraint::Length(plan_height)])
             .spacing(1)
             .areas(right);
-    let (title, color) = if alerts.is_empty() {
-        ("All clear", Color::Green)
-    } else {
-        ("Needs a look", Color::Red)
-    };
-    let lines = if alerts.is_empty() {
-        vec![
+    let focused = app.activity_focus == ActivityFocus::Alerts;
+    if alerts.is_empty() {
+        let lines = vec![
             Line::default(),
             Line::from(Span::styled(
                 "✓ Nothing needs you.",
@@ -45,49 +45,78 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                  no forgotten worktrees or stale specs.",
                 dim(),
             )),
-        ]
+        ];
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(card(
+                "All clear",
+                Color::Green,
+                false,
+            )),
+            alerts_area,
+        );
     } else {
-        alerts
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(card(title, color, false))
-            .scroll((0, 0)),
-        alerts_area,
-    );
+        let cursor = app.alert_cursor.min(alerts.len() - 1);
+        let width = alerts_area.width.saturating_sub(4).max(10) as usize;
+        let mut lines = Vec::new();
+        let mut selected_row = 0;
+        let mut rows = 0;
+        for (i, alert) in alerts.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::default());
+                rows += 1;
+            }
+            let mut line = alert_line(alert);
+            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            if focused && i == cursor {
+                selected_row = rows;
+                line.spans
+                    .insert(0, Span::styled("▶ ", Style::new().fg(ACCENT).bold()));
+                if app.alert_target(alert).is_some() {
+                    line.spans
+                        .push(Span::styled("  → Enter", Style::new().fg(ACCENT)));
+                }
+                line = line.style(Style::new().fg(Color::White).bg(HIGHLIGHT));
+            }
+            rows += chars.div_ceil(width).max(1);
+            lines.push(line);
+        }
+        // Keep the selected alert in view.
+        let height = alerts_area.height.saturating_sub(2) as usize;
+        let scroll = selected_row.saturating_sub(height.saturating_sub(4)) as u16;
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0))
+                .block(card(
+                    &format!("Needs a look · {}", alerts.len()),
+                    Color::Red,
+                    focused,
+                )),
+            alerts_area,
+        );
+    }
     draw_plan_card(frame, app, plan_area);
 }
 
-/// Alerts across projects, one blank line between them.
-fn alert_lines(app: &App) -> Vec<Line<'static>> {
-    let mut items: Vec<Line<'static>> = app.problems().iter().map(problem_line).collect();
-    // MCP servers checked so far that failed or need you to sign in.
-    for (dir, snapshot) in &app.mcp_cache {
-        let Ok(servers) = &snapshot.result else {
-            continue;
-        };
-        for s in servers {
-            let (mark, color, what) = match &s.status {
-                McpStatus::Failed(_) => ("✗ ", Color::Red, "failed to connect"),
-                McpStatus::NeedsAuth => ("◐ ", Color::Yellow, "needs you to sign in"),
-                _ => continue,
+/// One alert as a line.
+fn alert_line(alert: &Alert) -> Line<'static> {
+    match alert {
+        Alert::Problem(p) => problem_line(p),
+        Alert::Mcp {
+            dir, name, failed, ..
+        } => {
+            let (mark, color, what) = if *failed {
+                ("✗ ", Color::Red, "failed to connect")
+            } else {
+                ("◐ ", Color::Yellow, "needs you to sign in")
             };
-            items.push(Line::from(vec![
+            Line::from(vec![
                 Span::styled(mark, Style::new().fg(color)),
-                Span::styled(format!("MCP {}", s.name), Style::new().fg(color)),
+                Span::styled(format!("MCP {name}"), Style::new().fg(color)),
                 Span::styled(format!(" {what} · {}", paths::display(dir)), dim()),
-            ]));
+            ])
         }
     }
-    let mut out = Vec::new();
-    for (i, line) in items.into_iter().enumerate() {
-        if i > 0 {
-            out.push(Line::default());
-        }
-        out.push(line);
-    }
-    out
 }
 
 fn draw_plan_card(frame: &mut Frame, app: &App, area: Rect) {
@@ -130,11 +159,7 @@ fn draw_plan_card(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(spans)), head);
         frame.render_widget(
             Gauge::default()
-                .gauge_style(
-                    Style::new()
-                        .fg(level_color(ratio))
-                        .bg(Color::Rgb(40, 40, 40)),
-                )
+                .gauge_style(Style::new().fg(level_color(ratio)).bg(GAUGE_TRACK))
                 .ratio(ratio.clamp(0.0, 1.0))
                 .label(format!("{:.0}%", w.used_percentage).bold())
                 .use_unicode(true),

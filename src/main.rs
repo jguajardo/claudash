@@ -281,6 +281,9 @@ fn main() -> std::io::Result<()> {
     // that restores the terminal; ratatui::restore leaves it clean on exit.
     let mut terminal = ratatui::init();
     let mut app = app::App::new(context_limit, notify);
+    // https://no-color.org: any non-empty NO_COLOR turns colors off.
+    app.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+        || settings.as_ref().is_ok_and(|s| s.colors == Some(false));
     app.switch_view(app::VIEW_KEYS[view]);
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -402,6 +405,7 @@ mod tests {
             view: Some("sessions".into()),
             context_limit: Some(config::Limit::Text("200k".into())),
             notify: Some(false),
+            colors: None,
         };
         let parse = |list: &[&str], env: Option<&str>| {
             parse_args(args(list), env.map(str::to_owned), &settings)
