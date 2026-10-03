@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use crate::git::{self, Status};
@@ -49,15 +49,6 @@ pub struct Model {
     pub loose: Vec<PathBuf>,
     /// Spec frameworks and their changes, per checkout or folder that has any.
     pub specs: HashMap<PathBuf, crate::specs::ProjectSpecs>,
-}
-
-impl Model {
-    pub fn checkout(&self, path: &Path) -> Option<&Checkout> {
-        self.repos
-            .iter()
-            .flat_map(|r| &r.checkouts)
-            .find(|c| c.path == path)
-    }
 }
 
 /// Builds the model for the given session folders. Also returns the git status

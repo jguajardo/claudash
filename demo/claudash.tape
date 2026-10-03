@@ -18,76 +18,69 @@ Show
 Type "claudash"
 Sleep 400ms
 Enter
-Sleep 3.5s
+Sleep 4s
 
-# Browse sessions: the Project and MCP panels follow the selection.
-Down
-Sleep 1.5s
-Down
-Sleep 1.5s
-Up
-Up
-Sleep 1.5s
-
-# Why is postgres failing? Open its log.
-Tab
-Sleep 400ms
-Down
-Down
-Down
-Down
-Sleep 800ms
+# Now: what needs you. Enter shows what the session is asking to do.
 Enter
-Sleep 3s
-Escape
-Sleep 400ms
-Tab
-Sleep 400ms
-
-# Activity: what open sessions are doing, and a live feed of tool calls.
-Type "2"
-Sleep 3.5s
-
-# Inspect a session: context per request, tools and failures, subagents.
-Type "i"
-Sleep 3.5s
-Escape
-Sleep 600ms
-
-# Ecosystem: skills, agents, commands, hooks, plugins with their token cost.
-Type "6"
-Sleep 2s
-Right
-Sleep 900ms
-Right
-Sleep 900ms
-Right
-Sleep 900ms
-Right
 Sleep 2.5s
+Escape
+Sleep 1s
 
-# Usage: plan limits with forecast, tokens per day, top projects.
-Type "5"
-Sleep 3s
+# Sessions: every session, its project and token usage.
+Type "2"
+Sleep 1.5s
+Down
+Sleep 1.2s
+Down
+Sleep 1.2s
 
-# Back to the sessions: search past prompts.
-Type "1"
-Sleep 800ms
-Type "h"
-Sleep 800ms
-Type "commit"
+# Projects: a card per project; Enter opens its page with a menu.
+Type "3"
+Sleep 2.5s
+Enter
+Sleep 2.5s
+Down
+Sleep 1.5s
+Down
+Down
+Down
+Sleep 2s
+Enter
+Sleep 600ms
+Down
+Down
+Down
+Down
+Sleep 600ms
+Enter
+Sleep 2.5s
+Escape
+Sleep 400ms
+Escape
+Sleep 400ms
+Down
 Sleep 2s
 Escape
+Sleep 400ms
+Escape
 Sleep 600ms
+
+# Insights: usage, where tokens go, security.
+Type "4"
+Sleep 2.5s
+Down
+Sleep 3s
+Down
+Sleep 2.5s
 
 # Any action by name: today's summary from the command palette.
 Type ":"
-Sleep 1s
+Sleep 800ms
 Type "summary"
-Sleep 1.2s
-Enter
-Sleep 3.5s
-Escape
 Sleep 1s
+Enter
+Sleep 3s
+Escape
+Sleep 800ms
 Type "q"
 Sleep 500ms

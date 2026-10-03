@@ -10,14 +10,14 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, HighlightSpacing, List,
-        ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap,
+        ListItem, ListState, Padding, Paragraph, Row, Table, Tabs, Wrap,
     },
 };
 
 use crate::{
     app::{
-        App, CLEANUP_PRESETS, EcoTab, Focus, Input, McpSnapshot, Popup, TranscriptRow,
-        TranscriptView, View,
+        App, CLEANUP_PRESETS, EcoTab, Input, McpSnapshot, Popup, TranscriptRow, TranscriptView,
+        View,
     },
     ecosystem::Item,
     hooks::Activity,
@@ -28,7 +28,81 @@ use crate::{
     transcript::{self, Kind},
 };
 
+mod insights;
+mod now;
+mod projects;
+
 const HIGHLIGHT: Color = Color::Rgb(60, 40, 70);
+/// Accent of claudash's own chrome: tabs, menus, selected cards.
+const ACCENT: Color = Color::LightMagenta;
+
+/// A card: rounded borders and room inside. Selected cards get a heavier,
+/// colored border.
+fn card<'a>(title: &str, color: Color, selected: bool) -> Block<'a> {
+    let block = Block::bordered()
+        .border_type(if selected {
+            BorderType::Thick
+        } else {
+            BorderType::Rounded
+        })
+        .border_style(if selected {
+            Style::new().fg(color)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        })
+        .padding(Padding::horizontal(1));
+    if title.is_empty() {
+        block
+    } else {
+        block.title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(color).bold(),
+        ))
+    }
+}
+
+/// A vertical menu: icon and label per entry, the selected one highlighted;
+/// dimmed when the keys are elsewhere.
+fn draw_menu(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    entries: &[(String, String)],
+    selected: usize,
+    focused: bool,
+) {
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|(icon, label)| {
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::raw(format!(" {icon}  ")),
+                    Span::raw(label.clone()),
+                ]),
+                Line::default(),
+            ])
+        })
+        .collect();
+    let highlight = if focused {
+        Style::new().fg(Color::White).bg(HIGHLIGHT).bold()
+    } else {
+        Style::new().fg(ACCENT).bold()
+    };
+    let list = List::new(items)
+        .block(card(title, ACCENT, focused))
+        .highlight_style(highlight)
+        .highlight_symbol("▌")
+        .highlight_spacing(HighlightSpacing::Always);
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Label and value on one line, the label dimmed and padded to `width`.
+fn field(label: &str, width: usize, value: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![Span::styled(format!("{label:<width$}"), dim())];
+    spans.extend(value);
+    Line::from(spans)
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [header, body, footer] = Layout::vertical([
@@ -41,11 +115,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, app, header);
     match app.view {
         View::Sessions => draw_dashboard(frame, app, body),
-        View::Projects => draw_projects(frame, app, body),
-        View::Activity => draw_activity(frame, app, body),
+        View::Now => now::draw(frame, app, body),
+        View::Projects => projects::draw(frame, app, body),
+        View::Insights => insights::draw(frame, app, body),
         View::Logs => draw_logs(frame, app, body),
-        View::Ecosystem => draw_ecosystem(frame, app, body),
-        View::Usage => draw_usage(frame, app, body),
         View::Transcript => draw_transcript(frame, app, body),
         View::Help => draw_help(frame, app, body),
         View::Inspect => draw_inspect(frame, app, body),
@@ -65,7 +138,7 @@ fn panel(title: &str, accent: Color) -> Block<'_> {
     block
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(accent))
+        .border_style(Style::new().fg(Color::DarkGray))
         .padding(Padding::horizontal(1))
 }
 
@@ -101,7 +174,9 @@ fn tool_label(name: &str) -> String {
 
 fn focused(block: Block<'_>, is_focused: bool) -> Block<'_> {
     if is_focused {
-        block.border_type(BorderType::Thick)
+        block
+            .border_type(BorderType::Thick)
+            .border_style(Style::new().fg(ACCENT))
     } else {
         block
     }
@@ -130,45 +205,44 @@ fn level_color(ratio: f64) -> Color {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(20), Constraint::Length(10)]).areas(area);
-    let tabs = crate::app::VIEW_KEYS.map(|view| {
-        let name = match view {
-            View::Sessions => "Sessions",
-            View::Activity => "Activity",
-            View::Projects => "Projects",
-            View::Logs => "Logs",
-            View::Usage => "Usage",
-            _ => "Ecosystem",
-        };
-        (view, name)
-    });
     let mut spans = vec![
         Span::styled(
             " ◆ claudash ",
-            Style::new().fg(Color::Black).bg(Color::LightMagenta).bold(),
+            Style::new().fg(Color::Black).bg(ACCENT).bold(),
         ),
         Span::raw("  "),
     ];
-    for (n, (view, label)) in tabs.into_iter().enumerate() {
-        let label = format!("{} {label}", n + 1);
-        let style = if app.view == view {
+    // The view a sub-view (conversation, inspector, logs, help) belongs to.
+    let home = match app.view {
+        View::Transcript | View::Inspect | View::Logs | View::Help => None,
+        view => Some(view),
+    };
+    for (n, view) in crate::app::VIEW_KEYS.into_iter().enumerate() {
+        let style = if home == Some(view) {
             Style::new().fg(Color::White).bg(HIGHLIGHT).bold()
         } else {
             dim()
         };
-        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::styled(format!(" {} {} ", n + 1, view.title()), style));
         spans.push(Span::raw(" "));
     }
-    if app.view == View::Help {
-        spans.push(Span::styled(
-            " help ",
-            Style::new().fg(Color::White).bg(HIGHLIGHT).bold(),
+    // Where you are inside a view.
+    let mut crumbs: Vec<String> = Vec::new();
+    if app.view == View::Projects
+        && let Some(page) = &app.project_page
+    {
+        crumbs.push(page.dir.file_name().map_or_else(
+            || paths::display(&page.dir),
+            |n| n.to_string_lossy().into_owned(),
         ));
+        crumbs.push(page.section.title().to_string());
     }
-    if app.view == View::Transcript {
-        spans.push(Span::styled(
-            " conversation ",
-            Style::new().fg(Color::White).bg(HIGHLIGHT).bold(),
-        ));
+    if home.is_none() {
+        crumbs.push(app.view.title().to_string());
+    }
+    for crumb in crumbs {
+        spans.push(Span::styled(" › ", dim()));
+        spans.push(Span::styled(crumb, Style::new().fg(ACCENT).bold()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), left);
     frame.render_widget(
@@ -183,17 +257,19 @@ fn draw_dashboard(frame: &mut Frame, app: &mut App, area: Rect) {
     let [top, tokens] = Layout::vertical([Constraint::Min(8), Constraint::Length(8)]).areas(area);
     let [sessions, right] =
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
-    let project_lines = project_lines(app);
-    // Borders + content, but never more than half of the column.
-    let project_height = (project_lines.len() as u16 + 2)
-        .min(right.height / 2)
-        .max(3);
-    let [project, mcp] =
-        Layout::vertical([Constraint::Length(project_height), Constraint::Min(3)]).areas(right);
+    let mut project_lines = project_lines(app);
+    if let Some(line) = mcp_summary(app) {
+        project_lines.push(Line::default());
+        project_lines.push(line);
+    }
+    project_lines.push(Line::default());
+    project_lines.push(Line::from(Span::styled(
+        "Tab opens this project: MCP servers, specs, worktrees, setup",
+        dim().italic(),
+    )));
 
     draw_sessions(frame, app, sessions);
-    draw_project(frame, app, project, project_lines);
-    draw_mcp(frame, app, mcp);
+    draw_project(frame, app, right, project_lines);
     draw_tokens(frame, app, tokens);
 }
 
@@ -205,7 +281,7 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let mut block =
         panel("Sessions", Color::LightMagenta).title_bottom(Line::from(count).right_aligned());
-    block = focused(block, app.focus == Focus::Sessions);
+    block = focused(block, true);
     if !app.hooks_configured || !app.statusline.configured {
         block = block.title_bottom(
             Line::from(" run `claudash setup` for alerts and plan usage ").dark_gray(),
@@ -292,6 +368,7 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                     dim().italic(),
                 )));
             }
+            lines.push(Line::default());
             ListItem::new(lines)
         })
         .collect();
@@ -413,8 +490,52 @@ fn draw_project(frame: &mut Frame, app: &App, area: Rect, lines: Vec<Line<'stati
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// "MCP  3/5 online · 1 needs sign-in · 1 failed" for the selected project.
+fn mcp_summary(app: &App) -> Option<Line<'static>> {
+    let servers = app.project_servers()?;
+    if servers.is_empty() {
+        return None;
+    }
+    let online = servers
+        .iter()
+        .filter(|s| matches!(s.status, McpStatus::Connected))
+        .count();
+    let auth = servers
+        .iter()
+        .filter(|s| matches!(s.status, McpStatus::NeedsAuth))
+        .count();
+    let failed = servers
+        .iter()
+        .filter(|s| matches!(s.status, McpStatus::Failed(_)))
+        .count();
+    let mut spans = vec![
+        Span::styled("MCP  ", dim()),
+        Span::styled(
+            format!("{online}/{} online", servers.len()),
+            Style::new().fg(Color::Green),
+        ),
+    ];
+    if auth > 0 {
+        spans.push(Span::styled(
+            format!(" · {auth} need sign-in"),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    if failed > 0 {
+        spans.push(Span::styled(
+            format!(" · {failed} failed"),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    Some(Line::from(spans))
+}
+
 fn draw_mcp(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = focused(panel("MCP Status", Color::Cyan), app.focus == Focus::Mcp);
+    let mcp_focus = app
+        .project_page
+        .as_ref()
+        .is_some_and(|p| p.section == crate::app::Section::Mcp && p.in_content);
+    let block = card("MCP servers", Color::Cyan, mcp_focus);
     let Some(project) = &app.project else {
         let msg = message(
             "Select a session to check its project's MCP servers.",
@@ -495,7 +616,7 @@ fn draw_mcp(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let mut list = List::new(items).block(block);
-    if app.focus == Focus::Mcp {
+    if mcp_focus {
         list = list
             .highlight_style(Style::new().bg(HIGHLIGHT))
             .highlight_symbol("▶ ")
@@ -1376,9 +1497,6 @@ fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
-    if app.usage_tokens {
-        return draw_token_report(frame, app, area);
-    }
     let [plan_area, chart_area, bottom] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(8),
@@ -1590,7 +1708,7 @@ fn project_name(project_path: &str) -> String {
 fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
     let now = chrono::Local::now();
     let open = app.open_sessions();
-    let open_height = ((open.len().max(1) * 2) as u16 + 2)
+    let open_height = ((open.len().max(1) * 3) as u16 + 2)
         .min(area.height / 2)
         .max(4);
     let bg_height = if app.background.is_empty() {
@@ -1694,7 +1812,7 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::new().fg(Color::Green),
                     ));
                 }
-                ListItem::new(vec![Line::from(head), Line::from(detail)])
+                ListItem::new(vec![Line::from(head), Line::from(detail), Line::default()])
             })
             .collect();
         if app
@@ -1982,9 +2100,9 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
         }
         Problem::Secrets { session, found } => {
             let place = if session.is_empty() {
-                "your prompt history (~/.claude/history.jsonl)".to_string()
+                "your prompt history".to_string()
             } else {
-                format!("session \"{session}\"")
+                format!("\"{session}\"")
             };
             Line::from(vec![
                 Span::styled("🔑 ", Style::new().fg(Color::Red)),
@@ -1992,13 +2110,7 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
                     format!("credentials in {place}"),
                     Style::new().fg(Color::Red),
                 ),
-                Span::styled(
-                    format!(
-                        ": {} · rotate them; D trashes the session",
-                        found.join(", ")
-                    ),
-                    dim(),
-                ),
+                Span::styled(format!(": {}", found.join(", ")), dim()),
             ])
         }
         Problem::Risky {
@@ -2008,7 +2120,13 @@ fn problem_line(problem: &crate::app::Problem) -> Line<'static> {
         } => Line::from(vec![
             Span::styled("⚠ ", Style::new().fg(Color::Red)),
             Span::styled(what.to_string(), Style::new().fg(Color::Red)),
-            Span::styled(format!(" in \"{session}\": {detail}"), dim()),
+            Span::styled(
+                format!(
+                    " in \"{session}\": {}",
+                    detail.chars().take(60).collect::<String>()
+                ),
+                dim(),
+            ),
         ]),
         Problem::StaleChange {
             framework,
@@ -2078,318 +2196,6 @@ fn git_summary(status: Option<&crate::git::Status>) -> Vec<Span<'static>> {
         ));
     }
     spans
-}
-
-fn draw_projects(frame: &mut Frame, app: &mut App, area: Rect) {
-    use crate::app::ProjectRow;
-    let problems = app.problems();
-    let problems_height = (problems.len().max(1) as u16 + 2)
-        .min(area.height / 3)
-        .max(3);
-    let [problems_area, body] =
-        Layout::vertical([Constraint::Length(problems_height), Constraint::Min(5)]).areas(area);
-
-    let lines: Vec<Line> = if problems.is_empty() {
-        vec![Line::from(Span::styled(
-            "✓ No conflicts: open sessions each have their own folder, and no worktree has forgotten work",
-            Style::new().fg(Color::Green),
-        ))]
-    } else {
-        problems.iter().map(problem_line).collect()
-    };
-    let title = if problems.is_empty() {
-        "Problems"
-    } else {
-        "Problems · needs a look"
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(panel(
-                title,
-                if problems.is_empty() {
-                    Color::Green
-                } else {
-                    Color::Red
-                },
-            )),
-        problems_area,
-    );
-
-    let [tree_area, detail_area] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
-    let rows = app.project_rows();
-    if rows.is_empty() {
-        let text = if app.projects.repos.is_empty() && app.projects.loose.is_empty() {
-            format!(
-                "{} Reading git state of your session folders…",
-                app.spinner()
-            )
-        } else {
-            "No session folders.".into()
-        };
-        frame.render_widget(message(text, panel("Repositories", Color::Cyan)), tree_area);
-        frame.render_widget(panel("Details", Color::Cyan), detail_area);
-        return;
-    }
-
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|row| match *row {
-            ProjectRow::Repo(r) => {
-                let repo = &app.projects.repos[r];
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("▾ {}", repo.name),
-                        Style::new().fg(Color::LightMagenta).bold(),
-                    ),
-                    Span::styled(format!("  {} checkout(s)", repo.checkouts.len()), dim()),
-                ]))
-            }
-            ProjectRow::Checkout(r, c) => {
-                let repo = &app.projects.repos[r];
-                let co = &repo.checkouts[c];
-                let where_ = if co.main {
-                    "main checkout".to_string()
-                } else {
-                    let root = &repo.checkouts[0].path;
-                    co.path
-                        .strip_prefix(root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| paths::display(&co.path))
-                };
-                let mut spans = vec![
-                    Span::styled("  ⎇ ", Style::new().fg(Color::Cyan)),
-                    Span::styled(
-                        co.branch.clone().unwrap_or_else(|| "detached".into()),
-                        Style::new().bold(),
-                    ),
-                    Span::styled(format!("  {where_}  "), dim()),
-                ];
-                if co.prunable {
-                    spans.push(Span::styled("missing", Style::new().fg(Color::DarkGray)));
-                } else {
-                    spans.extend(git_summary(co.status.as_ref()));
-                }
-                let open = app.open_in_folder(&co.path);
-                let total = app.sessions_in(&co.path).len();
-                if open > 0 {
-                    spans.push(Span::styled(
-                        format!("  ● {open} open"),
-                        Style::new().fg(if open >= 2 { Color::Red } else { Color::Green }),
-                    ));
-                }
-                if total > 0 {
-                    spans.push(Span::styled(
-                        format!("  {}", plural(total as u64, "session")),
-                        dim(),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
-            }
-            ProjectRow::Loose(l) => {
-                let dir = &app.projects.loose[l];
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("▪ {}", paths::display(dir)), Style::new().bold()),
-                    Span::styled(
-                        format!(
-                            "  not in git · {}",
-                            plural(app.sessions_in(dir).len() as u64, "session")
-                        ),
-                        dim(),
-                    ),
-                ]))
-            }
-        })
-        .collect();
-    let selected = app
-        .projects_state
-        .selected()
-        .and_then(|i| rows.get(i))
-        .copied();
-    render_list(
-        frame,
-        items,
-        panel("Repositories", Color::Cyan),
-        tree_area,
-        &mut app.projects_state,
-    );
-
-    // Details of the selected row.
-    let block = panel("Details", Color::Cyan);
-    let Some(dir) = selected
-        .and_then(|row| app.row_folder(row))
-        .map(|d| d.to_path_buf())
-    else {
-        frame.render_widget(block, detail_area);
-        return;
-    };
-    let mut lines = vec![Line::from(Span::styled(
-        paths::display(&dir),
-        Style::new().bold(),
-    ))];
-    if let Some(co) = app.projects.checkout(&dir) {
-        let mut flags = Vec::new();
-        if co.main {
-            flags.push("main checkout");
-        } else {
-            flags.push("worktree");
-        }
-        if co.claude_created {
-            flags.push("created by Claude Code");
-        }
-        if co.review {
-            flags.push("branch review (claudash)");
-        }
-        if co.locked {
-            flags.push("locked");
-        }
-        lines.push(Line::from(Span::styled(flags.join(" · "), dim())));
-        if let Some(st) = &co.status {
-            let mut spans = vec![Span::styled("git  ", dim())];
-            spans.push(Span::raw(
-                st.branch.clone().unwrap_or_else(|| "detached".into()),
-            ));
-            if let Some(up) = &st.upstream {
-                spans.push(Span::styled(format!(" → {up}"), dim()));
-            }
-            spans.push(Span::raw("  "));
-            spans.extend(git_summary(Some(st)));
-            lines.push(Line::from(spans));
-        }
-    }
-    lines.push(Line::default());
-    let sessions = app.sessions_in(&dir);
-    lines.push(Line::from(Span::styled(
-        format!("Sessions ({})", sessions.len()),
-        Style::new().fg(Color::LightMagenta).bold(),
-    )));
-    if sessions.is_empty() {
-        lines.push(Line::from(Span::styled("  none", dim())));
-    }
-    for s in sessions {
-        let mut spans = vec![Span::raw(format!("  {}", s.title))];
-        match app.activity(&s.id) {
-            Some(Activity::NeedsYou) => spans.push(Span::styled(
-                "  ▲ needs you",
-                Style::new().fg(Color::Yellow),
-            )),
-            Some(Activity::Working) => {
-                spans.push(Span::styled("  ● working", Style::new().fg(Color::Green)))
-            }
-            Some(Activity::Waiting) => {
-                spans.push(Span::styled("  ● waiting", Style::new().fg(Color::Cyan)))
-            }
-            _ => {}
-        }
-        spans.push(Span::styled(
-            format!("  · {}", sessions::relative_age(s.modified)),
-            dim(),
-        ));
-        lines.push(Line::from(spans));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Enter shows these sessions in the Sessions view",
-        dim().italic(),
-    )));
-    let specs_area = match app.projects.specs.get(&dir) {
-        Some(specs) => {
-            let height =
-                (specs.changes.len().max(1) as u16 * 2 + 2).min(detail_area.height / 2 + 2);
-            let [top, bottom] = Layout::vertical([Constraint::Min(4), Constraint::Length(height)])
-                .areas(detail_area);
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(block),
-                top,
-            );
-            Some((bottom, specs))
-        }
-        None => {
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(block),
-                detail_area,
-            );
-            None
-        }
-    };
-    let Some((area, specs)) = specs_area else {
-        return;
-    };
-    let names: Vec<&str> = specs.frameworks.iter().map(|f| f.title()).collect();
-    let block = focused(
-        panel("", Color::LightMagenta).title(
-            Line::from(format!(" Specs · {} ", names.join(", ")))
-                .bold()
-                .fg(Color::LightMagenta),
-        ),
-        app.specs_focus,
-    );
-    if specs.changes.is_empty() {
-        frame.render_widget(message("No open changes or feature specs.", block), area);
-        return;
-    }
-    let width = area.width.saturating_sub(6) as usize;
-    let items: Vec<ListItem> = specs
-        .changes
-        .clone()
-        .iter()
-        .map(|c| {
-            let color = match c.stage {
-                crate::specs::Stage::Complete => Color::Green,
-                crate::specs::Stage::Implementing => Color::Yellow,
-                crate::specs::Stage::Planning => Color::Cyan,
-            };
-            let bar = match (c.done * 10).checked_div(c.total) {
-                Some(filled) => {
-                    let filled = filled.min(10);
-                    format!(
-                        "{}{} {}/{}",
-                        "█".repeat(filled),
-                        "░".repeat(10 - filled),
-                        c.done,
-                        c.total
-                    )
-                }
-                None => "no tasks yet".into(),
-            };
-            let sessions = app.change_sessions(&dir, c);
-            let tokens: u64 = sessions.iter().map(|s| s.tokens.total.processed()).sum();
-            let mut second = format!("  {} · {}", c.framework.title(), c.stage.label());
-            if !sessions.is_empty() {
-                second.push_str(&format!(
-                    " · {} · {} tokens",
-                    plural(sessions.len() as u64, "session"),
-                    sessions::human_tokens(tokens)
-                ));
-            }
-            if let (Some(next), Some(label)) = (&c.next, c.next_label) {
-                second.push_str(&format!(" · next: {label} ({next})"));
-            }
-            let second: String = second.chars().take(width).collect();
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(format!("{:<24}", c.id), Style::new().bold()),
-                    Span::styled(bar, Style::new().fg(color)),
-                ]),
-                Line::from(Span::styled(second, dim())),
-            ])
-        })
-        .collect();
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(if app.specs_focus {
-            Style::new().bg(HIGHLIGHT)
-        } else {
-            Style::new()
-        })
-        .highlight_symbol(if app.specs_focus { "▶ " } else { "  " })
-        .highlight_spacing(HighlightSpacing::Always);
-    frame.render_stateful_widget(list, area, &mut app.specs_state);
 }
 
 // ---- Inspector ---------------------------------------------------------------

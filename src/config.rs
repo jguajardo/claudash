@@ -35,14 +35,7 @@ impl Limit {
 }
 
 /// Names for the `view` setting and `--view`, in number-key order.
-pub const VIEW_NAMES: [&str; 6] = [
-    "sessions",
-    "activity",
-    "projects",
-    "logs",
-    "usage",
-    "ecosystem",
-];
+pub const VIEW_NAMES: [&str; 4] = ["now", "sessions", "projects", "insights"];
 
 /// Index into [`crate::app::VIEW_KEYS`] for a view name.
 pub fn view_index(name: &str) -> Result<usize, String> {
@@ -61,8 +54,8 @@ pub const TEMPLATE: &str = "\
 # claudash settings. Every setting is optional; command-line flags and
 # environment variables win over this file.
 
-# View to open on: sessions, activity, projects, logs, usage or ecosystem.
-# view = \"sessions\"
+# View to open on: now, sessions, projects or insights.
+# view = \"now\"
 
 # Context window used when Claude Code's status line hasn't reported one:
 # 1M, 200k or a number of tokens. CLAUDASH_CONTEXT_LIMIT and --context-limit win.
@@ -124,8 +117,9 @@ mod tests {
     #[test]
     fn parses_settings_and_rejects_mistakes() {
         assert_eq!(parse(TEMPLATE), Ok(Config::default()));
-        let config = parse("view = \"Usage\"\ncontext_limit = \"200k\"\nnotify = false\n").unwrap();
-        assert_eq!(view_index(config.view.as_deref().unwrap()), Ok(4));
+        let config =
+            parse("view = \"Insights\"\ncontext_limit = \"200k\"\nnotify = false\n").unwrap();
+        assert_eq!(view_index(config.view.as_deref().unwrap()), Ok(3));
         assert_eq!(config.context_limit.unwrap().as_text(), "200k");
         assert_eq!(config.notify, Some(false));
         assert_eq!(

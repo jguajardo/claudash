@@ -52,8 +52,8 @@ Usage:
   claudash hook                          hook command for Claude Code
 
 Options:
-  --view <NAME>             View to open on: sessions, activity, projects, logs,
-                            usage or ecosystem.
+  --view <NAME>             View to open on: now (default), sessions, projects or
+                            insights.
   --context-limit <TOKENS>  Context window size used when Claude Code's status
                             line hasn't reported one (e.g. 1M, 200k, 500000).
                             Also set with CLAUDASH_CONTEXT_LIMIT. Default: 1M.
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn settings_file_loses_to_flags_and_environment() {
         let settings = config::Config {
-            view: Some("activity".into()),
+            view: Some("sessions".into()),
             context_limit: Some(config::Limit::Text("200k".into())),
             notify: Some(false),
         };
@@ -415,10 +415,10 @@ mod tests {
             })
         );
         assert!(matches!(
-            parse(&["--view", "usage"], Some("300k")),
+            parse(&["--view", "insights"], Some("300k")),
             Ok(Cli::Dashboard {
                 context_limit: 300_000,
-                view: 4,
+                view: 3,
                 ..
             })
         ));
@@ -444,12 +444,12 @@ mod tests {
             })
         );
         assert!(matches!(
-            parse(&["--view", "logs"]),
-            Ok(Cli::Dashboard { view: 3, .. })
+            parse(&["--view", "projects"]),
+            Ok(Cli::Dashboard { view: 2, .. })
         ));
         assert!(matches!(
-            parse(&["--view=usage"]),
-            Ok(Cli::Dashboard { view: 4, .. })
+            parse(&["--view=insights"]),
+            Ok(Cli::Dashboard { view: 3, .. })
         ));
         assert!(parse(&["--view", "nope"]).is_err());
         assert_eq!(parse(&["config"]), Ok(Cli::Config { init: false }));

@@ -10,24 +10,31 @@ A terminal dashboard for [Claude Code](https://code.claude.com/docs): browse, se
 
 ## Features
 
-Six views, switched with `1`–`6`. Press `:` (or `Ctrl+P`) anywhere to find any action by name, and `?` for everything each view shows and does.
+Four views, switched with `1`–`4`: **Now** (what needs you), **Sessions**, **Projects** and **Insights**. Projects and Insights have a menu of sections on the left. The footer shows the keys of where you are, `:` (or `Ctrl+P`) finds any action by name, and `?` lists everything.
 
-### 1 · Sessions
+### 1 · Now
 
-- **Sessions**: every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity. Sessions open right now in Claude Code are marked `▲ needs you` (waiting for a permission decision or other input), `● working` or `● waiting` (finished, waiting for your next prompt), and claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes. The list refreshes every 5 seconds.
-  - `Enter` resumes the session with `claude --resume` in its project folder and returns to claudash when you exit.
-  - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
-  - `i` inspects the session: a chart of its context per request with compactions, every tool it called with its failure rate, the files it edited, its subagents (type, model, tokens) and the skills, subagents, MCP servers and commands it used. `Tab` selects a subagent and `Enter` opens its own conversation.
-  - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
-  - `/` filters by title, path, branch, tag or note (`#tag` works too).
-  - `t` tags a session, `c` adds a note and `*` stars it. They're kept by claudash, not in Claude Code's files.
-  - `D` moves the session to claudash's trash, after asking; `T` opens the trash to restore sessions or delete them for good, and anything left there is deleted after 30 days. `C` cleans up in bulk: pick a criterion (not used for 7/14/21 days, larger than 5/20 MB), check the list and move them all to the trash. Open and starred sessions are never included.
-- **Project**: the instruction files Claude Code loads for the selected session's folder: managed, user and project `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`. It follows the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, and files that are present but ignored (such as an `AGENTS.md` next to a `CLAUDE.md`) are crossed out with the reason.
-- **Project** also shows the folder's git state (branch, changed files, commits to push or pull), how many tokens sessions there start with before your first prompt, and a warning when two open sessions share the folder, since their edits can collide.
-- **MCP Status**: `claude mcp list` run in the selected project's folder, so project-scoped servers show up too, cached per project. Press `Tab` to move into the list and `Enter` to read a server's latest log, which usually says why it failed. For servers that need you to sign in (`AUTH`), such as claude.ai connectors (Gmail, Google Calendar, Atlassian…) or HTTP servers, `a` runs `claude mcp login` and re-checks the server when you're back; `L` signs out (`claude mcp logout`) after asking.
-- **Token Usage**: how full the selected session's context window is, its input, cache and output tokens, cost, model, and how many subagents it ran and what they used.
-  - **Cache diagnostics**: how much of the input was read from cache, flagged when cache writes dominate; with the status line, whether the cache is still warm and until when, its TTL, cache misses and their cause (such as `tools_changed` or `ttl_expired_5m`), and how many tokens the next reply re-caches once it goes cold.
-  - **Plan usage**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
+The screen claudash opens on: what needs a decision from you.
+
+- **Open sessions**, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes.
+- **Background sessions** (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)), finished ones included. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking.
+- **Needs a look**: alerts across projects. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so.
+- **Plan**: 5-hour and 7-day limits with their reset times and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%.
+- **Live feed** of every tool call from sessions active in the last hour, failures in red, refreshed every 2 seconds.
+
+### 2 · Sessions
+
+Every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity, marked `▲ needs you`, `● working` or `● waiting` when open.
+
+- `Enter` resumes the session with `claude --resume` in its project folder and returns to claudash when you exit.
+- `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
+- `i` inspects the session: a chart of its context per request with compactions, every tool it called with its failure rate, the tool output that entered its context, its costliest prompts, an audit of risky actions and secrets, the files it edited, its subagents (type, model, tokens) and the skills, MCP servers and commands it used. `Tab` selects a subagent and `Enter` opens its own conversation.
+- `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
+- `Tab` opens the session's project page.
+- `/` filters by title, path, branch, tag or note (`#tag` works too). `t` tags a session, `c` adds a note and `*` stars it; they're kept by claudash, not in Claude Code's files.
+- `D` moves the session to claudash's trash, after asking; `T` opens the trash to restore sessions or delete them for good, and anything left there is deleted after 30 days. `C` cleans up in bulk: pick a criterion (not used for 7/14/21 days, larger than 5/20 MB), check the list and move them all to the trash. Open and starred sessions are never included.
+
+Beside the list, the selected session's **project** (the instruction files Claude Code loads there, following the [documented precedence rules](https://code.claude.com/docs/en/memory#agents-md) and your *Project instructions* setting, with ignored files crossed out and why; its git state; how many tokens a session there starts with; MCP health) and its **token usage**: how full its context window is, input, cache and output tokens, cost, model and subagents, with **cache diagnostics** (how much input came from cache; with the status line, whether the cache is still warm and until when, its TTL, misses and their cause, and what the next reply re-caches once it goes cold).
 
 From any view:
 
@@ -35,28 +42,25 @@ From any view:
 - `h` searches every prompt you've typed in Claude Code, newest first. `Enter` puts the chosen one in the prompt box for the selected session, `Tab` copies it to the clipboard (OSC 52, works over SSH).
 - `s` summarizes today across projects: sessions, prompts, tool calls and failures, files edited, tokens and each repository's commits. `e` exports it to Markdown in `~/Documents/claudash-exports/`.
 
-### 2 · Activity
-
-What open sessions are doing right now, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. Below, a live feed of every tool call from sessions active in the last hour, with failures in red. It refreshes every 2 seconds while it's open, re-reading only the transcripts that changed.
-
-Background sessions (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)) are listed too, with their state, including finished ones. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking. To dispatch new ones, use Claude Code's own `claude agents`.
-
 ### 3 · Projects
 
-Every repository your sessions ran in, with all its checkouts (the main one and its worktrees) and their git state: branch, changed files, commits to push or pull, how many sessions each has and which are open. `Enter` shows a folder's sessions in the Sessions view.
+Every project your sessions ran in, as a card: its branch and git state, worktrees, sessions and which are open or need you, last activity and tokens this week, spec progress, and badges for secrets, risky commands and MCP servers that need a look. Arrows move between cards, `Enter` opens a project's page, `b` reviews one of its branches.
 
-On top, a **Problems** panel collects what can go wrong with several sessions at once:
+A project's page has a menu of sections on the left (`↑`/`↓` to choose, `Enter` or `→` to go in, `Esc` or `←` to come back):
 
-- two open sessions working in the same folder, whose edits can collide;
-- the same file edited by two open sessions in the last day;
-- worktrees with uncommitted or unpushed work that no open session is using;
-- worktrees whose directory is gone.
-
-`D` removes the selected worktree with `git worktree remove` (never `--force`, so git refuses when it holds uncommitted changes), and `P` prunes the records of worktrees whose directory is gone. Both ask first.
+| Section | What's there |
+| --- | --- |
+| **Overview** | What Claude Code loads there, its git state, recent sessions, activity, security and specs at a glance |
+| **Sessions** | The project's sessions in a table; `Enter` resumes, `v` reads, `i` inspects |
+| **Specs** | Spec-driven changes and their next step (see below) |
+| **Worktrees** | Every checkout with its git state and sessions; `Enter` shows its sessions, `b` reviews a branch, `D` removes a worktree with `git worktree remove` (never `--force`), `P` prunes records of worktrees whose directory is gone; both ask first |
+| **MCP servers** | `claude mcp list` run in the project's folder, so project-scoped servers show up too. `Enter` reads a server's latest log, which usually says why it failed. For servers that need you to sign in, such as claude.ai connectors (Gmail, Google Calendar, Atlassian…) or HTTP servers, `a` runs `claude mcp login` and re-checks it when you're back; `L` signs out after asking |
+| **Skills & plugins** | Skills, subagents, commands, hooks and plugins available there, with how often each was used in the last 30 days; plugins show their always-on token cost per session, so unused ones that cost tokens stand out, and `Space` enables or disables one. The **Permissions** tab merges allow, ask and deny rules from every settings file and flags the risky ones (see Security) |
+| **Security** | Credentials in this project's transcripts, risky things Claude did here, and the permission rules worth a look |
 
 #### Specs
 
-If a project uses a spec-driven development framework, its changes show under the selected folder, with a progress bar of their tasks, their stage (planning, implementing, complete), the sessions that worked on them and what those cost in tokens. `Tab` moves into the list:
+If a project uses a spec-driven development framework, its Specs section lists its changes with a progress bar of their tasks, their stage (planning, implementing, complete), the sessions that worked on them and what those cost in tokens:
 
 - `Enter` runs the next step in Claude Code with the framework's own command, such as `/opsx:apply add-login` for OpenSpec or `/speckit-plan` for spec-kit. claudash only offers a command your project actually has, so it never invents one.
 - `v` shows the change's files: proposal, requirements, design, plan, tasks.
@@ -71,11 +75,11 @@ If a project uses a spec-driven development framework, its changes show under th
 | [GSD](https://github.com/open-gsd/gsd-core) | `.planning/ROADMAP.md` | `/gsd-progress` |
 | BMAD, Agent OS | detected only | |
 
-The Problems panel also flags changes with tasks left that nobody touched for 14 days, and changes whose tasks are all done, with the command to wrap them up.
+Now's alerts also flag changes with tasks left that nobody touched for 14 days, and changes whose tasks are all done, with the command to wrap them up.
 
 #### Review a branch
 
-`b` on a repository reviews one of its branches the way you'd review a pull request, with Claude Code doing the reviewing:
+`b` on a project card, in its menu or in Worktrees reviews one of its branches the way you'd review a pull request, with Claude Code doing the reviewing:
 
 1. claudash runs `git fetch` and lists the remote's branches, newest first, with their last commit, author, how many commits they add and whether you've reviewed them. Type to search. Your own checkout's branch comes first when it has commits the base doesn't, so you can review your work before pushing it (only committed work is reviewed).
 2. Pick one: it shows its size against the base (`develop`, or `main`, or `master`, whichever the remote has first) and asks how far to go:
@@ -86,35 +90,26 @@ The Problems panel also flags changes with tasks left that nobody touched for 14
 
 Comments are written in the language of the branch's commit messages. A review uses your plan like any other Claude Code session.
 
-### 4 · Logs
+### 4 · Insights
 
-Logs in one place: every MCP server of the selected project and every background session's output. It follows new lines every 2 seconds; scrolling up with `PgUp` pauses that and `End` resumes it. `/` filters lines, `x` shows errors only.
+A menu of three sections:
 
-### 5 · Usage
-
-Plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Subagents are included.
-
-Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers: the charts keep your history after the transcripts are gone.
-
-`Tab` switches to **where tokens go** over the last 7 days, from your own transcripts:
-
-- **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
-- **Costliest prompts**: every prompt with the tokens processed by all the requests it caused, so you see which asks were expensive.
-- **Reply length and tool output per call** against the previous 30 days. If you install a token saver such as [caveman](https://github.com/JuliusBrussee/caveman) (shorter replies) or [rtk](https://github.com/rtk-ai/rtk) (shorter command output), claudash says it's installed and these numbers show what it actually saves you.
-
-The session inspector (`i`) shows the same for one session. Tool output is measured in characters and shown as about 4 per token; prompt costs are Claude Code's own token counts.
-
-### 6 · Ecosystem
-
-Everything Claude Code has available for the selected project, in five tabs: **Skills**, **Agents** (subagents), **Commands**, **Hooks** and **Plugins**. It covers user scope, project scope, claude.ai-synced skills and every enabled plugin, with how often each skill, subagent and command was used in the last 30 days. Plugins show their projected always-on token cost per session from `claude plugin details` and how often anything they provide was used, so plugins that cost tokens in every session without being used stand out, with their total. `Space` enables or disables the selected plugin with `claude plugin enable/disable`.
+- **Plan & usage**: plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers.
+- **Where tokens go** over the last 7 days, from your own transcripts:
+  - **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
+  - **Costliest prompts**: every prompt with the tokens processed by all the requests it caused.
+  - **Reply length and tool output per call** against the previous 30 days. If you install a token saver such as [caveman](https://github.com/JuliusBrussee/caveman) (shorter replies) or [rtk](https://github.com/rtk-ai/rtk) (shorter command output), claudash says it's installed and these numbers show what it actually saves you. Tool output is measured in characters, about 4 per token.
+- **Security**: everything below, across every session.
 
 ### Security
 
 claudash reads what Claude already did and points out what deserves a second look. It blocks nothing; that's what Claude Code's permissions are for.
 
-- **Secrets in transcripts.** Claude Code keeps conversations in plain text for 30 days, so an API key you pasted or a token a command printed stays on disk. claudash looks for Anthropic, OpenAI, GitHub, GitLab, AWS, Google, Slack, Stripe, npm and crates.io keys and private keys in every transcript and in your prompt history. Sessions that have one are marked `🔑 secret`, and Problems lists them (masked, never in full) so you can rotate the key and trash the session with `D`. Exports (`e`, `claudash export`) replace any credential with a masked note.
-- **Risky actions.** The inspector (`i`) has an Audit section with what the session and its subagents did: force pushes, `curl … | sh`, `sudo`, recursive deletes, `git reset --hard` and other ways to lose work, publishing, destructive SQL, reading `.env` or SSH keys, and editing files outside the project. Problems shows the most severe ones from the last week.
-- **Permission rules.** Ecosystem's Permissions tab merges the allow, ask and deny rules from managed, user, project and local settings and flags the ones worth a look: `Bash` with no restriction, `bypassPermissions`, rules such as `Bash(curl:*)` or `Bash(git push *)` that let Claude run any command of that kind without asking, allows that a deny overrides, repeats, and allow rules nothing used in 30 days.
+- **Secrets in transcripts.** Claude Code keeps conversations in plain text for 30 days, so an API key you pasted or a token a command printed stays on disk. claudash looks for Anthropic, OpenAI, GitHub, GitLab, AWS, Google, Slack, Stripe, npm and crates.io keys and private keys in every transcript and in your prompt history. Sessions that have one are marked `🔑 secret` and Now lists them (masked, never in full) so you can rotate the key and trash the session with `D`. Exports (`e`, `claudash export`) replace any credential with a masked note.
+- **Risky actions**: force pushes, `curl … | sh`, `sudo`, recursive deletes, `git reset --hard` and other ways to lose work, publishing, destructive SQL, reading `.env` or SSH keys, and editing files outside the project, by the session or its subagents.
+- **Permission rules**: `Bash` with no restriction, `bypassPermissions`, rules such as `Bash(curl:*)` or `Bash(git push *)` that let Claude run any command of that kind without asking, allows that a deny overrides, repeats, and allow rules nothing used in 30 days.
+
+Logs (MCP servers and background sessions) open with `l` from a server or a background session; they follow new lines, `/` filters them and `x` shows errors only.
 
 ### From the command line and status bars
 
@@ -180,7 +175,7 @@ Claude Code only sends plan usage to Pro and Max subscribers, after the first re
 
 ```sh
 claudash                       # open claudash
-claudash --view activity       # open on another view
+claudash --view projects       # open on another view
 claudash --no-notify           # no desktop notifications or bell
 claudash --context-limit 200k  # context window to assume when the status line hasn't reported one
 claudash setup                 # connect the status line and hooks (see above)
@@ -195,29 +190,30 @@ A letter means the same thing in every view where it works, `Enter` opens or run
 
 | Key | Where | Action |
 | --- | --- | --- |
-| `1`–`6` | everywhere | Sessions, Activity, Projects, Logs, Usage, Ecosystem |
+| `1`–`4` | everywhere | Now, Sessions, Projects, Insights |
 | `:` `Ctrl+P` | everywhere | Commands: find any action by name and run it |
 | `f` · `h` · `s` | everywhere | Search every conversation · prompt history · today's summary |
 | `r` · `?` · `q` | everywhere | Reload · help · quit |
-| `↑` `↓` / `j` `k` | lists | Move |
-| `Enter` | | Resume the session · attach to a background session · show a folder's sessions · open a log or details |
+| `↑` `↓` / `j` `k` | lists, menus | Move |
+| `←` `→` | project cards, menus | Move between cards · into a section and back |
+| `Enter` | | Open or run the selected thing: what a session asks, resume, a project, a section, a log, the next spec step |
 | `Esc` | | Back · clear the filter |
+| `Tab` | | Next pane: background sessions, the session's project, subagents in the inspector, setup tabs |
 | `/` | | Filter sessions · search the conversation · filter log lines |
 | `v` · `i` | sessions | Read the conversation · inspect it |
 | `p` | sessions | Send a one-off prompt |
 | `t` · `c` · `*` | sessions | Tag · note · star |
-| `Tab` | | Next pane: MCP servers, background sessions, subagents in the inspector, ecosystem tabs |
+| `b` | projects | Review a branch with Claude Code |
 | `l` | MCP servers, background | Log |
 | `a` · `L` | MCP servers | Sign in (`claude mcp login`) · sign out (asks first) |
+| `Space` | skills & plugins | Enable or disable the plugin |
 | `o` · `n`/`N` · `e` | conversation | Tool output · next/previous match · export to Markdown |
+| `m` | insights | Days or months |
 | `x` | logs | Errors only |
-| `m` | usage | Days or months |
-| `Space` | ecosystem | Enable or disable the plugin |
-| `D` | sessions, projects | Move the session to the trash · remove the worktree |
+| `D` | sessions, worktrees | Move the session to the trash · remove the worktree |
 | `C` · `T` | sessions | Bulk cleanup · open the trash |
 | `S` · `R` | background | Stop · respawn |
-| `P` | projects | Prune missing worktrees |
-| `b` | projects | Review a branch with Claude Code |
+| `P` | worktrees | Prune missing worktrees |
 
 ### Configuration
 
@@ -225,7 +221,7 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 
 | Setting | File | Flag | Environment variable | Default |
 | --- | --- | --- | --- | --- |
-| View to open on | `view = "activity"` | `--view <NAME>` | | `sessions` |
+| View to open on | `view = "projects"` | `--view <NAME>` | | `now` |
 | Context window when the status line hasn't reported one | `context_limit = "200k"` | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Desktop notifications and bell | `notify = false` | `--no-notify` | | on |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
@@ -251,16 +247,16 @@ claudash makes no network requests of its own. It reads local files and runs the
 
 Its settings file is `~/.config/claudash/config.toml` (see [Configuration](#configuration)). claudash's own data lives in `~/.local/share/claudash/` (`~/Library/Application Support/claudash/` on macOS): `library.json` for tags, notes and stars, `usage-history.json` for the charts, and `trash/`.
 
-Claude Code [documents the transcript format as internal](https://code.claude.com/docs/en/sessions#where-transcripts-are-stored) and it can change between versions, so a Claude Code update may break the Sessions, Token Usage and Usage views until claudash catches up. claudash parses these files leniently and skips anything it doesn't recognize.
+Claude Code [documents the transcript format as internal](https://code.claude.com/docs/en/sessions#where-transcripts-are-stored) and it can change between versions, so a Claude Code update may break the Sessions, Projects and Insights views until claudash catches up. claudash parses these files leniently and skips anything it doesn't recognize.
 
 These actions change things, and only run when you ask:
 
 - **`claudash setup --apply` / `--remove`**: edits `~/.claude/settings.json` (status line and hooks), after saving a timestamped backup next to it.
 - **Move a session to the trash** (`D` then `y`, or `C`): moves its transcript, subagent transcripts and tool results, and its `file-history` checkpoints and `session-env`, out of Claude Code's directories into claudash's trash. `T` puts them back; they're deleted for good after 30 days or when you delete them from the trash (`D` twice).
-- **Enable or disable a plugin** (`Space`): runs `claude plugin enable` or `claude plugin disable`.
-- **Stop, respawn or attach to a background session** (`S`, `R`, `Enter` in Activity): runs `claude stop`, `claude respawn` or `claude attach`.
-- **Remove or prune worktrees** (`D`, `P` in Projects): runs `git worktree remove` (without `--force`) or `git worktree prune`.
-- **Sign in to or out of an MCP server** (`a`, `L` in the MCP list): runs `claude mcp login` or `claude mcp logout`.
+- **Enable or disable a plugin** (`Space` in a project's Skills & plugins): runs `claude plugin enable` or `claude plugin disable`.
+- **Stop, respawn or attach to a background session** (`S`, `R`, `Enter` in Now): runs `claude stop`, `claude respawn` or `claude attach`.
+- **Remove or prune worktrees** (`D`, `P` in a project's Worktrees): runs `git worktree remove` (without `--force`) or `git worktree prune`.
+- **Sign in to or out of an MCP server** (`a`, `L` in a project's MCP servers): runs `claude mcp login` or `claude mcp logout`.
 - **Review a branch** (`b` in Projects): runs `git fetch`, adds a detached worktree under `~/.cache/claudash/reviews/` (or updates it for a second review), and runs Claude Code there: `claude -p` limited to reading files and `git log`/`diff`/`show` for a static review, or an interactive `claude` for the other modes. Reviews are saved in claudash's data directory.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 
@@ -272,7 +268,7 @@ Resuming, prompting and trashing are refused while the session is open in Claude
 - `claude mcp list` doesn't say whether a server is user- or project-scoped; both show as `local`.
 - The Project panel lists the instruction files loaded at launch. Files in subdirectories, which Claude Code loads when it works there, aren't shown.
 - Plugin components are read from the standard layout (`skills/`, `agents/`, `commands/`, `hooks/hooks.json`). A plugin that declares custom paths in its manifest may show fewer components.
-- Per-day cost isn't available locally, so the Usage view charts tokens; cost is shown per session where Claude Code recorded it.
+- Per-day cost isn't available locally, so Insights charts tokens; cost is shown per session where Claude Code recorded it.
 
 ## Platform support
 

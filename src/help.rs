@@ -54,67 +54,53 @@ struct ViewHelp {
 
 const VIEWS: &[ViewHelp] = &[
     ViewHelp {
-        name: "1 · Sessions",
-        shows: "Every Claude Code session on this machine, newest first, with what's open right now \
-                (▲ needs you, ● working, ● waiting; ⚠ when two open sessions share a folder). Beside \
-                it, the selected session's project: the instruction files Claude Code loads there, its \
-                git state, how many tokens a session there starts with, and its MCP servers' health. \
-                Below, the session's context, tokens, cost, prompt cache and your plan usage with a \
-                forecast.",
-        contexts: &[Context::Sessions, Context::Mcp],
+        name: "1 · Now",
+        shows: "What needs you right now. Open sessions, the ones that need you first, with what \
+                they're asking to do, their last tool call, how full their context is and how many \
+                subagents are running; background sessions (claude --bg); alerts across projects \
+                (credentials in transcripts, risky commands, MCP servers that failed or need you to \
+                sign in, stale specs, forgotten worktrees); plan usage with a forecast; and a live \
+                feed of every tool call from the last hour.",
+        contexts: &[Context::Now, Context::Background],
     },
     ViewHelp {
-        name: "2 · Activity",
-        shows: "What open sessions are doing right now, the ones that need you first: their state and \
-                why they wait, their last tool call, how full their context is and how many subagents \
-                are running. Below, a live feed of every tool call from sessions active in the last \
-                hour, failures in red. Refreshes every 2 seconds while open. \
-                Background sessions (claude --bg) are listed with their state, finished ones included.",
-        contexts: &[Context::Activity, Context::Background],
+        name: "2 · Sessions",
+        shows: "Every Claude Code session on this machine, newest first, with its state (▲ needs \
+                you, ● working, ● waiting). Beside it, the selected session's context, tokens, cost, \
+                prompt cache, and the instruction files and git state of its project.",
+        contexts: &[Context::Sessions],
     },
     ViewHelp {
         name: "3 · Projects",
-        shows: "Every repository your sessions ran in, with all its checkouts (the main one and its \
-                worktrees) and their git state, how many sessions each has and which are open. On \
-                top, problems: open sessions sharing a folder, the same file edited by two open \
-                sessions, worktrees with work but no session, and worktrees that no longer exist. \
-                Projects that use OpenSpec, spec-kit, Kiro, Task Master or GSD show their changes \
-                with task progress; Tab moves there and Enter runs the next step with the \
-                framework's own command. From here, b reviews a branch: claudash fetches, checks it out in a worktree of its \
-                own and hands the review to Claude Code, then lists the findings by file and line.",
-        contexts: &[Context::Projects],
+        shows: "Every project as a card: its branch and git state, sessions, open ones, spec \
+                progress, MCP health and alerts. Enter opens its page, with a menu of sections: \
+                Overview, Sessions, Specs (OpenSpec, spec-kit, Kiro, Task Master, GSD), Worktrees & \
+                branches (with AI branch review), MCP servers (logs, sign in), Skills, plugins & \
+                rules, and Security.",
+        contexts: &[
+            Context::Projects,
+            Context::ProjectMenu,
+            Context::ProjectSessions,
+            Context::Specs,
+            Context::Worktrees,
+            Context::Mcp,
+            Context::Setup,
+        ],
     },
     ViewHelp {
-        name: "4 · Logs",
-        shows: "Logs in one place: every MCP server of the selected project (what Claude Code wrote \
-                when it connected) and every background session's output. Follows new lines every 2 \
-                seconds.",
-        contexts: &[Context::Logs],
-    },
-    ViewHelp {
-        name: "5 · Usage",
-        shows: "Plan limits with a forecast, tokens per day or month, totals, usage by model and top \
-                projects. Kept beyond Claude Code's 30-day cleanup. Tab shows where tokens go: tool \
-                output that entered the context by command, the costliest prompts, and reply length \
-                against the previous 30 days.",
-        contexts: &[Context::Usage],
-    },
-    ViewHelp {
-        name: "6 · Ecosystem",
-        shows: "Skills, subagents, commands, hooks and plugins available in the selected project, at \
-                user, project, claude.ai and plugin scope, with how often each was used in the last 30 \
-                days. Plugins show their always-on token cost per session, and the ones you never use \
-                are flagged with what they cost you. Permissions merges the allow, ask and deny \
-                rules from every settings file and flags broad, contradictory and unused ones.",
-        contexts: &[Context::Ecosystem],
+        name: "4 · Insights",
+        shows: "Plan & usage: limits with a forecast, tokens per day or month, by model and project, \
+                kept beyond Claude Code's 30-day cleanup. Where tokens go: tool output that entered \
+                the context by command, the costliest prompts, reply length against the previous 30 \
+                days. Security: credentials found in transcripts and risky things Claude did.",
+        contexts: &[Context::Insights],
     },
     ViewHelp {
         name: "Inspector (i)",
         shows: "One session in depth: its context per request with compactions, every tool with its \
-                failure rate, its subagents by usage (running ones marked), the files it edited and the \
-                skills, subagents, MCP servers and commands it used. Audit lists risky things it \
-                did (force pushes, curl | sh, sudo, deletes, edits outside the project, reading \
-                secrets files) and any API key or token in its transcript.",
+                failure rate, the tool output that entered its context, its costliest prompts, an \
+                audit of risky actions and secrets, its subagents, the files it edited and the \
+                skills, MCP servers and commands it used.",
         contexts: &[Context::Inspect],
     },
     ViewHelp {
@@ -122,6 +108,12 @@ const VIEWS: &[ViewHelp] = &[
         shows: "The session's prompts and replies with their times, tool calls, compactions and, on \
                 demand, tool output.",
         contexts: &[Context::Conversation],
+    },
+    ViewHelp {
+        name: "Logs (l)",
+        shows: "MCP server logs of the selected project and background session output, following \
+                new lines.",
+        contexts: &[Context::Logs],
     },
 ];
 

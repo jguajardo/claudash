@@ -37,6 +37,9 @@ use crate::{
     ui,
 };
 
+mod pages;
+pub use pages::Card;
+
 const TICK_RATE: Duration = Duration::from_millis(250);
 /// How often sessions, status line data and live sessions are refreshed
 /// (only transcript files that changed are re-parsed).
@@ -58,14 +61,14 @@ const PLAN_ALERTS: [f64; 2] = [80.0, 95.0];
 pub enum View {
     /// Every session, the selected one's project and its usage.
     Sessions,
-    /// Repositories, their checkouts and worktrees, and what's wrong.
+    /// What needs you now: open sessions, alerts, plan usage, live feed.
+    Now,
+    /// Every project as a card; Enter opens its page.
     Projects,
-    /// What open sessions are doing right now.
-    Activity,
+    /// Plan usage, where tokens go, and security.
+    Insights,
     /// MCP server and background session logs.
     Logs,
-    Ecosystem,
-    Usage,
     /// A session's conversation, full screen.
     Transcript,
     /// Everything claudash does, and whether it's set up.
@@ -74,20 +77,114 @@ pub enum View {
     Inspect,
 }
 
-/// Views in the order of their number keys, `1` to `6`.
-pub const VIEW_KEYS: [View; 6] = [
-    View::Sessions,
-    View::Activity,
-    View::Projects,
-    View::Logs,
-    View::Usage,
-    View::Ecosystem,
-];
+/// Views in the order of their number keys, `1` to `4`.
+pub const VIEW_KEYS: [View; 4] = [View::Now, View::Sessions, View::Projects, View::Insights];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Focus {
+impl View {
+    pub fn title(self) -> &'static str {
+        match self {
+            View::Now => "Now",
+            View::Sessions => "Sessions",
+            View::Projects => "Projects",
+            View::Insights => "Insights",
+            View::Logs => "Logs",
+            View::Transcript => "Conversation",
+            View::Help => "Help",
+            View::Inspect => "Inspector",
+        }
+    }
+}
+
+/// The sections of a project's page, in its menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Overview,
     Sessions,
+    Specs,
+    Worktrees,
     Mcp,
+    Setup,
+    Security,
+}
+
+impl Section {
+    pub const ALL: [Section; 7] = [
+        Section::Overview,
+        Section::Sessions,
+        Section::Specs,
+        Section::Worktrees,
+        Section::Mcp,
+        Section::Setup,
+        Section::Security,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Overview => "Overview",
+            Section::Sessions => "Sessions",
+            Section::Specs => "Specs",
+            Section::Worktrees => "Worktrees",
+            Section::Mcp => "MCP servers",
+            Section::Setup => "Skills & plugins",
+            Section::Security => "Security",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Section::Overview => "◉",
+            Section::Sessions => "≡",
+            Section::Specs => "▤",
+            Section::Worktrees => "⎇",
+            Section::Mcp => "⌁",
+            Section::Setup => "⚙",
+            Section::Security => "◈",
+        }
+    }
+}
+
+/// A project's page: its folder (the main checkout, or a folder outside git)
+/// and where you are in it.
+pub struct ProjectPage {
+    pub dir: PathBuf,
+    pub section: Section,
+    /// Keys go to the section's content instead of the menu.
+    pub in_content: bool,
+    pub sessions_state: ratatui::widgets::TableState,
+    pub worktrees_state: ratatui::widgets::TableState,
+    pub scroll: u16,
+}
+
+/// The sections of Insights, in its menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsightsSection {
+    Usage,
+    Tokens,
+    Security,
+}
+
+impl InsightsSection {
+    pub const ALL: [InsightsSection; 3] = [
+        InsightsSection::Usage,
+        InsightsSection::Tokens,
+        InsightsSection::Security,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            InsightsSection::Usage => "Plan & usage",
+            InsightsSection::Tokens => "Where tokens go",
+            InsightsSection::Security => "Security",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            InsightsSection::Usage => "▆",
+            InsightsSection::Tokens => "◔",
+            InsightsSection::Security => "◈",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -405,13 +502,6 @@ pub struct FeedItem<'a> {
     pub event: &'a analysis::Event,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectRow {
-    Repo(usize),
-    Checkout(usize, usize),
-    Loose(usize),
-}
-
 /// Something across projects that deserves attention.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
@@ -575,7 +665,6 @@ pub struct App {
     /// Desktop notifications and bell for sessions that need you and plan alerts.
     notify: bool,
     pub view: View,
-    pub focus: Focus,
     pub popup: Option<Popup>,
     pub input: Option<Input>,
     pub should_quit: bool,
@@ -648,10 +737,17 @@ pub struct App {
     pub git: HashMap<PathBuf, Option<git::Status>>,
     git_job: Option<Job<(ProjectsModel, projects::Statuses)>>,
     pub projects: ProjectsModel,
-    pub projects_state: ListState,
-    /// In Projects: the spec changes list has the keys instead of the tree.
-    pub specs_focus: bool,
+    /// Selected card in Projects.
+    pub project_cursor: usize,
+    /// Cards per row the last time Projects was drawn, for moving up and down.
+    pub project_columns: usize,
+    /// The open project page, if any.
+    pub project_page: Option<ProjectPage>,
     pub specs_state: ListState,
+    pub insights: InsightsSection,
+    pub insights_scroll: u16,
+    /// Where Esc goes from a conversation, the inspector or the logs.
+    pub return_view: View,
     /// Show only sessions of this exact folder (set from the Projects view).
     pub folder_filter: Option<PathBuf>,
     git_at: Option<Instant>,
@@ -693,8 +789,6 @@ pub struct App {
     pub history: History,
     /// Usage view shows months instead of days.
     pub monthly: bool,
-    /// Usage view shows where tokens go instead of the overview.
-    pub usage_tokens: bool,
     /// Token savers installed (caveman, rtk), found when that page opens.
     pub token_savers: Option<Vec<String>>,
 }
@@ -704,8 +798,7 @@ impl App {
         let mut app = Self {
             context_limit,
             notify,
-            view: View::Sessions,
-            focus: Focus::Sessions,
+            view: View::Now,
             popup: None,
             input: None,
             should_quit: false,
@@ -750,9 +843,13 @@ impl App {
             git: HashMap::new(),
             git_job: None,
             projects: ProjectsModel::default(),
-            projects_state: ListState::default(),
-            specs_focus: false,
+            project_cursor: 0,
+            project_columns: 1,
+            project_page: None,
             specs_state: ListState::default(),
+            insights: InsightsSection::Usage,
+            insights_scroll: 0,
+            return_view: View::Sessions,
             folder_filter: None,
             git_at: None,
             inspect_scroll: 0,
@@ -774,7 +871,6 @@ impl App {
             library: Library::load(),
             history: History::load(),
             monthly: false,
-            usage_tokens: false,
             token_savers: None,
         };
         app.doctor_job = Some(Job::spawn(doctor::run));
@@ -847,7 +943,7 @@ impl App {
             self.refresh();
         } else if self.view == View::Logs && self.logs.follow && self.ticks.is_multiple_of(8) {
             self.load_log();
-        } else if self.view == View::Activity && self.ticks.is_multiple_of(8) {
+        } else if self.view == View::Now && self.ticks.is_multiple_of(8) {
             // Every 2 seconds: re-read what open sessions did.
             self.start_analysis();
             self.reload_hook_states();
@@ -858,7 +954,9 @@ impl App {
         }
         self.poll_jobs();
         self.maybe_start_mcp_check();
-        if self.view == View::Ecosystem {
+        if self.project_page.as_ref().is_some_and(|p| {
+            self.view == View::Projects && matches!(p.section, Section::Setup | Section::Security)
+        }) {
             self.ensure_ecosystem();
             self.ensure_plugin_details();
         }
@@ -1021,7 +1119,7 @@ impl App {
             .and_then(|i| open.get(i))
             .cloned();
         match code {
-            KeyCode::Esc => self.view = View::Sessions,
+            KeyCode::Esc => {}
             KeyCode::Down | KeyCode::Char('j') if !open.is_empty() => {
                 let next = self
                     .activity_state
@@ -1046,7 +1144,7 @@ impl App {
                     self.select_session(&id);
                     self.inspect_scroll = 0;
                     self.inspect_sub = None;
-                    self.view = View::Inspect;
+                    self.enter_subview(View::Inspect);
                 }
             }
             _ => {}
@@ -1091,7 +1189,7 @@ impl App {
             rows: Vec::new(),
             rows_key: None,
         });
-        self.view = View::Transcript;
+        self.enter_subview(View::Transcript);
     }
 
     /// Carries out a confirmed action.
@@ -1238,7 +1336,7 @@ impl App {
             .or((!self.logs.sources.is_empty()).then_some(0));
         self.logs.state.select(index);
         self.logs.loaded = None;
-        self.view = View::Logs;
+        self.enter_subview(View::Logs);
         self.load_log();
     }
 
@@ -1271,7 +1369,7 @@ impl App {
     fn handle_logs_key(&mut self, code: KeyCode) {
         let n = self.logs.sources.len();
         match code {
-            KeyCode::Esc => self.view = View::Sessions,
+            KeyCode::Esc => self.view = self.return_view,
             KeyCode::Down | KeyCode::Char('j') if n > 0 => {
                 let next = self.logs.state.selected().map_or(0, |i| (i + 1).min(n - 1));
                 self.logs.state.select(Some(next));
@@ -1300,30 +1398,6 @@ impl App {
                 self.input = Some(Input::LogFilter { text });
             }
             _ => {}
-        }
-    }
-
-    /// Rows of the Projects view: each repository followed by its checkouts,
-    /// then folders outside git.
-    pub fn project_rows(&self) -> Vec<ProjectRow> {
-        let mut rows = Vec::new();
-        for (r, repo) in self.projects.repos.iter().enumerate() {
-            rows.push(ProjectRow::Repo(r));
-            rows.extend((0..repo.checkouts.len()).map(|c| ProjectRow::Checkout(r, c)));
-        }
-        rows.extend((0..self.projects.loose.len()).map(ProjectRow::Loose));
-        rows
-    }
-
-    /// Folder of a Projects row, when it has one.
-    pub fn row_folder(&self, row: ProjectRow) -> Option<&Path> {
-        match row {
-            ProjectRow::Repo(r) => self.projects.repos[r]
-                .checkouts
-                .first()
-                .map(|c| c.path.as_path()),
-            ProjectRow::Checkout(r, c) => Some(&self.projects.repos[r].checkouts[c].path),
-            ProjectRow::Loose(l) => Some(&self.projects.loose[l]),
         }
     }
 
@@ -1389,13 +1463,11 @@ impl App {
             if let Some(a) = self.analysis(s)
                 && !a.secrets.is_empty()
             {
+                let kinds: std::collections::BTreeSet<&str> =
+                    a.secrets.iter().map(|x| x.kind).collect();
                 problems.push(Problem::Secrets {
                     session: s.title.clone(),
-                    found: a
-                        .secrets
-                        .iter()
-                        .map(|x| format!("{} {} in {}", x.kind, x.masked, x.place))
-                        .collect(),
+                    found: kinds.into_iter().map(str::to_owned).collect(),
                 });
             }
         }
@@ -1405,7 +1477,10 @@ impl App {
                 found: self
                     .history_secrets
                     .iter()
-                    .map(|x| format!("{} {}", x.kind, x.masked))
+                    .map(|x| x.kind)
+                    .collect::<std::collections::BTreeSet<&str>>()
+                    .into_iter()
+                    .map(str::to_owned)
                     .collect(),
             });
         }
@@ -1479,14 +1554,6 @@ impl App {
         problems
     }
 
-    /// The selected Projects row's folder and its spec changes, if any.
-    pub fn selected_specs(&self) -> Option<(&Path, &specs::ProjectSpecs)> {
-        let rows = self.project_rows();
-        let row = self.projects_state.selected().and_then(|i| rows.get(i))?;
-        let dir = self.row_folder(*row)?;
-        self.projects.specs.get(dir).map(|s| (dir, s))
-    }
-
     /// Sessions that worked on a change: they ran a command naming it, read or
     /// wrote its files, or ran on its branch (spec-kit names branches after
     /// features).
@@ -1509,196 +1576,6 @@ impl App {
                     })
             })
             .collect()
-    }
-
-    fn handle_specs_key(&mut self, code: KeyCode) {
-        let Some((dir, specs)) = self.selected_specs() else {
-            self.specs_focus = false;
-            return;
-        };
-        let n = specs.changes.len();
-        let change = self
-            .specs_state
-            .selected()
-            .and_then(|i| specs.changes.get(i))
-            .cloned();
-        let dir = dir.to_path_buf();
-        match code {
-            KeyCode::Tab | KeyCode::Esc => self.specs_focus = false,
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
-                let next = self
-                    .specs_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(n - 1));
-                self.specs_state.select(Some(next));
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.specs_state.select_previous(),
-            KeyCode::Enter => {
-                let Some(change) = change else {
-                    return;
-                };
-                let Some(next) = change.next.clone() else {
-                    return self.show_flash(
-                        format!(
-                            "No next step to run: {} drives it, or this project lacks its command",
-                            change.framework.title()
-                        ),
-                        false,
-                    );
-                };
-                // spec-kit's commands act on the feature of the current branch.
-                if change.framework == specs::Framework::SpecKit {
-                    let branch = git::status(&dir).and_then(|s| s.branch);
-                    if branch.as_deref() != Some(change.id.as_str()) {
-                        return self.show_flash(
-                            format!(
-                                "spec-kit works on the current branch's feature; switch to branch {} first",
-                                change.id
-                            ),
-                            true,
-                        );
-                    }
-                }
-                self.pending_command = Some((vec![next], dir));
-            }
-            KeyCode::Char('v') => {
-                let Some(change) = change else {
-                    return;
-                };
-                let mut lines = Vec::new();
-                for file in specs::files(&change) {
-                    lines.push(format!("── {} ──", paths::display(&file)));
-                    lines.extend(
-                        std::fs::read_to_string(&file)
-                            .unwrap_or_default()
-                            .lines()
-                            .map(str::to_owned),
-                    );
-                    lines.push(String::new());
-                }
-                self.popup = Some(Popup::Text {
-                    title: format!(" {} · {} ", change.framework.title(), change.id),
-                    lines,
-                    scroll: 0,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_projects_key(&mut self, code: KeyCode) {
-        if self.specs_focus {
-            return self.handle_specs_key(code);
-        }
-        if code == KeyCode::Tab {
-            if self
-                .selected_specs()
-                .is_some_and(|(_, s)| !s.changes.is_empty())
-            {
-                self.specs_focus = true;
-                if self.specs_state.selected().is_none() {
-                    self.specs_state.select(Some(0));
-                }
-            }
-            return;
-        }
-        let rows = self.project_rows();
-        let row = self
-            .projects_state
-            .selected()
-            .and_then(|i| rows.get(i))
-            .copied();
-        match code {
-            KeyCode::Char('b') => {
-                let (r, c) = match row {
-                    Some(ProjectRow::Repo(r)) => (r, 0),
-                    Some(ProjectRow::Checkout(r, c)) => (r, c),
-                    _ => return self.show_flash("Select a repository first", true),
-                };
-                self.open_branches(r, c);
-            }
-            KeyCode::Char('D') => {
-                let Some(ProjectRow::Checkout(r, c)) = row else {
-                    return;
-                };
-                let repo = &self.projects.repos[r];
-                let co = &repo.checkouts[c];
-                if co.main {
-                    return self.show_flash("That's the main checkout, not a worktree", true);
-                }
-                if self.open_in_folder(&co.path) > 0 {
-                    return self
-                        .show_flash("A session is open in this worktree; close it first", true);
-                }
-                let mut lines = vec![
-                    format!("Remove the worktree {}?", paths::display(&co.path)),
-                    String::new(),
-                    "This runs `git worktree remove` without --force: git refuses when".into(),
-                    "it has uncommitted changes or untracked files, or is locked.".into(),
-                ];
-                if co.status.as_ref().is_some_and(|s| s.ahead > 0) {
-                    lines.push(String::new());
-                    lines
-                        .push("Its branch has unpushed commits; the branch itself is kept.".into());
-                }
-                self.popup = Some(Popup::Confirm {
-                    title: "Remove worktree".into(),
-                    lines,
-                    yes: "remove".into(),
-                    action: Confirm::RemoveWorktree {
-                        main: repo.checkouts[0].path.clone(),
-                        path: co.path.clone(),
-                    },
-                });
-            }
-            KeyCode::Char('P') => {
-                let r = match row {
-                    Some(ProjectRow::Repo(r) | ProjectRow::Checkout(r, _)) => r,
-                    _ => return,
-                };
-                let repo = &self.projects.repos[r];
-                let missing = repo.checkouts.iter().filter(|c| c.prunable).count();
-                if missing == 0 {
-                    return self.show_flash("No missing worktrees in this repository", false);
-                }
-                self.popup = Some(Popup::Confirm {
-                    title: "Prune worktrees".into(),
-                    lines: vec![
-                        format!("Drop {missing} worktree record(s) whose directory is gone?"),
-                        String::new(),
-                        "This runs `git worktree prune`; no files are touched.".into(),
-                    ],
-                    yes: "prune".into(),
-                    action: Confirm::PruneWorktrees(repo.checkouts[0].path.clone()),
-                });
-            }
-            KeyCode::Esc => self.view = View::Sessions,
-            KeyCode::Down | KeyCode::Char('j') if !rows.is_empty() => {
-                let next = self
-                    .projects_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(rows.len() - 1));
-                self.projects_state.select(Some(next));
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.projects_state.select_previous(),
-            KeyCode::Enter => {
-                let Some(dir) = self
-                    .projects_state
-                    .selected()
-                    .and_then(|i| rows.get(i))
-                    .and_then(|&row| self.row_folder(row))
-                    .map(Path::to_path_buf)
-                else {
-                    return;
-                };
-                self.folder_filter = Some(dir);
-                self.filter.clear();
-                self.apply_filter(None);
-                self.view = View::Sessions;
-                self.focus = Focus::Sessions;
-            }
-            _ => {}
-        }
     }
 
     pub fn analysis(&self, session: &Session) -> Option<&Analysis> {
@@ -2132,7 +2009,7 @@ impl App {
         // Without a target, start at the end: the latest turns are the usual interest.
         view.jump_to = jump.or(view.jump_to).or(Some(usize::MAX));
         self.transcript = Some(view);
-        self.view = View::Transcript;
+        self.enter_subview(View::Transcript);
     }
 
     fn start_find_all(&mut self, query: String) {
@@ -2437,12 +2314,24 @@ impl App {
         }
     }
 
+    /// Opens a sub-view (conversation, inspector, logs); Esc there returns to
+    /// the view it was opened from.
+    pub(crate) fn enter_subview(&mut self, view: View) {
+        if !matches!(
+            self.view,
+            View::Transcript | View::Inspect | View::Logs | View::Help
+        ) {
+            self.return_view = self.view;
+        }
+        self.view = view;
+    }
+
     /// Shows a view, doing what it needs when it opens.
     pub fn switch_view(&mut self, view: View) {
         match view {
             View::Logs => self.open_logs(None),
-            View::Activity => {
-                self.view = View::Activity;
+            View::Now => {
+                self.view = View::Now;
                 self.start_analysis();
             }
             _ => self.view = view,
@@ -2452,17 +2341,23 @@ impl App {
     /// Where keys go right now, as named in `keys::BINDINGS`.
     pub fn context(&self) -> Context {
         match self.view {
-            View::Sessions if self.focus == Focus::Mcp => Context::Mcp,
             View::Sessions => Context::Sessions,
-            View::Activity if self.activity_focus == ActivityFocus::Background => {
-                Context::Background
-            }
-            View::Activity => Context::Activity,
-            View::Projects if self.specs_focus => Context::Specs,
-            View::Projects => Context::Projects,
+            View::Now if self.activity_focus == ActivityFocus::Background => Context::Background,
+            View::Now => Context::Now,
+            View::Projects => match &self.project_page {
+                None => Context::Projects,
+                Some(page) if !page.in_content => Context::ProjectMenu,
+                Some(page) => match page.section {
+                    Section::Sessions => Context::ProjectSessions,
+                    Section::Specs => Context::Specs,
+                    Section::Worktrees => Context::Worktrees,
+                    Section::Mcp => Context::Mcp,
+                    Section::Setup => Context::Setup,
+                    Section::Overview | Section::Security => Context::ProjectMenu,
+                },
+            },
+            View::Insights => Context::Insights,
             View::Logs => Context::Logs,
-            View::Usage => Context::Usage,
-            View::Ecosystem => Context::Ecosystem,
             View::Inspect => Context::Inspect,
             View::Transcript => Context::Conversation,
             View::Help => Context::Help,
@@ -2472,25 +2367,24 @@ impl App {
     /// `:` or Ctrl+P: every action that makes sense from here, found by name.
     fn open_palette(&mut self) {
         let mut available = vec![
+            Context::Now,
             Context::Sessions,
-            Context::Activity,
             Context::Projects,
-            Context::Logs,
-            Context::Usage,
-            Context::Ecosystem,
+            Context::Insights,
         ];
-        if self.project_servers().is_some_and(|s| !s.is_empty()) {
-            available.push(Context::Mcp);
-        }
         if !self.background.is_empty() {
             available.push(Context::Background);
         }
-        if self.view == View::Projects
-            && self
-                .selected_specs()
-                .is_some_and(|(_, s)| !s.changes.is_empty())
-        {
-            available.push(Context::Specs);
+        // A project's sections, while its page is open.
+        if self.project_page.is_some() {
+            available.extend([
+                Context::ProjectMenu,
+                Context::ProjectSessions,
+                Context::Specs,
+                Context::Worktrees,
+                Context::Mcp,
+                Context::Setup,
+            ]);
         }
         let commands = keys::commands(self.context(), &available);
         let matches = (0..commands.len()).collect();
@@ -2508,44 +2402,48 @@ impl App {
             return;
         };
         if binding.context != self.context() {
+            let section = match binding.context {
+                Context::ProjectSessions => Some(Section::Sessions),
+                Context::Specs => Some(Section::Specs),
+                Context::Worktrees => Some(Section::Worktrees),
+                Context::Mcp => Some(Section::Mcp),
+                Context::Setup => Some(Section::Setup),
+                _ => None,
+            };
             match binding.context {
-                Context::Sessions => {
-                    self.view = View::Sessions;
-                    self.focus = Focus::Sessions;
-                }
-                Context::Mcp => {
-                    self.view = View::Sessions;
-                    self.focus = Focus::Mcp;
-                    if self.mcp_state.selected().is_none() {
-                        self.mcp_state.select(Some(0));
-                    }
-                }
-                Context::Activity => {
-                    self.switch_view(View::Activity);
+                Context::Sessions => self.view = View::Sessions,
+                Context::Now => {
+                    self.switch_view(View::Now);
                     self.activity_focus = ActivityFocus::Open;
                 }
                 Context::Background => {
-                    self.switch_view(View::Activity);
+                    self.switch_view(View::Now);
                     self.activity_focus = ActivityFocus::Background;
                     if self.background_state.selected().is_none() {
                         self.background_state.select(Some(0));
                     }
                 }
                 Context::Projects => {
-                    self.switch_view(View::Projects);
-                    self.specs_focus = false;
+                    self.view = View::Projects;
+                    self.project_page = None;
                 }
-                Context::Specs => {
-                    self.switch_view(View::Projects);
-                    self.specs_focus = true;
-                    if self.specs_state.selected().is_none() {
-                        self.specs_state.select(Some(0));
+                Context::ProjectMenu => {
+                    self.view = View::Projects;
+                    if let Some(page) = &mut self.project_page {
+                        page.in_content = false;
                     }
                 }
+                Context::Insights => self.view = View::Insights,
                 Context::Logs => self.switch_view(View::Logs),
-                Context::Usage => self.switch_view(View::Usage),
-                Context::Ecosystem => self.switch_view(View::Ecosystem),
-                Context::Global | Context::Inspect | Context::Conversation | Context::Help => {}
+                _ if section.is_some() => {
+                    self.view = View::Projects;
+                    if let Some(page) = &mut self.project_page {
+                        page.section = section.unwrap_or(Section::Overview);
+                        page.in_content = true;
+                    }
+                    self.enter_section();
+                }
+                _ => {}
             }
         }
         self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -2610,6 +2508,12 @@ impl App {
 
     /// The selected session's project folder, or why there isn't a usable one.
     pub fn selected_project_dir(&self) -> Result<&Path, String> {
+        // On a project's page, that project.
+        if self.view == View::Projects
+            && let Some(page) = &self.project_page
+        {
+            return Ok(&page.dir);
+        }
         let session = self.selected_session().ok_or("No session selected")?;
         match &session.cwd {
             Some(cwd) if cwd.is_dir() => Ok(cwd),
@@ -2990,10 +2894,8 @@ impl App {
             if let Ok((model, git)) = result {
                 self.projects = model;
                 self.git = git;
-                let rows = self.project_rows().len();
-                if self.projects_state.selected().is_none_or(|i| i >= rows) {
-                    self.projects_state.select((rows > 0).then_some(0));
-                }
+                let cards = self.cards().len();
+                self.project_cursor = self.project_cursor.min(cards.saturating_sub(1));
             }
             self.git_job = None;
         }
@@ -3192,28 +3094,14 @@ impl App {
             _ => {}
         }
         match self.view {
-            View::Sessions => match self.focus {
-                Focus::Sessions => self.handle_sessions_key(key.code),
-                Focus::Mcp => self.handle_mcp_key(key.code),
-            },
-            View::Ecosystem => self.handle_eco_key(key.code),
-            View::Usage => match key.code {
-                KeyCode::Esc => self.view = View::Sessions,
-                KeyCode::Char('m') => self.monthly = !self.monthly,
-                KeyCode::Tab => {
-                    self.usage_tokens = !self.usage_tokens;
-                    if self.token_savers.is_none() {
-                        self.token_savers = Some(token_savers());
-                    }
-                }
-                _ => {}
-            },
+            View::Sessions => self.handle_sessions_key(key.code),
+            View::Insights => self.handle_insights_key(key.code),
             View::Transcript => self.handle_transcript_key(key.code),
             View::Projects => self.handle_projects_key(key.code),
-            View::Activity => self.handle_activity_key(key.code),
+            View::Now => self.handle_activity_key(key.code),
             View::Logs => self.handle_logs_key(key.code),
             View::Inspect => match key.code {
-                KeyCode::Esc => self.view = View::Sessions,
+                KeyCode::Esc => self.view = self.return_view,
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.inspect_scroll = self.inspect_scroll.saturating_add(1)
                 }
@@ -3288,7 +3176,7 @@ impl App {
             view.jump_to = None;
         }
         match code {
-            KeyCode::Esc => self.view = View::Sessions,
+            KeyCode::Esc => self.view = self.return_view,
             KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_add(1),
             KeyCode::Up | KeyCode::Char('k') => view.scroll = view.scroll.saturating_sub(1),
             KeyCode::PageDown | KeyCode::Char(' ') => view.scroll = view.scroll.saturating_add(20),
@@ -3334,7 +3222,7 @@ impl App {
                 if self.selected_session().is_some() {
                     self.inspect_scroll = 0;
                     self.inspect_sub = None;
-                    self.view = View::Inspect;
+                    self.enter_subview(View::Inspect);
                 }
             }
             KeyCode::Char('t') => {
@@ -3360,11 +3248,8 @@ impl App {
             KeyCode::Char('T') => self.open_trash(),
             KeyCode::Char('C') => self.popup = Some(Popup::Cleanup { preset: 0 }),
             KeyCode::Tab => {
-                if self.project_servers().is_some_and(|s| !s.is_empty()) {
-                    self.focus = Focus::Mcp;
-                    if self.mcp_state.selected().is_none() {
-                        self.mcp_state.select(Some(0));
-                    }
+                if let Some(dir) = self.selected_session().and_then(|s| s.cwd.clone()) {
+                    self.open_project_of(&dir);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => self.session_state.select_next(),
@@ -3378,7 +3263,7 @@ impl App {
     fn handle_mcp_key(&mut self, code: KeyCode) {
         let len = self.project_servers().map_or(0, Vec::len);
         match code {
-            KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Sessions,
+            KeyCode::Esc | KeyCode::Left => self.leave_section(),
             KeyCode::Enter | KeyCode::Char('l') => self.open_mcp_log(),
             KeyCode::Char('a') | KeyCode::Char('L') => {
                 let (Some(project), Some(i)) = (&self.project, self.mcp_state.selected()) else {
@@ -3422,11 +3307,11 @@ impl App {
         let len = self.eco_len(self.eco_tab);
         let state = &mut self.eco_states[tab];
         match code {
-            KeyCode::Esc => self.view = View::Sessions,
-            KeyCode::Right | KeyCode::Tab => {
+            KeyCode::Esc | KeyCode::Left => self.leave_section(),
+            KeyCode::Tab => {
                 self.eco_tab = EcoTab::ALL[(tab + 1) % EcoTab::ALL.len()];
             }
-            KeyCode::Left | KeyCode::BackTab => {
+            KeyCode::BackTab => {
                 self.eco_tab = EcoTab::ALL[(tab + EcoTab::ALL.len() - 1) % EcoTab::ALL.len()];
             }
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
@@ -4229,8 +4114,7 @@ mod tests {
                 }],
             },
         );
-        app.projects_state.select(Some(0));
-        app.specs_focus = true;
+        app.specs_state.select(Some(0));
         let hit = Hit {
             session_id: "x".into(),
             title: "t".into(),
@@ -4239,20 +4123,39 @@ mod tests {
             at: None,
         };
         for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
-            for view in [
+            // Every screen: the views, each project section and each Insights section.
+            let mut screens: Vec<(View, Option<Section>, InsightsSection)> = [
+                View::Now,
                 View::Sessions,
                 View::Projects,
-                View::Activity,
                 View::Logs,
-                View::Ecosystem,
-                View::Usage,
                 View::Transcript,
                 View::Help,
                 View::Inspect,
-            ] {
-                for tab in EcoTab::ALL {
+            ]
+            .into_iter()
+            .map(|v| (v, None, InsightsSection::Usage))
+            .collect();
+            screens.extend(Section::ALL.map(|s| (View::Projects, Some(s), InsightsSection::Usage)));
+            screens.extend(InsightsSection::ALL.map(|i| (View::Insights, None, i)));
+            for (k, (view, section, insights)) in screens.into_iter().enumerate() {
+                let tabs: &[EcoTab] = if section == Some(Section::Setup) {
+                    &EcoTab::ALL
+                } else {
+                    &EcoTab::ALL[..1]
+                };
+                for &tab in tabs {
                     for popup in 0..6 {
                         app.view = view;
+                        app.insights = insights;
+                        app.project_page = section.map(|section| ProjectPage {
+                            dir: PathBuf::from("/r"),
+                            section,
+                            in_content: popup % 2 == 1,
+                            sessions_state: Default::default(),
+                            worktrees_state: Default::default(),
+                            scroll: u16::MAX,
+                        });
                         app.eco_tab = tab;
                         app.monthly = popup % 2 == 0;
                         app.popup = match popup {
@@ -4273,11 +4176,11 @@ mod tests {
                                 hits: vec![hit.clone()],
                                 state: ListState::default(),
                             }),
-                            5 if view == View::Usage => Some(Popup::Summary {
+                            5 if k % 6 == 0 => Some(Popup::Summary {
                                 markdown: "# Title\n\n- a line\n".repeat(20),
                                 scroll: u16::MAX,
                             }),
-                            5 if view == View::Projects => Some(Popup::Branches {
+                            5 if k % 6 == 1 => Some(Popup::Branches {
                                 repo: PathBuf::from("/r"),
                                 repo_name: "r".into(),
                                 listing: Listing {
@@ -4301,7 +4204,7 @@ mod tests {
                                 matches: vec![0],
                                 state: ListState::default().with_selected(Some(0)),
                             }),
-                            5 if view == View::Activity || view == View::Inspect => {
+                            5 if k % 6 == 2 || k % 6 == 3 => {
                                 let review = Review {
                                     session_id: "s".into(),
                                     repo: PathBuf::from("/r"),
@@ -4324,10 +4227,10 @@ mod tests {
                                 Some(Popup::Findings {
                                     review,
                                     state: ListState::default().with_selected(Some(0)),
-                                    detail: (view == View::Inspect).then_some(u16::MAX),
+                                    detail: (k % 6 == 3).then_some(u16::MAX),
                                 })
                             }
-                            5 if view == View::Ecosystem => Some(Popup::ReviewSetup {
+                            5 if k % 6 == 4 => Some(Popup::ReviewSetup {
                                 task: ReviewTask {
                                     repo: PathBuf::from("/r"),
                                     repo_name: "r".into(),
@@ -4341,7 +4244,7 @@ mod tests {
                                 last: None,
                                 choice: 2,
                             }),
-                            5 if view == View::Help => {
+                            5 if k % 6 == 5 => {
                                 let commands = keys::commands(Context::Sessions, &[Context::Logs]);
                                 let matches = (0..commands.len()).collect();
                                 Some(Popup::Palette {
@@ -4422,12 +4325,12 @@ mod tests {
     fn palette_runs_commands_where_their_key_works() {
         let mut app = App::new(1_000_000, false);
         app.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
-        for c in "usage view".chars() {
+        for c in "insights usage".chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.popup.is_none());
-        assert!(app.view == View::Usage);
+        assert!(app.view == View::Insights);
 
         // A command of another view goes there first.
         app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
@@ -4437,12 +4340,13 @@ mod tests {
         app.view = View::Sessions;
         let before = app.monthly;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.view == View::Usage);
+        assert!(app.view == View::Insights);
         assert_ne!(app.monthly, before);
 
         // Number keys follow the tab order.
         app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
         assert!(app.view == View::Projects);
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         // Esc goes back but never quits.
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
