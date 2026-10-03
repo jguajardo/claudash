@@ -408,10 +408,17 @@ pub const BINDINGS: &[Binding] = &[
     key(Mcp, "↑/↓", "move", None, None),
     key(
         Mcp,
-        "Enter  l",
+        "Enter",
         "the server's latest log (why it failed)",
         Some("server log"),
         ENTER,
+    ),
+    key(
+        Mcp,
+        "l",
+        "open the Logs view on it: follow new lines, filter, errors only",
+        Some("logs"),
+        ch('l'),
     ),
     key(
         Mcp,

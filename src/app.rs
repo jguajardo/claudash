@@ -3264,7 +3264,21 @@ impl App {
         let len = self.project_servers().map_or(0, Vec::len);
         match code {
             KeyCode::Esc | KeyCode::Left => self.leave_section(),
-            KeyCode::Enter | KeyCode::Char('l') => self.open_mcp_log(),
+            KeyCode::Enter => self.open_mcp_log(),
+            // The full Logs view on this server: follows new lines, filters.
+            KeyCode::Char('l') => {
+                let (Some(project), Some(i)) = (&self.project, self.mcp_state.selected()) else {
+                    return;
+                };
+                let Some(dir) = self
+                    .project_servers()
+                    .and_then(|s| s.get(i))
+                    .and_then(|s| mcp::log_dir(&project.cwd, &s.full_name))
+                else {
+                    return;
+                };
+                self.open_logs(Some(LogKind::Mcp(dir)));
+            }
             KeyCode::Char('a') | KeyCode::Char('L') => {
                 let (Some(project), Some(i)) = (&self.project, self.mcp_state.selected()) else {
                     return;

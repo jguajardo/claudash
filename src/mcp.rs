@@ -113,7 +113,7 @@ const LOG_LINES: usize = 200;
 /// documented): `<cache>/claude-cli-nodejs/<project>/mcp-logs-<server>/`, one
 /// JSONL file per connection, where `<project>` and `<server>` have every
 /// non-alphanumeric character replaced by `-`.
-fn log_dir(cwd: &Path, full_name: &str) -> Option<PathBuf> {
+pub fn log_dir(cwd: &Path, full_name: &str) -> Option<PathBuf> {
     let mut root = dirs::cache_dir()?.join("claude-cli-nodejs");
     if cfg!(windows) {
         root.push("Cache");

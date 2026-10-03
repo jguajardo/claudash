@@ -39,9 +39,16 @@ pub const VIEW_NAMES: [&str; 4] = ["now", "sessions", "projects", "insights"];
 
 /// Index into [`crate::app::VIEW_KEYS`] for a view name.
 pub fn view_index(name: &str) -> Result<usize, String> {
+    // Views from before 0.8 open where they went.
+    let name = match name.trim().to_lowercase().as_str() {
+        "activity" | "logs" => "now".to_string(),
+        "usage" => "insights".to_string(),
+        "ecosystem" => "projects".to_string(),
+        other => other.to_string(),
+    };
     VIEW_NAMES
         .iter()
-        .position(|v| v.eq_ignore_ascii_case(name.trim()))
+        .position(|v| v.eq_ignore_ascii_case(&name))
         .ok_or_else(|| {
             format!(
                 "unknown view '{name}' (use one of: {})",
@@ -127,6 +134,10 @@ mod tests {
             Some(Limit::Tokens(500_000))
         );
         assert!(parse("view = \"nope\"").is_err());
+        // Names from before 0.8 still work.
+        assert_eq!(view_index("activity"), Ok(0));
+        assert_eq!(view_index("Usage"), Ok(3));
+        assert_eq!(view_index("ecosystem"), Ok(2));
         assert!(parse("colour = \"red\"").is_err());
     }
 }
