@@ -46,6 +46,25 @@ impl App {
                 });
             }
         }
+        let stopped = self.stopped();
+        if !stopped.is_empty() {
+            let now = chrono::Utc::now().timestamp();
+            let closed: Vec<_> = stopped.iter().filter(|s| !s.open).collect();
+            alerts.insert(
+                0,
+                Alert::LimitStopped {
+                    closed: closed.len(),
+                    ready: closed.iter().filter(|s| s.reset(now)).count(),
+                    open: stopped.len() - closed.len(),
+                    next_reset: closed
+                        .iter()
+                        .filter(|s| !s.reset(now))
+                        .map(|s| s.stop.resets_at)
+                        .min(),
+                    queued: self.continue_at_reset || self.auto_continue,
+                },
+            );
+        }
         alerts
     }
 
@@ -59,6 +78,8 @@ impl App {
             })
         };
         match alert {
+            Alert::LimitStopped { closed, .. } if *closed > 0 => Some(Target::ContinueStopped),
+            Alert::LimitStopped { .. } => None,
             Alert::Mcp { dir, full_name, .. } => {
                 project(dir, Section::Mcp, Some(full_name.clone()))
             }
@@ -93,6 +114,46 @@ impl App {
                     self.inspect_sub = None;
                     self.enter_subview(View::Inspect);
                 }
+            }
+            Target::ContinueStopped => {
+                let now = chrono::Utc::now().timestamp();
+                let stopped = self.stopped();
+                let ready: Vec<String> = stopped
+                    .iter()
+                    .filter(|s| !s.open && s.reset(now))
+                    .map(|s| format!("  • {} · {}", s.session.title, s.session.project_path))
+                    .collect();
+                if ready.is_empty() {
+                    let next = stopped
+                        .iter()
+                        .filter(|s| !s.open)
+                        .map(|s| s.stop.resets_at)
+                        .min();
+                    self.continue_at_reset = !self.continue_at_reset;
+                    let msg = match (self.continue_at_reset, next) {
+                        (true, Some(at)) => format!(
+                            "They'll continue in the background at {} if claudash is still open",
+                            crate::snapshots::when(at)
+                        ),
+                        _ => "They won't continue on their own; Enter again to change it".into(),
+                    };
+                    return self.show_flash(msg, false);
+                }
+                let mut lines = vec![
+                    "Continue these sessions in the background? Each one runs".into(),
+                    "`claude --bg --resume <id>` in its folder with the prompt:".into(),
+                    format!("\"{}\"", crate::stopped::PROMPT),
+                    String::new(),
+                ];
+                lines.extend(ready);
+                lines.push(String::new());
+                lines.push("Follow them under Background in Now (l: logs, Enter: attach).".into());
+                self.popup = Some(Popup::Confirm {
+                    title: "Continue after the limit".into(),
+                    lines,
+                    yes: "continue them".into(),
+                    action: Confirm::ContinueStopped,
+                });
             }
             Target::InsightsSecurity => {
                 self.view = View::Insights;

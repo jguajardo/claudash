@@ -347,6 +347,8 @@ pub enum Confirm {
         server: String,
         cwd: PathBuf,
     },
+    /// Continue the sessions a plan limit stopped, now that it has reset.
+    ContinueStopped,
     /// Put a snapshot's files back in a work tree.
     RestoreSnapshot {
         root: PathBuf,
@@ -466,6 +468,9 @@ pub enum Target {
     Session(String),
     /// Insights › Security (credentials in the prompt history).
     InsightsSecurity,
+    /// Continue the sessions a plan limit stopped, or have them continue at
+    /// the reset.
+    ContinueStopped,
     /// A section of a project's page, with something in it selected: a
     /// checkout path, a spec change ID or an MCP server's full name.
     Project {
@@ -485,6 +490,19 @@ pub enum Alert {
         name: String,
         full_name: String,
         failed: bool,
+    },
+    /// Sessions a plan limit stopped.
+    LimitStopped {
+        /// Stopped and not open in Claude Code.
+        closed: usize,
+        /// Of those, how many can be continued now.
+        ready: usize,
+        /// Open in Claude Code: continued from their own terminal.
+        open: usize,
+        /// The next reset of a closed one that hasn't reset yet.
+        next_reset: Option<i64>,
+        /// They'll be continued at the reset.
+        queued: bool,
     },
 }
 
@@ -808,6 +826,14 @@ pub struct App {
     pub insights_scroll: u16,
     /// Selected alert in Now.
     pub alert_cursor: usize,
+    /// `auto_continue = true`: continue stopped sessions at the reset.
+    pub auto_continue: bool,
+    /// Enter on the stopped-sessions alert before the reset: continue them
+    /// when it comes.
+    pub continue_at_reset: bool,
+    /// Sessions already continued, so they aren't continued twice while
+    /// their transcripts catch up.
+    continued: HashSet<String>,
     /// Snapshots of the open project's checkouts, newest first.
     pub snapshots: Vec<(PathBuf, crate::snapshots::Snapshot)>,
     /// Which project they were read for, and when.
@@ -922,6 +948,9 @@ impl App {
             insights_scroll: 0,
             return_view: View::Sessions,
             alert_cursor: 0,
+            auto_continue: false,
+            continue_at_reset: false,
+            continued: HashSet::new(),
             snapshots: Vec::new(),
             snapshots_at: None,
             no_color: false,
@@ -1031,12 +1060,58 @@ impl App {
         self.poll_jobs();
         self.maybe_start_mcp_check();
         self.maybe_read_snapshots();
+        if self.ticks.is_multiple_of(20) {
+            self.maybe_continue_stopped();
+        }
         if self.project_page.as_ref().is_some_and(|p| {
             self.view == View::Projects && matches!(p.section, Section::Setup | Section::Security)
         }) {
             self.ensure_ecosystem();
             self.ensure_plugin_details();
         }
+    }
+
+    /// Sessions a plan limit stopped that haven't been continued yet.
+    pub fn stopped(&self) -> Vec<crate::stopped::Stopped<'_>> {
+        let now = chrono::Utc::now().timestamp();
+        crate::stopped::stopped(&self.sessions, &self.live, now)
+            .into_iter()
+            .filter(|s| !self.continued.contains(&s.session.id))
+            .collect()
+    }
+
+    /// Continues, in the background, every stopped session whose limit has
+    /// reset and that isn't open.
+    fn continue_stopped(&mut self) {
+        let now = chrono::Utc::now().timestamp();
+        let ready = crate::stopped::ready(&self.stopped(), now);
+        if ready.is_empty() {
+            return self.show_flash("No stopped session can be continued yet", true);
+        }
+        if self.background_job.is_some() {
+            return self.show_flash("Another background command is running", true);
+        }
+        self.continued
+            .extend(ready.iter().map(|(id, _, _)| id.clone()));
+        self.background_job = Some((
+            "continue".into(),
+            Job::spawn(move || crate::stopped::continue_all(&ready)),
+        ));
+    }
+
+    /// At the reset, continues stopped sessions when you asked for it (Enter
+    /// on the alert) or `auto_continue` is on. Waits half a minute past the
+    /// reset so the new window is open.
+    fn maybe_continue_stopped(&mut self) {
+        if !(self.continue_at_reset || self.auto_continue) || self.background_job.is_some() {
+            return;
+        }
+        let later = chrono::Utc::now().timestamp() - 30;
+        if crate::stopped::ready(&self.stopped(), later).is_empty() {
+            return;
+        }
+        self.continue_at_reset = false;
+        self.continue_stopped();
     }
 
     /// Whether `snapshots` were read for the project at `dir`.
@@ -1329,6 +1404,7 @@ impl App {
                 }
                 self.git_at = None;
             }
+            Confirm::ContinueStopped => self.continue_stopped(),
             Confirm::RestoreSnapshot { root, sha } => {
                 match crate::snapshots::restore(&root, &sha) {
                     Ok(()) => self.show_flash(
@@ -3068,6 +3144,11 @@ impl App {
             let what = what.clone();
             self.background_job = None;
             match result.unwrap_or_else(|()| Err("No result".into())) {
+                Ok(msg) if what == "continue" => {
+                    self.alert("Claude plan: limit reset", &msg);
+                    self.show_flash(format!("{msg}; they're under Background in Now"), false)
+                }
+                Err(e) if what == "continue" => self.show_flash(e, true),
                 Ok(_) => self.show_flash(format!("claude {what}: done"), false),
                 Err(e) => self.show_flash(format!("claude {what}: {e}"), true),
             }
@@ -4737,6 +4818,59 @@ mod tests {
         assert_eq!(counts.plugin("superpowers"), 4);
         assert_eq!(counts.plugin("context7"), 2);
         assert_eq!(counts.plugin("vercel"), 0);
+    }
+
+    #[test]
+    fn offers_to_continue_sessions_a_limit_stopped() {
+        let mut app = App::new(1_000_000, false);
+        let now = chrono::Utc::now().timestamp();
+        let stopped = |id: &str, resets_at: i64| Session {
+            id: id.into(),
+            path: PathBuf::from(format!("/t/{id}.jsonl")),
+            title: format!("title {id}"),
+            project_path: "~/repo".into(),
+            cwd: Some(std::env::temp_dir()),
+            git_branch: None,
+            modified: std::time::SystemTime::now(),
+            size: 0,
+            tokens: crate::sessions::SessionTokens {
+                limit_stop: Some(crate::sessions::LimitStop {
+                    at: now - 600,
+                    resets_at,
+                    window: "five_hour".into(),
+                }),
+                ..Default::default()
+            },
+        };
+        // Before the reset: Enter has them continue when it comes.
+        app.sessions = vec![stopped("a", now + 3600)];
+        let alerts = app.alerts();
+        assert!(matches!(
+            alerts[0],
+            Alert::LimitStopped {
+                closed: 1,
+                ready: 0,
+                open: 0,
+                next_reset: Some(_),
+                queued: false
+            }
+        ));
+        app.go_to(app.alert_target(&alerts[0]).unwrap());
+        assert!(app.continue_at_reset && app.popup.is_none());
+        // After it: Enter asks before continuing them.
+        app.continue_at_reset = false;
+        app.sessions = vec![stopped("a", now - 60)];
+        app.go_to(Target::ContinueStopped);
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Confirm {
+                action: Confirm::ContinueStopped,
+                ..
+            })
+        ));
+        // Continued sessions drop out of the alert.
+        app.continued.insert("a".into());
+        assert!(app.alerts().is_empty());
     }
 
     #[test]

@@ -358,6 +358,104 @@ pub fn wrapped(month: bool, redact: bool, plain: bool) -> io::Result<()> {
 
 /// `claudash quota`: each session's, project's and model's part of the current
 /// 5-hour and 7-day plan windows.
+/// `claudash continue`: lists sessions a plan limit stopped and continues
+/// those whose limit has reset in the background; with `wait`, waits for the
+/// next reset and continues those too.
+pub fn continue_stopped(wait: bool, dry_run: bool) -> io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    let mut continued: std::collections::HashSet<String> = Default::default();
+    let mut out = io::stdout();
+    loop {
+        let all = sessions::load_sessions(&dir, &[])?;
+        let live = crate::claude_cli::live_sessions(false).unwrap_or_default();
+        let now = chrono::Utc::now().timestamp();
+        let list: Vec<_> = crate::stopped::stopped(&all, &live, now)
+            .into_iter()
+            .filter(|s| !continued.contains(&s.session.id))
+            .collect();
+        if list.is_empty() {
+            if continued.is_empty() {
+                writeln!(out, "No session is stopped at a plan limit.")?;
+            }
+            return Ok(());
+        }
+        for s in &list {
+            let state = if s.open {
+                "open: continue it in its terminal".to_string()
+            } else if s.reset(now) {
+                "limit has reset".to_string()
+            } else {
+                format!("resets {}", clock(s.stop.resets_at))
+            };
+            writeln!(
+                out,
+                "  {} · {} · stopped at the {} limit at {} · {state}",
+                s.session.title,
+                s.session.project_path,
+                s.stop.window_label(),
+                clock(s.stop.at),
+            )?;
+        }
+        let ready = crate::stopped::ready(&list, now);
+        let next = list
+            .iter()
+            .filter(|s| !s.open && !s.reset(now))
+            .map(|s| s.stop.resets_at)
+            .min();
+        if dry_run {
+            writeln!(
+                out,
+                "\n{} can be continued now.",
+                match ready.len() {
+                    1 => "1 session".to_string(),
+                    n => format!("{n} sessions"),
+                }
+            )?;
+            return Ok(());
+        }
+        let any_ready = !ready.is_empty();
+        if any_ready {
+            match crate::stopped::continue_all(&ready) {
+                Ok(msg) => writeln!(out, "\n{msg}: `claude agents` lists them.")?,
+                Err(e) => writeln!(out, "\n{e}")?,
+            }
+            continued.extend(ready.into_iter().map(|(id, _, _)| id));
+        }
+        let Some(next) = next.filter(|_| wait) else {
+            if !any_ready && next.is_some() {
+                writeln!(
+                    out,
+                    "\nNothing to continue yet; `claudash continue --wait` waits for the reset."
+                )?;
+            }
+            return Ok(());
+        };
+        writeln!(
+            out,
+            "\nWaiting for the reset at {} (Ctrl+C to stop)…",
+            clock(next)
+        )?;
+        out.flush()?;
+        // A little after the reset, so the new window is open.
+        let wait_for = (next - chrono::Utc::now().timestamp()).max(0) + 30;
+        std::thread::sleep(std::time::Duration::from_secs(wait_for as u64));
+    }
+}
+
+/// "14:20" (or "Oct 06 14:20" when it isn't today) for epoch seconds.
+fn clock(at: i64) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp(at, 0) else {
+        return String::new();
+    };
+    let t = t.with_timezone(&chrono::Local);
+    if t.date_naive() == chrono::Local::now().date_naive() {
+        t.format("%H:%M").to_string()
+    } else {
+        t.format("%b %d %H:%M").to_string()
+    }
+}
+
 pub fn quota(json: bool) -> io::Result<()> {
     let dir = paths::projects_dir()
         .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;

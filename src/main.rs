@@ -27,6 +27,7 @@ mod setup;
 mod snapshots;
 mod specs;
 mod statusline;
+mod stopped;
 mod summary;
 mod transcript;
 mod ui;
@@ -51,6 +52,9 @@ Usage:
                                          (--plain without colors)
   claudash quota [--json]                where the current 5-hour and 7-day windows went,
                                          by session, project and model
+  claudash continue [--wait] [--dry-run] continue sessions a plan limit stopped, in
+                                         the background, once it has reset; --wait
+                                         waits for the reset first
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
                                          without -o)
   claudash setup [--apply | --remove]    connect claudash to Claude Code (status
@@ -93,6 +97,10 @@ enum Cli {
     Usage(report::UsageArgs),
     Quota {
         json: bool,
+    },
+    Continue {
+        wait: bool,
+        dry_run: bool,
     },
     Wrapped {
         month: bool,
@@ -210,6 +218,21 @@ fn parse_args(
                     _ => Err(format!("usage: claudash quota [--json]\n\n{HELP}")),
                 };
             }
+            "continue" => {
+                let (mut wait, mut dry_run) = (false, false);
+                for arg in args {
+                    match arg.as_str() {
+                        "--wait" => wait = true,
+                        "--dry-run" => dry_run = true,
+                        _ => {
+                            return Err(format!(
+                                "usage: claudash continue [--wait] [--dry-run]\n\n{HELP}"
+                            ));
+                        }
+                    }
+                }
+                return Ok(Cli::Continue { wait, dry_run });
+            }
             "usage" => {
                 let rest: Vec<String> = args.collect();
                 return report::UsageArgs::parse(&rest)
@@ -313,6 +336,9 @@ fn main() -> std::io::Result<()> {
         }
         Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
         Ok(Cli::Quota { json }) => return exit_on_error("quota", report::quota(json)),
+        Ok(Cli::Continue { wait, dry_run }) => {
+            return exit_on_error("continue", report::continue_stopped(wait, dry_run));
+        }
         Ok(Cli::Wrapped {
             month,
             redact,
@@ -348,6 +374,9 @@ fn main() -> std::io::Result<()> {
     // https://no-color.org: any non-empty NO_COLOR turns colors off.
     app.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
         || settings.as_ref().is_ok_and(|s| s.colors == Some(false));
+    app.auto_continue = settings
+        .as_ref()
+        .is_ok_and(|s| s.auto_continue == Some(true));
     app.switch_view(app::VIEW_KEYS[view]);
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -471,6 +500,7 @@ mod tests {
             notify: Some(false),
             colors: None,
             snapshots: None,
+            auto_continue: None,
         };
         let parse = |list: &[&str], env: Option<&str>| {
             parse_args(args(list), env.map(str::to_owned), &settings)

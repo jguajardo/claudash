@@ -12,7 +12,7 @@ The screen claudash opens on: what needs a decision from you.
 
 - **Open sessions**, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes.
 - **Background sessions** (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)), finished ones included. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking.
-- **Needs a look**: alerts across projects. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so. `Tab` moves into the alerts and `Enter` takes you to the place to act on one: the session's audit in the inspector, or the project's MCP servers, worktrees, specs or sessions, with that item selected.
+- **Needs a look**: alerts across projects. Sessions a plan limit stopped come first: once the limit resets, `Enter` continues them in the background (`claude --bg --resume <id>` in each one's folder, after asking), and before it, `Enter` has them continue at the reset if claudash is still open (`auto_continue = true` in the settings file always does). Sessions that are still open are left to you, in their own terminal. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so. `Tab` moves into the alerts and `Enter` takes you to the place to act on one: the session's audit in the inspector, or the project's MCP servers, worktrees, specs or sessions, with that item selected.
 - **Plan**: 5-hour and 7-day limits with their reset times and how long until then, and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%, and once a window you used 90% or more of resets, so you know you can pick up again.
 - **Live feed** of every tool call from sessions active in the last hour, failures in red, refreshed every 2 seconds.
 
@@ -129,7 +129,11 @@ claudash status            # ▲ 1 needs you · 2 working · 1 waiting · 5h 64%
 claudash status --json     # the same for scripts
 claudash summary           # today's summary as Markdown (-o FILE to save it)
 claudash export 6b1f3c2e   # a conversation as Markdown, by session ID or its first characters
+claudash continue          # continue the sessions a plan limit stopped, once it has reset
+claudash continue --wait   # wait for the reset, then continue them (leave it running overnight)
 ```
+
+`claudash continue --dry-run` only lists them. Background sessions only start in folders Claude Code trusts; if one never ran `claude` interactively, run it there once and accept the prompt.
 
 `claudash status` takes about 0.2 seconds, so a status bar can poll it. For tmux:
 
@@ -193,6 +197,7 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 | Context window when the status line hasn't reported one | `context_limit = "200k"` | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Desktop notifications and bell | `notify = false` | `--no-notify` | | on |
 | Colors | `colors = false` | | [`NO_COLOR`](https://no-color.org) | on |
+| Continue sessions a plan limit stopped as soon as it resets, while claudash is open | `auto_continue = true` | | | off |
 | Snapshots of project files before each prompt and after each reply (see [Projects](#3--projects)) | `snapshots = true` | | | off |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 

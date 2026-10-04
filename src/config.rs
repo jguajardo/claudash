@@ -20,6 +20,9 @@ pub struct Config {
     /// Snapshot each git project's work tree before every prompt and after
     /// every reply, to undo what `/rewind` can't (see `snapshots`).
     pub snapshots: Option<bool>,
+    /// Continue sessions a plan limit stopped, in the background, as soon as
+    /// it resets (while claudash is open).
+    pub auto_continue: Option<bool>,
 }
 
 /// `context_limit = 1000000` or `context_limit = "1M"`.
@@ -84,6 +87,10 @@ pub const TEMPLATE: &str = "\
 # each prompt and after each reply, commit the project's files to a separate
 # repository in claudash's data directory. Needs `claudash setup --apply`.
 # snapshots = false
+
+# Continue sessions a plan limit stopped, in the background, as soon as the
+# limit resets, while claudash is open. Off: Enter on the alert in Now does it.
+# auto_continue = false
 ";
 
 pub fn path() -> Option<PathBuf> {

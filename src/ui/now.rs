@@ -11,7 +11,7 @@ use ratatui::{
 
 use super::{
     ACCENT, GAUGE_TRACK, HIGHLIGHT, card, dim, draw_activity, forecast_span, level_color,
-    plan_windows, problem_line, reset_time,
+    plan_windows, plural, problem_line, reset_time,
 };
 use crate::{
     app::{ActivityFocus, Alert, App},
@@ -102,6 +102,51 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 fn alert_line(alert: &Alert) -> Line<'static> {
     match alert {
         Alert::Problem(p) => problem_line(p),
+        Alert::LimitStopped {
+            closed,
+            ready,
+            open,
+            next_reset,
+            queued,
+        } => {
+            let total = closed + open;
+            let mut spans = vec![
+                Span::styled("⏸ ", Style::new().fg(Color::Yellow)),
+                Span::styled(
+                    format!(
+                        "{} stopped at a plan limit",
+                        plural(total as u64, "session")
+                    ),
+                    Style::new().fg(Color::Yellow),
+                ),
+            ];
+            let mut what = Vec::new();
+            if *ready > 0 {
+                what.push(format!("{ready} can continue now"));
+            }
+            if let Some(at) = next_reset {
+                let left = ((at - chrono::Utc::now().timestamp()).max(0) + 59) / 60;
+                let when = format!(
+                    "resets {} (in {})",
+                    crate::snapshots::when(*at),
+                    if left >= 60 {
+                        format!("{}h {}m", left / 60, left % 60)
+                    } else {
+                        format!("{left}m")
+                    }
+                );
+                what.push(if *queued && *ready == 0 {
+                    format!("{when}, they'll continue then")
+                } else {
+                    when
+                });
+            }
+            if *open > 0 {
+                what.push(format!("{open} open: continue in its terminal"));
+            }
+            spans.push(Span::styled(format!(" · {}", what.join(" · ")), dim()));
+            Line::from(spans)
+        }
         Alert::Mcp {
             dir, name, failed, ..
         } => {

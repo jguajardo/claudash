@@ -35,7 +35,7 @@ claudash                 # 1 Now · 2 Sessions · 3 Projects · 4 Insights · : 
 You run Claude Code in three terminals and a background session. One has been waiting on a permission prompt for twenty minutes. You hit your 5-hour limit and don't know which session ate it. Last week you pasted an API key into a prompt, and it's still sitting in a plain-text transcript. claudash puts all of that on one screen:
 
 - **What needs you, and what it wants.** Every open session, interactive or background, the ones waiting on you first, with the exact command or edit each one is asking to run. Desktop notification when one starts waiting.
-- **Where the limit went.** Each session's, project's and model's part of the current 5-hour and 7-day windows, and what all of it would cost at API prices, by day, project, model and session.
+- **Where the limit went.** Each session's, project's and model's part of the current 5-hour and 7-day windows, and what all of it would cost at API prices, by day, project, model and session. Sessions the limit stopped continue on their own when it resets.
 - **What Claude left on disk.** API keys and tokens in your transcripts and prompt history (shown masked), force pushes, `curl | sh`, `sudo` and other risky commands, and permission rules broader than you think.
 - **Each project on one page.** Its sessions, MCP servers (with their logs and sign-in), spec-driven changes (OpenSpec, spec-kit, Kiro, Task Master) and their next step, worktrees, snapshots that undo what `/rewind` can't (Bash commands, subagents), an AI review of any branch, skills and plugins with what they cost you per session.
 
@@ -63,6 +63,7 @@ claudash status            # ▲ 1 needs you · 2 working · 5h 64% → limit 13
 claudash usage             # tokens and API-equivalent dollars by day; monthly, projects, models, sessions; --json
 claudash quota             # where the current 5-hour and 7-day windows went; --json
 claudash wrapped --redact  # your week on a card; month; --plain
+claudash continue --wait   # continue the sessions a plan limit stopped when it resets
 claudash summary           # today as Markdown
 claudash export <ID>       # a conversation as Markdown, credentials masked
 ```
@@ -140,6 +141,7 @@ These actions change things, and only run when you ask:
 - **Remove or prune worktrees** (`D`, `P` in a project's Worktrees): runs `git worktree remove` (without `--force`) or `git worktree prune`.
 - **Sign in to or out of an MCP server** (`a`, `L` in a project's MCP servers): runs `claude mcp login` or `claude mcp logout`.
 - **Review a branch** (`b` in Projects): runs `git fetch`, adds a detached worktree under `~/.cache/claudash/reviews/` (or updates it for a second review), and runs Claude Code there: `claude -p` limited to reading files and `git log`/`diff`/`show` for a static review, or an interactive `claude` for the other modes. Reviews are saved in claudash's data directory.
+- **Continue sessions a plan limit stopped** (`Enter` on the alert in Now, `claudash continue`, or `auto_continue = true`): runs `claude --bg --resume <id>` in each session's folder with the prompt "The usage limit has reset. Continue where you left off." Never for a session that's open.
 - **Snapshots** (off unless `snapshots = true` in the settings file): before each prompt and after each reply, `claudash hook` commits the project's files to a separate git repository under `snapshots/` in claudash's data directory, using the project's `.gitignore`; the project's own `.git` is never touched. `U` in a project's Snapshots puts a snapshot's files back with `git checkout`, after asking and after snapshotting the current state.
 - **Send a prompt** (`p`): runs `claude -p --resume <id>`, which adds the exchange to that session. Headless runs can't ask for permission, so tools that need approval are denied and reported in the reply.
 

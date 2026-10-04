@@ -58,6 +58,30 @@ pub struct SessionTokens {
     /// Every response with its time (epoch seconds), subagents included,
     /// oldest first: what a plan window's usage is attributed from.
     pub timeline: Vec<(i64, Usage)>,
+    /// The session's last reply was a plan-limit error: it stopped there.
+    pub limit_stop: Option<LimitStop>,
+}
+
+/// Where a session stopped because it hit a plan limit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitStop {
+    /// When it stopped (epoch seconds).
+    pub at: i64,
+    /// When the limit resets (epoch seconds), as the API reported it.
+    pub resets_at: i64,
+    /// "five_hour", "seven_day" or another window name.
+    pub window: String,
+}
+
+impl LimitStop {
+    /// "5-hour", "7-day" or the API's name for the window.
+    pub fn window_label(&self) -> String {
+        match self.window.as_str() {
+            "five_hour" => "5-hour".into(),
+            "seven_day" | "seven_day_opus" | "seven_day_sonnet" => "7-day".into(),
+            other => other.replace('_', " "),
+        }
+    }
 }
 
 /// Usage per local calendar day, then per model.
@@ -118,6 +142,18 @@ struct Record {
     #[serde(rename = "totalCostUSD")]
     total_cost_usd: Option<f64>,
     timestamp: Option<String>,
+    /// "rate_limit" on the reply Claude Code writes when a plan limit stops it.
+    error: Option<String>,
+    #[serde(rename = "quotaLimits")]
+    quota_limits: Option<QuotaLimits>,
+}
+
+#[derive(Deserialize)]
+struct QuotaLimits {
+    #[serde(rename = "resetsAt")]
+    resets_at: Option<i64>,
+    #[serde(rename = "rateLimitType", default)]
+    rate_limit_type: String,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +225,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     let mut last_usage: Option<Usage> = None;
     let mut model = None;
     let mut cost_usd = None;
+    let mut limit_stop = None;
 
     for line in reader.lines().map_while(Result::ok) {
         // Cheap filter before deserializing: skips user messages, attachments,
@@ -210,6 +247,22 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             Some("last-prompt") if record.last_prompt.is_some() => last_prompt = record.last_prompt,
             Some("cost-state") => cost_usd = record.total_cost_usd.or(cost_usd),
             Some("assistant") if !record.is_sidechain => {
+                // Any later reply means it went on after the limit.
+                limit_stop = None;
+                if record.error.as_deref() == Some("rate_limit")
+                    && let Some(quota) = &record.quota_limits
+                    && let Some(resets_at) = quota.resets_at
+                {
+                    limit_stop = Some(LimitStop {
+                        at: record
+                            .timestamp
+                            .as_deref()
+                            .and_then(parse_time)
+                            .map_or(resets_at, |t| t.timestamp()),
+                        resets_at,
+                        window: quota.rate_limit_type.clone(),
+                    });
+                }
                 if let Some(msg) = record.message
                     && let Some(usage) = msg.usage()
                 {
@@ -285,6 +338,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             subagents,
             subagent_total,
             timeline,
+            limit_stop,
         },
     })
 }
@@ -362,6 +416,27 @@ pub fn human_tokens(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_a_session_that_stopped_at_a_plan_limit() {
+        let dir = std::env::temp_dir().join(format!("claudash-limit-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lim.jsonl");
+        let reply = r#"{"type":"assistant","requestId":"r1","timestamp":"2026-10-04T07:50:00Z","message":{"model":"m","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let stop = r#"{"type":"assistant","timestamp":"2026-10-04T07:56:57.594Z","error":"rate_limit","isApiErrorMessage":true,"quotaLimits":{"status":"rejected","resetsAt":1791111600,"rateLimitType":"five_hour"},"message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets 1pm"}]}}"#;
+        let parse = |lines: &[&str]| {
+            fs::write(&file, lines.join("\n")).unwrap();
+            let meta = fs::metadata(&file).unwrap();
+            parse_session(&file, "x", meta.modified().unwrap(), meta.len()).unwrap()
+        };
+        let stopped = parse(&[reply, stop]).tokens.limit_stop.unwrap();
+        assert_eq!(stopped.resets_at, 1_791_111_600);
+        assert_eq!(stopped.at, 1_791_100_617);
+        assert_eq!(stopped.window_label(), "5-hour");
+        // It went on later: not stopped any more.
+        assert_eq!(parse(&[stop, reply]).tokens.limit_stop, None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn dedupes_usage_by_request_and_tracks_context() {
