@@ -2,6 +2,11 @@
 
 What changed in each release of claudash. Install or update with `brew upgrade claudash`, `cargo binstall claudash` or the installers on the [releases page](https://github.com/jguajardo/claudash/releases).
 
+## Unreleased
+
+- The README and the recordings lead with sessions and projects: new recordings of a project's page with an MCP sign-in, a branch review and a conversation, and a comparison by area.
+- Interface: in a conversation, a reply that starts with a tool call gets its "Claude" header and MCP tools read `server › tool`; ages of two days or more are shown in days; counts are spelled out ("1 session", "2 sessions"); a project's overview no longer cuts a line that wraps; after `claude mcp login` the servers are checked again.
+
 ## 1.1.1 — 2026-10-04
 
 - `claudash plan --share` prints whether your plan is worth it as a card to post, signed "made with claudash".

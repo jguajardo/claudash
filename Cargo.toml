@@ -2,13 +2,13 @@
 name = "claudash"
 version = "1.1.1"
 edition = "2024"
-description = "The control room for Claude Code: sessions that need you, where your plan limits and dollars went, MCP, specs and secrets in transcripts. Unofficial."
+description = "The control room for Claude Code: every session and project on one screen. What a waiting session asks, resume and search conversations, MCP sign-in, branch reviews, specs, snapshots, a security audit and plan limits. Unofficial."
 authors = ["Jorge Guajardo <283856+jguajardo@users.noreply.github.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jguajardo/claudash"
 homepage = "https://github.com/jguajardo/claudash"
 readme = "README.md"
-keywords = ["claude-code", "claude", "tui", "dashboard", "usage"]
+keywords = ["claude-code", "claude", "tui", "session-manager", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github", "/assets", "/demo", "/plugin", "/.claude-plugin", "dist-workspace.toml"]
 

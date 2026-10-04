@@ -1,6 +1,6 @@
 # claudash
 
-**The control room for Claude Code.** One terminal screen: which sessions need you and what they're asking, where your 5-hour and weekly limits went, what your usage costs at API prices, and the API keys and risky commands Claude left behind on disk.
+**The control room for Claude Code.** Every session and every project on one terminal screen: see what a waiting session is asking, resume or read any conversation, sign in to MCP servers, review a branch in its own worktree, run the next spec step, undo what `/rewind` can't, and see where your limits went.
 
 A single Rust binary that reads Claude Code's local files and runs the `claude` CLI. No server, no account, no network requests of its own.
 
@@ -9,7 +9,7 @@ A single Rust binary that reads Claude Code's local files and runs the `claude` 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Built With Ratatui](https://img.shields.io/badge/Built_With_Ratatui-000?logo=ratatui&logoColor=fff)](https://ratatui.rs/)
 
-![claudash: sessions that need you and what they ask, alerts, plan usage, project pages, where the limit went, and a wrapped card](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/claudash.gif)
+![claudash: a waiting session and what it asks to run, then a project's page with its spec-driven changes, worktrees and MCP servers](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/claudash.gif)
 
 <sub>Recorded from made-up data with [VHS](https://github.com/charmbracelet/vhs); see [demo/](demo/). Unofficial project: not affiliated with, endorsed by or supported by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic.</sub>
 
@@ -32,58 +32,98 @@ claudash                 # 1 Now · 2 Sessions · 3 Projects · 4 Insights · : 
 
 ## Why
 
-You run Claude Code in three terminals and a background session. One has been waiting on a permission prompt for twenty minutes. You hit your 5-hour limit and don't know which session ate it. Last week you pasted an API key into a prompt, and it's still sitting in a plain-text transcript. claudash puts all of that on one screen:
+You run Claude Code in three terminals and a background session, across four repositories. One session has been waiting on a permission prompt for twenty minutes. A branch is waiting for a review. An MCP server needs you to sign in again, so the session that uses it is working without it. A change is five tasks into eight and you don't remember the command for the next one. claudash shows all of that on one screen, and acts on it from there.
 
-- **What needs you, and what it wants.** Every open session, interactive or background, the ones waiting on you first, with the exact command or edit each one is asking to run. Desktop notification when one starts waiting.
-- **Where the limit went.** Each session's, project's and model's part of the current 5-hour and 7-day windows, and what all of it would cost at API prices, by day, project, model and session. Sessions the limit stopped continue on their own when it resets, and you see whether Pro, Max 5x, Max 20x or the API fits your use.
-- **What Claude left on disk.** API keys and tokens in your transcripts and prompt history (shown masked), force pushes, `curl | sh`, `sudo` and other risky commands, and permission rules broader than you think.
-- **Each project on one page.** Its sessions, MCP servers (with their logs and sign-in), spec-driven changes (OpenSpec, spec-kit, Kiro, Task Master) and their next step, worktrees, snapshots that undo what `/rewind` can't (Bash commands, subagents), an AI review of any branch, skills and plugins with what they cost you per session.
+**Sessions**
 
-It never drives Claude Code: Claude Code does the work, claudash keeps track of it. Everything it changes, it asks first.
+- **What needs you, and what it wants.** Every open session, interactive or background, the waiting ones first, with the exact command or edit each one is asking to run. A desktop notification when one starts waiting; attach to, stop or respawn the background ones.
+- **Any conversation, a few keys away.** Every session you've run, filterable, with full-text search across all of them. Resume one in Claude Code, read it with its tool output and subagents, send it a prompt, inspect what filled its context, tag, note, star or trash it.
+- **Stopped at a limit, continued at the reset.** Sessions a plan limit stopped are listed, and continue in the background once the window resets.
 
-| Where the limit went, and what it cost | Is your plan worth it |
+**Projects**
+
+- **Each project on one page.** What Claude Code loads there (instruction files, skills, agents, commands, hooks, permission rules, plugins and what each adds to every session), its git state, sessions and worktrees, and a warning when two open sessions edit the same file.
+- **MCP servers you can fix.** Which are online, which failed and why (the server's log), which need you to sign in; `a` signs in without leaving the dashboard.
+- **A review of any branch.** claudash fetches, checks the branch out in a worktree of its own and has Claude Code review it there: findings by file, line and severity, each with the code around it and a suggested change. Your working tree isn't touched.
+- **Specs and their next step.** OpenSpec, spec-kit, Kiro, Task Master and GSD changes with their progress; `Enter` runs the next step in Claude Code.
+- **Undo what `/rewind` can't.** Opt-in snapshots of a project's files before each prompt and after each reply, so changes made by Bash commands and subagents can be seen and put back.
+
+**Security.** API keys and tokens left in your transcripts and prompt history (shown masked), force pushes, `curl | sh`, `sudo` and other risky commands, and permission rules broader than you think.
+
+**Usage.** Each session's, project's and model's part of the current 5-hour and 7-day windows, what your use would cost at API prices, and whether Pro, Max 5x, Max 20x or the API fits it.
+
+claudash doesn't replace Claude Code or sit between you and it: Claude Code does the work in its own terminal, claudash keeps track of it and runs the `claude` CLI for you. Everything it changes, it asks first.
+
+| A project's page, and an MCP sign-in | A review of a branch |
 | --- | --- |
+| ![A project's page: its spec-driven changes with the next step, MCP servers, signing in to one that needs it, and what each plugin adds to a session](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/project.gif) | ![Reviewing a branch: the remote's branches, a static review in a worktree of its own, findings by file, line and severity, and one finding with its code and suggested change](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/review.gif) |
+| **Any conversation, searchable** | **What Claude left on disk** |
+| ![Searching every conversation, opening the one that matches and reading it with its tool output](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/conversation.gif) | ![Insights › Security: masked API keys found in transcripts and a force push](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/secrets.gif) |
+| **Where the limit went, and what it cost** | **Is your plan worth it** |
 | ![Insights: each session's part of the 5-hour and 7-day windows, and dollars per day](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/limits.gif) | ![claudash plan --share: a month of use at API prices against the plan's price, and how often Pro, Max 5x and Max 20x would have stopped you](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/plan.gif) |
-| **What Claude left on disk** | **Your week on one card** |
-| ![Insights › Security: masked API keys found in transcripts and a force push](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/secrets.gif) | ![The wrapped card: prompts, cost, streak, projects, models, tools, hours](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/wrapped.gif) |
 
 ## Tour
 
 | View | What's there |
 | --- | --- |
 | **1 · Now** | Open sessions (what a waiting one asks, last tool call, context use, subagents), background sessions you can attach to, stop or respawn, alerts that take you where to act, plan usage with a forecast and today's cost, a live feed of every tool call |
-| **2 · Sessions** | Every session, searchable and filterable, with its state, cost, project instructions and token use. Resume, read, inspect (context per request, tool failures, audit, costliest prompts), send a prompt, tag, note, star, trash |
-| **3 · Projects** | A card per project, then a page with Overview, Sessions, Specs, Worktrees, MCP servers, Skills & plugins (with a permission-rule linter) and Security |
+| **2 · Sessions** | Every session, searchable and filterable, with its state, cost, project instructions and token use. Resume, read (search, tool output, subagents, export), inspect (context per request, tool failures, audit, costliest prompts), send a prompt, tag, note, star, trash |
+| **3 · Projects** | A card per project (`b` reviews one of its branches), then a page with Overview, Sessions, Specs, Worktrees, Snapshots, MCP servers, Skills & plugins (with a permission-rule linter) and Security |
 | **4 · Insights** | Plan & usage in tokens or dollars, where the limit went, where tokens go (tool output by Bash command, costliest prompts, whether caveman or rtk changed anything), security across every session |
 
-Anywhere: `f` searches every conversation, `h` searches every prompt you've typed, `s` summarizes today, `w` shows your **wrapped** week or month on one card made to be shared (`x` hides project names). The [guide](docs/guide.md) covers every view, key and setting.
+Anywhere: `f` searches every conversation, `h` searches every prompt you've typed, `s` summarizes today, `:` runs any action by name, `w` shows your [wrapped](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/wrapped.gif) week or month on one card made to be shared (`x` hides project names). The [guide](docs/guide.md) covers every view, key and setting, and the [full tour](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/tour.gif) shows them in a minute.
 
 From the command line, for scripts and status bars:
 
 ```sh
 claudash status            # ▲ 1 needs you · 2 working · 5h 64% → limit 13:10 · 7d 31%   (tmux, Waybar…; --json)
+claudash continue --wait   # continue the sessions a plan limit stopped when it resets
+claudash export <ID>       # a conversation as Markdown, credentials masked
+claudash summary           # today as Markdown
 claudash usage             # tokens and API-equivalent dollars by day; monthly, projects, models, sessions; --json
 claudash quota             # where the current 5-hour and 7-day windows went; --json
-claudash wrapped --redact  # your week on a card; month; --plain
 claudash plan --share      # is your plan worth it, as a card to post: API-equivalent use vs. price
-claudash continue --wait   # continue the sessions a plan limit stopped when it resets
-claudash summary           # today as Markdown
-claudash export <ID>       # a conversation as Markdown, credentials masked
+claudash wrapped --redact  # your week on a card; month; --plain
 ```
 
 ## How it compares
 
-| | claudash | [ccusage](https://github.com/ryoppippi/ccusage) | [Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) | `claude agents` (built in) |
-| --- | --- | --- | --- | --- |
-| Which session needs you, and what it's asking | ✓ every session | | | background sessions |
-| Cost at API prices by day, project, model, session | ✓ | ✓ | ✓ | |
-| Each session's part of the 5-hour and 7-day windows | ✓ | 5-hour blocks | forecasts | |
-| Credentials in transcripts, risky-command audit, permission linter | ✓ | | | |
-| MCP health, logs and sign-in; specs; worktrees; branch review | ✓ | | | |
-| Other coding agents (Codex, Gemini…) | | ✓ | | |
-| Form | TUI + CLI, one binary | CLI | TUI | Claude Code |
+Other tools cover parts of this, from two sides: the ones that run agents for you, and the ones that count what you used. claudash's job is a third one: the screen for the sessions you start yourself, and for the projects around them.
 
-They're complementary: ccusage covers more agents and reports, the Usage Monitor focuses on forecasting. claudash is the one screen for running Claude Code day to day.
+**Sessions and projects**
+
+| | claudash | [`claude agents`](https://code.claude.com/docs/en/agent-view) (built in) | [claude-squad](https://github.com/smtg-ai/claude-squad) | [ccmanager](https://github.com/kbwo/ccmanager) | [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires) | [opcode](https://github.com/winfunc/opcode) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Starts and runs agents for you | no, you start them | ✓ background sessions | ✓ | ✓ | ✓ | ✓ |
+| Sessions you opened yourself, in any terminal | ✓ open and past | once you background them | | | imports past ones | past ones |
+| Which session is waiting on you | ✓ | ✓ | | ✓ | ✓ | |
+| What it's asking to run | ✓ | ✓ and you reply there | | | ✓ structured sessions | |
+| Resume a past conversation | ✓ | ✓ as a background session | sessions it paused | as an argument | ✓ | ✓ |
+| Read and search the text of every conversation | ✓ | | | | | read |
+| Continue sessions when a plan limit resets | ✓ | | | | ✓ opt-in | |
+| What Claude Code loads in a project: instructions, skills, hooks, plugins | ✓ | | | | skills | CLAUDE.md, agents |
+| MCP servers: health, logs, sign-in | ✓ | | | | list | registry, connection test |
+| Spec-driven changes and their next step | ✓ | | | | | |
+| Worktrees | list, clean up | one per session | one per session | create, merge, delete | create, clean up | |
+| AI review of a branch in a worktree of its own | ✓ | | | | | |
+| Undo file changes `/rewind` can't | ✓ opt-in snapshots | | | | | checkpoints |
+| Other coding agents (Codex, Gemini…) | | | ✓ | ✓ | ✓ | |
+| Form | TUI + CLI | Claude Code | TUI on tmux | TUI | TUI and web on tmux | desktop app |
+
+**Security and usage**
+
+| | claudash | [ccusage](https://github.com/ccusage/ccusage) | [Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) | [opcode](https://github.com/winfunc/opcode) |
+| --- | --- | --- | --- | --- |
+| Credentials left in transcripts, risky commands, a permission-rule linter | ✓ | | | |
+| Cost at API prices by day, project, model and session | ✓ | ✓ | by day; project and model in an opt-in history | by model, project and date |
+| Each session's part of the 5-hour and 7-day windows | ✓ | 5-hour blocks | forecasts for the account | |
+| Pro, Max 5x, Max 20x or the API for your use | ✓ | API-equivalent value | plan suggestions | |
+| Other coding agents | | ✓ | | |
+| Form | TUI + CLI | CLI | terminal monitor | desktop app |
+
+<sub>From each project's README and documentation on 2026-10-04. A blank cell means they don't mention it, not that the tool can't do it; corrections are welcome in an issue.</sub>
+
+They're complementary. claude-squad, ccmanager, Agent of Empires and Claude Code's own agent view start agents for you and keep them in panes or background sessions of their own, and several of them drive other agents too. claudash doesn't run your agents: it watches the sessions you start yourself, in any terminal, and adds the project around them (MCP servers, specs, worktrees, branch reviews, what Claude Code loads). ccusage covers many more agents and reports, and the Usage Monitor focuses on forecasting.
 
 ## Claude Code plugin
 
