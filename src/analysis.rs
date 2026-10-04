@@ -322,7 +322,8 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                 }
                 if let (Some(req), Ok(usage)) = (
                     record["requestId"].as_str(),
-                    serde_json::from_value::<Usage>(message["usage"].clone()),
+                    serde_json::from_value::<crate::pricing::RawUsage>(message["usage"].clone())
+                        .map(|u| u.priced(message["model"].as_str().unwrap_or_default())),
                 ) {
                     let first_time = !usage_by_request.contains_key(req);
                     usage_by_request.insert(req.to_string(), usage);

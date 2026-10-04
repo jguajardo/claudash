@@ -94,7 +94,7 @@ Comments are written in the language of the branch's commit messages. A review u
 
 A menu of three sections:
 
-- **Plan & usage**: plan usage gauges with the forecast, a chart of tokens per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week. Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers.
+- **Plan & usage**: plan usage gauges with the forecast, a chart of tokens or dollars (`$`) per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week, each with what it would cost at API prices. Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers.
 - **Where tokens go** over the last 7 days, from your own transcripts:
   - **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
   - **Costliest prompts**: every prompt with the tokens processed by all the requests it caused.
@@ -110,6 +110,17 @@ claudash reads what Claude already did and points out what deserves a second loo
 - **Permission rules**: `Bash` with no restriction, `bypassPermissions`, rules such as `Bash(curl:*)` or `Bash(git push *)` that let Claude run any command of that kind without asking, allows that a deny overrides, repeats, and allow rules nothing used in 30 days.
 
 Logs (MCP servers and background sessions) open with `l` from a server or a background session; they follow new lines, `/` filters them and `x` shows errors only.
+
+### What it costs
+
+Every response Claude Code records says which model answered and how many input, cache-write (5-minute and 1-hour), cache-read and output tokens it took, whether it ran in fast mode and how many web searches it made. claudash prices each one with [Claude API prices](https://platform.claude.com/docs/en/about-claude/pricing) and shows the result next to sessions, projects, days, models and the daily summary. On a Pro or Max plan you don't pay this; it's what that usage would cost through the API, which is the honest way to compare models, projects and habits.
+
+```sh
+claudash usage                 # last 30 days, by day
+claudash usage monthly         # every month in claudash's history
+claudash usage projects        # or models, sessions; --since 2026-09-01
+claudash usage --json          # for scripts
+```
 
 ### From the command line and status bars
 
@@ -235,6 +246,7 @@ claudash makes no network requests of its own. It reads local files and runs the
 
 | Data | Source | Kind |
 | --- | --- | --- |
+| API-equivalent dollars | Token counts in the transcripts priced with the [published Claude API prices](https://platform.claude.com/docs/en/about-claude/pricing) built into claudash | Documented prices |
 | Plan usage, context window size, prompt cache | [Status line](https://code.claude.com/docs/en/statusline) JSON saved by `claudash statusline` to `~/.cache/claudash/statusline/` | Documented |
 | Needs you / working / waiting | [Hook](https://code.claude.com/docs/en/hooks) events saved by `claudash hook` to `~/.cache/claudash/state/` | Documented |
 | Open sessions | `claude agents --json` | Documented |
@@ -269,7 +281,7 @@ Resuming, prompting and trashing are refused while the session is open in Claude
 - `claude mcp list` doesn't say whether a server is user- or project-scoped; both show as `local`.
 - The Project panel lists the instruction files loaded at launch. Files in subdirectories, which Claude Code loads when it works there, aren't shown.
 - Plugin components are read from the standard layout (`skills/`, `agents/`, `commands/`, `hooks/hooks.json`). A plugin that declares custom paths in its manifest may show fewer components.
-- Per-day cost isn't available locally, so Insights charts tokens; cost is shown per session where Claude Code recorded it.
+- Dollars are API-equivalent, computed from the token counts with the prices built into this release: a model released after it shows tokens without dollars until claudash is updated.
 
 ## Platform support
 

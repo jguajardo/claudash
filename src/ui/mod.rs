@@ -380,6 +380,13 @@ fn draw_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                 format!("  · {}", sessions::relative_age(s.modified)),
                 dim().italic(),
             ));
+            let cost = s.tokens.total.cost + s.tokens.subagent_total.cost;
+            if cost >= 0.01 {
+                detail.push(Span::styled(
+                    format!("  ≈{}", crate::pricing::format_usd(cost)),
+                    Style::new().fg(Color::Green),
+                ));
+            }
             let mut lines = vec![Line::from(title), Line::from(detail)];
             if let Some(note) = meta.map(|m| m.note.as_str()).filter(|n| !n.is_empty()) {
                 lines.push(Line::from(Span::styled(
@@ -716,7 +723,16 @@ fn draw_tokens(frame: &mut Frame, app: &App, area: Rect) {
     .into_iter()
     .flatten()
     .collect();
-    if let Some(cost) = t.cost_usd {
+    // API-equivalent, subagents included; Claude Code's own figure when that's all there is.
+    let cost = t.total.cost + t.subagent_total.cost;
+    if cost > 0.0 {
+        stats.push(Span::styled("cost ", dim()));
+        stats.push(Span::styled(
+            crate::pricing::format_usd(cost),
+            value.fg(Color::Green),
+        ));
+        stats.push(Span::styled(" API-equivalent", dim()));
+    } else if let Some(cost) = t.cost_usd {
         stats.push(Span::styled("cost ", dim()));
         stats.push(Span::styled(format!("${cost:.2}"), value.fg(Color::Green)));
     }
@@ -1293,6 +1309,14 @@ fn usage_bars(
     let today = Local::now().date_naive();
     // Each bar takes 4 columns (3 wide + 1 gap) inside the borders.
     let fit = ((width.saturating_sub(4)) / 4).max(1) as i64;
+    // Dollars are charted in cents.
+    let measure = |u: &Usage| {
+        if app.dollars {
+            (u.cost * 100.0).round() as u64
+        } else {
+            u.processed()
+        }
+    };
     let mut peak = 0;
     let mut bar = |label: String, tokens: u64, current: bool| {
         peak = peak.max(tokens);
@@ -1307,7 +1331,7 @@ fn usage_bars(
         let n = fit.min(12);
         let mut months: BTreeMap<(i32, u32), u64> = BTreeMap::new();
         for (day, usage) in days {
-            *months.entry((day.year(), day.month())).or_default() += usage.processed();
+            *months.entry((day.year(), day.month())).or_default() += measure(usage);
         }
         let (mut year, mut month) = (today.year(), today.month());
         let mut bars = Vec::new();
@@ -1331,7 +1355,7 @@ fn usage_bars(
             .rev()
             .map(|back| today - Days::days(back))
             .map(|day| {
-                let tokens = days.get(&day).map_or(0, Usage::processed);
+                let tokens = days.get(&day).map_or(0, measure);
                 bar(day.format("%d").to_string(), tokens, day == today)
             })
             .collect();
@@ -1533,20 +1557,33 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
         .first_day()
         .map(|d| format!(" · history since {}", d.format("%b %d")))
         .unwrap_or_default();
+    let (title, what, peak) = match (app.dollars, app.monthly) {
+        (true, true) => (
+            "Dollars per month",
+            "API-equivalent",
+            crate::pricing::format_usd(peak as f64 / 100.0),
+        ),
+        (true, false) => (
+            "Dollars per day",
+            "API-equivalent",
+            crate::pricing::format_usd(peak as f64 / 100.0),
+        ),
+        (false, true) => (
+            "Tokens per month",
+            "input + cache write + output",
+            human_tokens(peak),
+        ),
+        (false, false) => (
+            "Tokens per day",
+            "input + cache write + output",
+            human_tokens(peak),
+        ),
+    };
     let chart = BarChart::default()
         .block(
-            panel(
-                if app.monthly {
-                    "Tokens per month"
-                } else {
-                    "Tokens per day"
-                },
-                Color::Cyan,
-            )
-            .title_bottom(
+            panel(title, Color::Cyan).title_bottom(
                 Line::from(format!(
-                    " input + cache write + output · {range} · peak {}{since} · m days/months ",
-                    human_tokens(peak)
+                    " {what} · {range} · peak {peak}{since} · m days/months · $ dollars/tokens "
                 ))
                 .right_aligned(),
             ),
@@ -1563,7 +1600,7 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .areas(bottom);
 
-    let header = Row::new(["", "input", "c.write", "c.read", "output"]).style(dim());
+    let header = Row::new(["", "input", "c.write", "c.read", "output", "≈ USD"]).style(dim());
     let rows = [
         ("Today", today),
         ("7 days", today - Days::days(6)),
@@ -1578,6 +1615,7 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
             human_tokens(u.cache_creation_input_tokens),
             human_tokens(u.cache_read_input_tokens),
             human_tokens(u.output_tokens),
+            crate::pricing::format_usd(u.cost),
         ])
     });
     let table = Table::new(
@@ -1588,6 +1626,7 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
+            Constraint::Length(9),
         ],
     )
     .header(header)
@@ -1615,6 +1654,10 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
                     Style::new().bold(),
                 ),
                 Span::styled(format!("{share:>3.0}%  "), dim()),
+                Span::styled(
+                    format!("{:>8}  ", crate::pricing::format_usd(usage.cost)),
+                    Style::new().fg(Color::Green),
+                ),
                 Span::raw(model.clone()),
             ])
         })
@@ -1631,11 +1674,15 @@ fn draw_usage(frame: &mut Frame, app: &App, area: Rect) {
         .per_project(today - Days::days(6))
         .into_iter()
         .take(6)
-        .map(|(project, tokens)| {
+        .map(|(project, usage)| {
             Line::from(vec![
                 Span::styled(
-                    format!("{:>7}  ", human_tokens(tokens)),
+                    format!("{:>7}  ", human_tokens(usage.processed())),
                     Style::new().bold(),
+                ),
+                Span::styled(
+                    format!("{:>8}  ", crate::pricing::format_usd(usage.cost)),
+                    Style::new().fg(Color::Green),
                 ),
                 Span::raw(project),
             ])

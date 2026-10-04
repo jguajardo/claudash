@@ -833,6 +833,8 @@ pub struct App {
     pub history: History,
     /// Usage view shows months instead of days.
     pub monthly: bool,
+    /// Usage chart in API-equivalent dollars instead of tokens.
+    pub dollars: bool,
     /// Token savers installed (caveman, rtk), found when that page opens.
     pub token_savers: Option<Vec<String>>,
 }
@@ -918,6 +920,7 @@ impl App {
             history: History::load(),
             monthly: false,
             token_savers: None,
+            dollars: false,
         };
         app.doctor_job = Some(Job::spawn(doctor::run));
         app.history_secrets_job = Some(Job::spawn(|| {

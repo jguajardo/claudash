@@ -47,6 +47,7 @@ struct Summary {
     needs_you: usize,
     last: Option<std::time::SystemTime>,
     week_tokens: u64,
+    week_cost: f64,
     secrets: usize,
     risky: usize,
 }
@@ -59,6 +60,7 @@ fn summarize(app: &App, sessions: &[&Session]) -> Summary {
         needs_you: 0,
         last: None,
         week_tokens: 0,
+        week_cost: 0.0,
         secrets: 0,
         risky: 0,
     };
@@ -75,6 +77,7 @@ fn summarize(app: &App, sessions: &[&Session]) -> Summary {
         for (day, models) in &session.tokens.daily {
             if *day >= week {
                 s.week_tokens += models.values().map(|u| u.processed()).sum::<u64>();
+                s.week_cost += models.values().map(|u| u.cost).sum::<f64>();
             }
         }
         if let Some(a) = app.analysis(session) {
@@ -143,8 +146,12 @@ fn card_lines(app: &App, c: &Card) -> Vec<Line<'static>> {
     let mut spans = vec![Span::styled(format!("◷ {last}"), dim())];
     if s.week_tokens > 0 {
         spans.push(Span::styled(
-            format!(" · {} tokens this week", human_tokens(s.week_tokens)),
+            format!(" · {} tokens", human_tokens(s.week_tokens)),
             dim(),
+        ));
+        spans.push(Span::styled(
+            format!(" · ≈{} this week", crate::pricing::format_usd(s.week_cost)),
+            Style::new().fg(Color::Green),
         ));
     }
     lines.push(Line::from(spans));
@@ -412,7 +419,16 @@ fn draw_overview(frame: &mut Frame, app: &App, area: Rect, dir: &std::path::Path
         field(
             "This week",
             14,
-            vec![Span::raw(format!("{} tokens", human_tokens(s.week_tokens)))],
+            vec![
+                Span::raw(format!("{} tokens", human_tokens(s.week_tokens))),
+                Span::styled(
+                    format!(
+                        " · ≈{} API-equivalent",
+                        crate::pricing::format_usd(s.week_cost)
+                    ),
+                    Style::new().fg(Color::Green),
+                ),
+            ],
         ),
         Line::default(),
         field(
@@ -520,6 +536,10 @@ fn draw_sessions_table(
                     .style(Style::new().fg(Color::Cyan)),
                 Cell::from(sessions::relative_age(s.modified)).style(dim()),
                 Cell::from(human_tokens(s.tokens.total.processed())).style(dim()),
+                Cell::from(crate::pricing::format_usd(
+                    s.tokens.total.cost + s.tokens.subagent_total.cost,
+                ))
+                .style(Style::new().fg(Color::Green)),
             ])
             .height(1)
             .bottom_margin(1)
@@ -534,10 +554,11 @@ fn draw_sessions_table(
             Constraint::Fill(1),
             Constraint::Length(14),
             Constraint::Length(8),
+            Constraint::Length(9),
         ],
     )
     .header(
-        Row::new(["", "Session", "Branch", "Last activity", "Tokens"])
+        Row::new(["", "Session", "Branch", "Last activity", "Tokens", "≈ USD"])
             .style(Style::new().fg(ACCENT).bold())
             .bottom_margin(1),
     )

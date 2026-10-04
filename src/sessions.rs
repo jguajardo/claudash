@@ -70,6 +70,9 @@ pub struct Usage {
     pub cache_read_input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    /// API-equivalent cost in USD (see `pricing`).
+    #[serde(default)]
+    pub cost: f64,
 }
 
 impl Usage {
@@ -88,6 +91,7 @@ impl Usage {
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
         self.output_tokens += other.output_tokens;
+        self.cost += other.cost;
     }
 }
 
@@ -116,7 +120,19 @@ struct Record {
 #[derive(Deserialize)]
 struct Message {
     model: Option<String>,
-    usage: Option<Usage>,
+    usage: Option<crate::pricing::RawUsage>,
+}
+
+impl Message {
+    /// The response's usage, priced, unless it was generated locally
+    /// ("<synthetic>" messages make no API call).
+    fn usage(&self) -> Option<Usage> {
+        let model = self.model.as_deref().unwrap_or_default();
+        if model == "<synthetic>" {
+            return None;
+        }
+        self.usage.as_ref().map(|u| u.priced(model))
+    }
 }
 
 /// Loads every session, newest first.
@@ -192,9 +208,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             Some("cost-state") => cost_usd = record.total_cost_usd.or(cost_usd),
             Some("assistant") if !record.is_sidechain => {
                 if let Some(msg) = record.message
-                    && let Some(usage) = msg.usage
-                    // "<synthetic>" messages are generated locally, without an API call.
-                    && msg.model.as_deref() != Some("<synthetic>")
+                    && let Some(usage) = msg.usage()
                 {
                     if let Some(req) = record.request_id {
                         let day = record.timestamp.as_deref().and_then(local_day);
@@ -296,8 +310,7 @@ fn subagent_usage(session_dir: &Path) -> (HashMap<String, RequestUsage>, usize) 
                 continue;
             };
             if let (Some(req), Some(msg)) = (record.request_id, record.message)
-                && let Some(u) = msg.usage
-                && msg.model.as_deref() != Some("<synthetic>")
+                && let Some(u) = msg.usage()
             {
                 let day = record.timestamp.as_deref().and_then(local_day);
                 usage.insert(req, (u, day, msg.model.unwrap_or_default()));

@@ -31,6 +31,7 @@ struct SessionDay {
     failed: usize,
     files: BTreeSet<String>,
     tokens: u64,
+    cost: f64,
 }
 
 /// The sessions that used tokens on `day`.
@@ -71,6 +72,7 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
             failed: 0,
             files: BTreeSet::new(),
             tokens: input.tokens_today.processed(),
+            cost: input.tokens_today.cost,
         };
         for e in &today {
             match &e.kind {
@@ -93,19 +95,21 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
         entry.1.push(s);
     }
 
-    let (mut sessions, mut prompts, mut tools, mut tokens) = (0, 0, 0, 0);
+    let (mut sessions, mut prompts, mut tools, mut tokens, mut cost) = (0, 0, 0, 0, 0.0);
     for (_, list) in projects.values() {
         for s in list {
             sessions += 1;
             prompts += s.prompts;
             tools += s.tools;
             tokens += s.tokens;
+            cost += s.cost;
         }
     }
     let mut md = format!(
-        "# Claude Code · {}\n\n**{sessions} session(s) · {prompts} prompt(s) · {tools} tool call(s) · {} tokens**\n\n",
+        "# Claude Code · {}\n\n**{sessions} session(s) · {prompts} prompt(s) · {tools} tool call(s) · {} tokens · ≈{} API-equivalent**\n\n",
         day.format("%A, %B %-d %Y"),
-        human_tokens(tokens)
+        human_tokens(tokens),
+        crate::pricing::format_usd(cost)
     );
     if sessions == 0 {
         md.push_str("No Claude Code activity on this day.\n");
@@ -116,7 +120,7 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
         md.push_str(&format!("## {project}\n\n"));
         for s in list {
             md.push_str(&format!(
-                "- **{}**: {} prompt(s), {} tool call(s){}, {} file(s) edited, {} tokens\n",
+                "- **{}**: {} prompt(s), {} tool call(s){}, {} file(s) edited, {} tokens, ≈{}\n",
                 s.title,
                 s.prompts,
                 s.tools,
@@ -126,7 +130,8 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
                     String::new()
                 },
                 s.files.len(),
-                human_tokens(s.tokens)
+                human_tokens(s.tokens),
+                crate::pricing::format_usd(s.cost)
             ));
             if !s.files.is_empty() {
                 let names: Vec<String> = s
@@ -193,13 +198,16 @@ mod tests {
                 path: file,
                 tokens_today: Usage {
                     output_tokens: 1500,
+                    cost: 0.0375,
                     ..Default::default()
                 },
             }],
             day,
         );
         fs::remove_dir_all(&dir).unwrap();
-        assert!(md.contains("**1 session(s) · 1 prompt(s) · 1 tool call(s) · 1.5k tokens**"));
+        assert!(md.contains(
+            "**1 session(s) · 1 prompt(s) · 1 tool call(s) · 1.5k tokens · ≈$0.04 API-equivalent**"
+        ));
         assert!(md.contains("## ~/p"));
         assert!(
             md.contains(

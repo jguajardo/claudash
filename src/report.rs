@@ -4,7 +4,9 @@
 use std::io::{self, Write};
 
 use crate::{
-    claude_cli, hooks,
+    claude_cli,
+    history::History,
+    hooks,
     hooks::Activity,
     paths, sessions,
     statusline::{self, Window},
@@ -102,9 +104,238 @@ pub fn summary(output: Option<&str>) -> io::Result<()> {
     }
 }
 
+// ---- claudash usage --------------------------------------------------------------
+
+/// How `claudash usage` groups its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Daily,
+    Monthly,
+    Projects,
+    Models,
+    Sessions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageArgs {
+    pub group: Group,
+    /// First day included; defaults to 30 days ago (everything for monthly).
+    pub since: Option<chrono::NaiveDate>,
+    pub json: bool,
+}
+
+impl UsageArgs {
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut out = UsageArgs {
+            group: Group::Daily,
+            since: None,
+            json: false,
+        };
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "daily" => out.group = Group::Daily,
+                "monthly" => out.group = Group::Monthly,
+                "projects" => out.group = Group::Projects,
+                "models" => out.group = Group::Models,
+                "sessions" => out.group = Group::Sessions,
+                "--json" => out.json = true,
+                "--since" => {
+                    let value = args.next().ok_or("missing value for --since")?;
+                    out.since = Some(parse_day(value)?);
+                }
+                other => match other.strip_prefix("--since=") {
+                    Some(value) => out.since = Some(parse_day(value)?),
+                    None => {
+                        return Err(format!(
+                            "usage: claudash usage [daily|monthly|projects|models|sessions] \
+                             [--since YYYY-MM-DD] [--json] (unexpected '{other}')"
+                        ));
+                    }
+                },
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn parse_day(text: &str) -> Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .map_err(|_| format!("invalid date '{text}' (use YYYY-MM-DD)"))
+}
+
+/// One row of the report.
+struct UsageRow {
+    label: String,
+    usage: sessions::Usage,
+}
+
+fn usage_rows(
+    args: &UsageArgs,
+    sessions: &[sessions::Session],
+    history: &History,
+) -> Vec<UsageRow> {
+    let today = chrono::Local::now().date_naive();
+    let since = args.since.unwrap_or(match args.group {
+        Group::Monthly => chrono::NaiveDate::MIN,
+        _ => today - chrono::Days::new(29),
+    });
+    let row = |label: String, usage| UsageRow { label, usage };
+    match args.group {
+        Group::Daily => history
+            .per_day()
+            .range(since..)
+            .map(|(day, u)| row(day.to_string(), *u))
+            .collect(),
+        Group::Monthly => {
+            let mut months: std::collections::BTreeMap<String, sessions::Usage> =
+                std::collections::BTreeMap::new();
+            for (day, u) in history.per_day().range(since..) {
+                months
+                    .entry(day.format("%Y-%m").to_string())
+                    .or_default()
+                    .add(u);
+            }
+            months.into_iter().map(|(m, u)| row(m, u)).collect()
+        }
+        Group::Projects => history
+            .per_project(since)
+            .into_iter()
+            .map(|(p, u)| row(p, u))
+            .collect(),
+        Group::Models => history
+            .per_model(since)
+            .into_iter()
+            .map(|(m, u)| row(m, u))
+            .collect(),
+        Group::Sessions => {
+            let mut rows: Vec<UsageRow> = sessions
+                .iter()
+                .filter_map(|s| {
+                    let mut u = sessions::Usage::default();
+                    for (_, models) in s.tokens.daily.range(since..) {
+                        for usage in models.values() {
+                            u.add(usage);
+                        }
+                    }
+                    (u.processed() > 0).then(|| {
+                        row(
+                            format!(
+                                "{} · {} · {}",
+                                &s.id[..s.id.len().min(8)],
+                                s.project_path,
+                                s.title
+                            ),
+                            u,
+                        )
+                    })
+                })
+                .collect();
+            rows.sort_by(|a, b| b.usage.cost.total_cmp(&a.usage.cost));
+            rows
+        }
+    }
+}
+
+/// `claudash usage`: tokens and API-equivalent dollars by day, month,
+/// project, model or session.
+pub fn usage(args: &UsageArgs) -> io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    let all = sessions::load_sessions(&dir, &[])?;
+    let mut history = History::load();
+    // Best effort: without a data directory the report still covers current transcripts.
+    let _ = history.merge(&all);
+    let rows = usage_rows(args, &all, &history);
+    let mut total = sessions::Usage::default();
+    for r in &rows {
+        total.add(&r.usage);
+    }
+    let mut out = io::stdout().lock();
+    if args.json {
+        let json_row = |label: &str, u: &sessions::Usage| {
+            serde_json::json!({
+                "label": label,
+                "input_tokens": u.input_tokens,
+                "cache_creation_tokens": u.cache_creation_input_tokens,
+                "cache_read_tokens": u.cache_read_input_tokens,
+                "output_tokens": u.output_tokens,
+                "total_tokens": u.context() + u.output_tokens,
+                "cost_usd": (u.cost * 100.0).round() / 100.0,
+            })
+        };
+        let value = serde_json::json!({
+            "group": format!("{:?}", args.group).to_lowercase(),
+            "cost": "API-equivalent USD at Claude API prices",
+            "rows": rows.iter().map(|r| json_row(&r.label, &r.usage)).collect::<Vec<_>>(),
+            "total": json_row("total", &total),
+        });
+        return writeln!(out, "{value}");
+    }
+    let head = match args.group {
+        Group::Daily => "Day",
+        Group::Monthly => "Month",
+        Group::Projects => "Project",
+        Group::Models => "Model",
+        Group::Sessions => "Session",
+    };
+    let width = rows
+        .iter()
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(head.len(), 60);
+    writeln!(
+        out,
+        "{head:<width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}",
+        "input", "c.write", "c.read", "output", "≈ USD"
+    )?;
+    let line = |label: &str, u: &sessions::Usage| {
+        let label: String = label.chars().take(width).collect();
+        format!(
+            "{label:<width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}",
+            sessions::human_tokens(u.input_tokens),
+            sessions::human_tokens(u.cache_creation_input_tokens),
+            sessions::human_tokens(u.cache_read_input_tokens),
+            sessions::human_tokens(u.output_tokens),
+            crate::pricing::format_usd(u.cost)
+        )
+    };
+    for r in &rows {
+        writeln!(out, "{}", line(&r.label, &r.usage))?;
+    }
+    writeln!(out, "{}", "─".repeat(width + 59))?;
+    writeln!(out, "{}", line("Total", &total))?;
+    writeln!(
+        out,
+        "\nDollars are API-equivalent (what this usage would cost at Claude API prices), not what a Pro or Max plan charges."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_usage_arguments() {
+        let parse = |list: &[&str]| {
+            UsageArgs::parse(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            parse(&[]),
+            Ok(UsageArgs {
+                group: Group::Daily,
+                since: None,
+                json: false
+            })
+        );
+        let args = parse(&["models", "--since", "2026-09-01", "--json"]).unwrap();
+        assert_eq!(args.group, Group::Models);
+        assert_eq!(args.since, chrono::NaiveDate::from_ymd_opt(2026, 9, 1));
+        assert!(args.json);
+        assert!(parse(&["--since", "yesterday"]).is_err());
+        assert!(parse(&["weekly"]).is_err());
+    }
 
     #[test]
     fn status_line_leaves_out_what_is_zero() {

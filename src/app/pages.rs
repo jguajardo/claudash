@@ -612,6 +612,7 @@ impl App {
             KeyCode::PageDown => self.insights_scroll = self.insights_scroll.saturating_add(10),
             KeyCode::PageUp => self.insights_scroll = self.insights_scroll.saturating_sub(10),
             KeyCode::Char('m') => self.monthly = !self.monthly,
+            KeyCode::Char('$') => self.dollars = !self.dollars,
             KeyCode::Esc => self.view = View::Now,
             _ => {}
         }

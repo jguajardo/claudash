@@ -120,7 +120,20 @@ fn alert_line(alert: &Alert) -> Line<'static> {
 }
 
 fn draw_plan_card(frame: &mut Frame, app: &App, area: Rect) {
-    let block = card("Plan", Color::LightMagenta, false);
+    // What today and the last 7 days would have cost at API prices.
+    let days = app.history.per_day();
+    let today = chrono::Local::now().date_naive();
+    let week: f64 = days
+        .range(today - chrono::Days::new(6)..)
+        .map(|(_, u)| u.cost)
+        .sum();
+    let today_cost = days.get(&today).map_or(0.0, |u| u.cost);
+    let title = format!(
+        "Plan · today ≈{} · 7 days ≈{} API-equivalent",
+        crate::pricing::format_usd(today_cost),
+        crate::pricing::format_usd(week)
+    );
+    let block = card(&title, Color::LightMagenta, false);
     let windows = plan_windows(app);
     if windows.is_empty() {
         let text = if app.statusline.configured {

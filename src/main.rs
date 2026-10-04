@@ -16,6 +16,7 @@ mod mcp;
 mod notify;
 mod paths;
 mod permissions;
+mod pricing;
 mod projects;
 mod prompts;
 mod report;
@@ -41,6 +42,8 @@ Usage:
   claudash status [--json]               one line for status bars: sessions that
                                          need you, working, waiting; plan usage
   claudash summary [-o FILE]             today's summary as Markdown
+  claudash usage [daily|monthly|projects|models|sessions] [--since DATE] [--json]
+                                         tokens and API-equivalent dollars
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
                                          without -o)
   claudash setup [--apply | --remove]    connect claudash to Claude Code (status
@@ -80,6 +83,7 @@ enum Cli {
     Summary {
         output: Option<String>,
     },
+    Usage(report::UsageArgs),
     Help,
     Setup(setup::Mode),
     Statusline {
@@ -161,6 +165,12 @@ fn parse_args(
                     }),
                     _ => Err(format!("usage: claudash summary [-o FILE]\n\n{HELP}")),
                 };
+            }
+            "usage" => {
+                let rest: Vec<String> = args.collect();
+                return report::UsageArgs::parse(&rest)
+                    .map(Cli::Usage)
+                    .map_err(|e| format!("{e}\n\n{HELP}"));
             }
             "--view" => {
                 view = config::view_index(&args.next().ok_or("missing value for --view")?)?;
@@ -257,6 +267,7 @@ fn main() -> std::io::Result<()> {
         Ok(Cli::Summary { output }) => {
             return exit_on_error("summary", report::summary(output.as_deref()));
         }
+        Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
         Ok(Cli::Help) => {
             println!("{HELP}");
             return Ok(());

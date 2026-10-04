@@ -90,7 +90,8 @@ const VIEWS: &[ViewHelp] = &[
     },
     ViewHelp {
         name: "4 · Insights",
-        shows: "Plan & usage: limits with a forecast, tokens per day or month, by model and project, \
+        shows: "Plan & usage: limits with a forecast, tokens or API-equivalent dollars ($) per day \
+                or month, by model and project, \
                 kept beyond Claude Code's 30-day cleanup. Where tokens go: tool output that entered \
                 the context by command, the costliest prompts, reply length against the previous 30 \
                 days. Security: credentials found in transcripts and risky things Claude did.",

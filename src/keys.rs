@@ -481,6 +481,13 @@ pub const BINDINGS: &[Binding] = &[
         Some("days/months"),
         ch('m'),
     ),
+    key(
+        Insights,
+        "$",
+        "dollars (API-equivalent) or tokens in the usage chart",
+        Some("$/tokens"),
+        ch('$'),
+    ),
     key(Insights, "PgUp/PgDn", "scroll", None, None),
     // Logs.
     key(Logs, "↑/↓", "choose a log", Some("log"), None),

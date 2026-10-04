@@ -105,25 +105,30 @@ impl History {
         sorted
     }
 
-    /// Processed tokens per project from `since` on, largest first.
-    pub fn per_project(&self, since: NaiveDate) -> Vec<(String, u64)> {
-        let mut projects: HashMap<&str, u64> = HashMap::new();
+    /// Usage per project from `since` on, most processed tokens first.
+    pub fn per_project(&self, since: NaiveDate) -> Vec<(String, Usage)> {
+        let mut projects: HashMap<&str, Usage> = HashMap::new();
         for entry in self.sessions.values() {
-            let tokens: u64 = entry
+            let mut total = Usage::default();
+            for usage in entry
                 .daily
                 .range(since..)
                 .flat_map(|(_, models)| models.values())
-                .map(Usage::processed)
-                .sum();
-            if tokens > 0 {
-                *projects.entry(entry.project.as_str()).or_default() += tokens;
+            {
+                total.add(usage);
+            }
+            if total.processed() > 0 {
+                projects
+                    .entry(entry.project.as_str())
+                    .or_default()
+                    .add(&total);
             }
         }
-        let mut sorted: Vec<(String, u64)> = projects
+        let mut sorted: Vec<(String, Usage)> = projects
             .into_iter()
-            .map(|(p, t)| (p.to_string(), t))
+            .map(|(p, u)| (p.to_string(), u))
             .collect();
-        sorted.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+        sorted.sort_by_key(|(_, u)| std::cmp::Reverse(u.processed()));
         sorted
     }
 
@@ -189,6 +194,11 @@ mod tests {
         assert_eq!(reloaded.first_day(), Some(d1));
         let models = reloaded.per_model(d1);
         assert_eq!(models[0].0, "opus");
-        assert_eq!(reloaded.per_project(d2), [("~/p".to_string(), 7)]);
+        let projects = reloaded.per_project(d2);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            (projects[0].0.as_str(), projects[0].1.processed()),
+            ("~/p", 7)
+        );
     }
 }
