@@ -283,6 +283,8 @@ pub enum Popup {
         state: ListState,
         detail: Option<u16>,
     },
+    /// The week or month on one card.
+    Wrapped { month: bool, redact: bool },
     /// Every action, found by name and run by pressing its key.
     Palette {
         commands: Vec<&'static Binding>,
@@ -2393,6 +2395,17 @@ impl App {
         self.view = view;
     }
 
+    /// The last week's or month's numbers for the wrapped card.
+    pub fn wrapped_stats(&self, month: bool) -> crate::wrapped::Stats {
+        let period = if month {
+            crate::wrapped::Period::Month
+        } else {
+            crate::wrapped::Period::Week
+        };
+        let (from, to) = period.range(chrono::Local::now().date_naive());
+        crate::wrapped::stats(&self.sessions, |s| self.analysis(s), from, to)
+    }
+
     /// Shows a view, doing what it needs when it opens.
     pub fn switch_view(&mut self, view: View) {
         match view {
@@ -3157,6 +3170,13 @@ impl App {
             }
             KeyCode::Char('h') => return self.open_prompts(),
             KeyCode::Char('s') => return self.start_summary(),
+            KeyCode::Char('w') => {
+                self.popup = Some(Popup::Wrapped {
+                    month: false,
+                    redact: false,
+                });
+                return;
+            }
             KeyCode::Char('r') => return self.refresh_all(),
             KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
@@ -3411,6 +3431,31 @@ impl App {
 
     fn handle_popup_key(&mut self, code: KeyCode) {
         match &mut self.popup {
+            Some(Popup::Wrapped { month, redact }) => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                KeyCode::Tab => *month = !*month,
+                KeyCode::Char('x') => *redact = !*redact,
+                KeyCode::Char('e') => {
+                    let (month, redact) = (*month, *redact);
+                    let stats = self.wrapped_stats(month);
+                    let result = exports_dir().and_then(|dir| {
+                        let path = dir.join(format!(
+                            "{}-claudash-wrapped-{}.md",
+                            chrono::Local::now().format("%Y-%m-%d"),
+                            if month { "month" } else { "week" }
+                        ));
+                        let text = format!("```\n{}```\n", crate::wrapped::plain(&stats, redact));
+                        std::fs::write(&path, text).map(|()| path)
+                    });
+                    match result {
+                        Ok(path) => {
+                            self.show_flash(format!("Exported to {}", paths::display(&path)), false)
+                        }
+                        Err(e) => self.show_flash(format!("Could not export: {e}"), true),
+                    }
+                }
+                _ => {}
+            },
             Some(Popup::Branches {
                 repo,
                 repo_name,
@@ -4253,6 +4298,10 @@ mod tests {
                                 purge: None,
                             }),
                             3 => Some(Popup::Cleanup { preset: 4 }),
+                            4 if k % 2 == 0 => Some(Popup::Wrapped {
+                                month: k % 4 == 0,
+                                redact: k % 3 == 0,
+                            }),
                             4 => Some(Popup::Results {
                                 query: "q".into(),
                                 hits: vec![hit.clone()],

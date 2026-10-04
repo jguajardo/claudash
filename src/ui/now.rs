@@ -129,7 +129,7 @@ fn draw_plan_card(frame: &mut Frame, app: &App, area: Rect) {
         .sum();
     let today_cost = days.get(&today).map_or(0.0, |u| u.cost);
     let title = format!(
-        "Plan · today ≈{} · 7 days ≈{} API-equivalent",
+        "Plan · ≈{} today · ≈{} this week",
         crate::pricing::format_usd(today_cost),
         crate::pricing::format_usd(week)
     );

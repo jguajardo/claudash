@@ -158,6 +158,13 @@ pub const BINDINGS: &[Binding] = &[
     ),
     key(
         Global,
+        "w",
+        "wrapped: your week or month on one card to share",
+        None,
+        ch('w'),
+    ),
+    key(
+        Global,
         "r",
         "reload sessions, re-check MCP servers and the ecosystem",
         None,

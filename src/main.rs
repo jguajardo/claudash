@@ -29,6 +29,7 @@ mod statusline;
 mod summary;
 mod transcript;
 mod ui;
+mod wrapped;
 
 /// Context window used when the status line hasn't reported one; override with
 /// `--context-limit` or `CLAUDASH_CONTEXT_LIMIT`.
@@ -45,6 +46,8 @@ Usage:
   claudash summary [-o FILE]             today's summary as Markdown
   claudash usage [daily|monthly|projects|models|sessions] [--since DATE] [--json]
                                          tokens and API-equivalent dollars
+  claudash wrapped [week|month] [--redact]  your week or month on one card to share
+                                         (--plain without colors)
   claudash quota [--json]                where the current 5-hour and 7-day windows went,
                                          by session, project and model
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
@@ -89,6 +92,11 @@ enum Cli {
     Usage(report::UsageArgs),
     Quota {
         json: bool,
+    },
+    Wrapped {
+        month: bool,
+        redact: bool,
+        plain: bool,
     },
     Help,
     Setup(setup::Mode),
@@ -171,6 +179,27 @@ fn parse_args(
                     }),
                     _ => Err(format!("usage: claudash summary [-o FILE]\n\n{HELP}")),
                 };
+            }
+            "wrapped" => {
+                let (mut month, mut redact, mut plain) = (false, false, false);
+                for arg in args.by_ref() {
+                    match arg.as_str() {
+                        "week" => month = false,
+                        "month" => month = true,
+                        "--redact" => redact = true,
+                        "--plain" => plain = true,
+                        _ => {
+                            return Err(format!(
+                                "usage: claudash wrapped [week|month] [--redact] [--plain]\n\n{HELP}"
+                            ));
+                        }
+                    }
+                }
+                return Ok(Cli::Wrapped {
+                    month,
+                    redact,
+                    plain,
+                });
             }
             "quota" => {
                 let rest: Vec<String> = args.collect();
@@ -283,6 +312,14 @@ fn main() -> std::io::Result<()> {
         }
         Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
         Ok(Cli::Quota { json }) => return exit_on_error("quota", report::quota(json)),
+        Ok(Cli::Wrapped {
+            month,
+            redact,
+            plain,
+        }) => {
+            let plain = plain || std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+            return exit_on_error("wrapped", report::wrapped(month, redact, plain));
+        }
         Ok(Cli::Help) => {
             println!("{HELP}");
             return Ok(());

@@ -3474,6 +3474,31 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 }
             }
         }
+        Some(Popup::Wrapped { month, redact }) => {
+            let (month, redact) = (*month, *redact);
+            let stats = app.wrapped_stats(month);
+            let lines = crate::wrapped::card(&stats, redact);
+            let width = lines.iter().map(|l| l.width()).max().unwrap_or(40) as u16 + 6;
+            let height = lines.len() as u16 + 4;
+            let area = centered(
+                frame.area(),
+                Constraint::Max(width),
+                Constraint::Max(height),
+            );
+            frame.render_widget(Clear, area);
+            let block = card(&crate::wrapped::title(&stats), ACCENT, true)
+                .padding(Padding::new(2, 2, 1, 0))
+                .title_bottom(Line::from(" made with claudash ").left_aligned())
+                .title_bottom(
+                    Line::from(format!(
+                        " Tab {} · x {} names · e export · Esc ",
+                        if month { "week" } else { "month" },
+                        if redact { "show" } else { "hide" }
+                    ))
+                    .right_aligned(),
+                );
+            frame.render_widget(Paragraph::new(lines).block(block), area);
+        }
         Some(Popup::Palette {
             commands,
             query,

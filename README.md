@@ -40,7 +40,8 @@ From any view:
 
 - `f` searches the content of every conversation and opens the one you pick at the match.
 - `h` searches every prompt you've typed in Claude Code, newest first. `Enter` puts the chosen one in the prompt box for the selected session, `Tab` copies it to the clipboard (OSC 52, works over SSH).
-- `s` summarizes today across projects: sessions, prompts, tool calls and failures, files edited, tokens and each repository's commits. `e` exports it to Markdown in `~/Documents/claudash-exports/`.
+- `s` summarizes today across projects: sessions, prompts, tool calls and failures, files edited, tokens, dollars and each repository's commits. `e` exports it to Markdown in `~/Documents/claudash-exports/`.
+- `w` shows your **wrapped** card: the last week (or month, with `Tab`) on one screen made to be shared. Prompts, requests, sessions, tokens and API-equivalent dollars, active days and streak, the busiest day, the top session, projects and models by share, most used tools and commands, the hours you work, and secrets or risky commands found. `x` hides project and session names before you post it, and `e` exports it. `claudash wrapped [week|month] [--redact]` prints it in color in the terminal.
 
 ### 3 · Projects
 
@@ -122,6 +123,7 @@ claudash usage monthly         # every month in claudash's history
 claudash usage projects        # or models, sessions; --since 2026-09-01
 claudash usage --json          # for scripts
 claudash quota                 # where the current 5-hour and 7-day windows went (--json)
+claudash wrapped --redact      # your week on a card to share (month, --plain)
 ```
 
 ### From the command line and status bars

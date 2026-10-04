@@ -312,6 +312,36 @@ pub fn usage(args: &UsageArgs) -> io::Result<()> {
     )
 }
 
+/// `claudash wrapped`: the last week or month on one card.
+pub fn wrapped(month: bool, redact: bool, plain: bool) -> io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    let all = sessions::load_sessions(&dir, &[])?;
+    let period = if month {
+        crate::wrapped::Period::Month
+    } else {
+        crate::wrapped::Period::Week
+    };
+    let (from, to) = period.range(chrono::Local::now().date_naive());
+    // Only sessions active in the period need their transcripts analyzed.
+    let start = from
+        .and_hms_opt(0, 0, 0)
+        .and_then(|t| t.and_local_timezone(chrono::Local).single())
+        .map_or(0, |t| t.timestamp());
+    let analyses: std::collections::HashMap<String, crate::analysis::Analysis> = all
+        .iter()
+        .filter(|s| s.tokens.timeline.last().is_some_and(|(at, _)| *at >= start))
+        .map(|s| (s.id.clone(), crate::analysis::analyze(&s.path)))
+        .collect();
+    let stats = crate::wrapped::stats(&all, |s| analyses.get(&s.id), from, to);
+    let text = if plain {
+        crate::wrapped::plain(&stats, redact)
+    } else {
+        crate::wrapped::ansi(&stats, redact)
+    };
+    io::stdout().lock().write_all(text.as_bytes())
+}
+
 /// `claudash quota`: each session's, project's and model's part of the current
 /// 5-hour and 7-day plan windows.
 pub fn quota(json: bool) -> io::Result<()> {
