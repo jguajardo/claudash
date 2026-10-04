@@ -49,6 +49,7 @@ A project's page has a menu of sections on the left (`↑`/`↓` to choose, `Ent
 | **Sessions** | The project's sessions in a table; `Enter` resumes, `v` reads, `i` inspects |
 | **Specs** | Spec-driven changes and their next step (see below) |
 | **Worktrees** | Every checkout with its git state and sessions; `Enter` shows its sessions, `b` reviews a branch, `D` removes a worktree with `git worktree remove` (never `--force`), `P` prunes records of worktrees whose directory is gone; both ask first |
+| **Snapshots** | An undo for what `/rewind` can't undo: Claude Code's checkpoints don't cover files changed by Bash commands or subagents. With `snapshots = true` in the settings file (and the hook installed by `claudash setup --apply`), the hook copies the project's files to a shadow git repository in claudash's data directory before each prompt and after each reply, only when something changed. `Enter` shows what changed in a snapshot; `U` puts the files back as they were, after asking and after snapshotting the current state, so a restore can be undone too. Files created later are left alone. The project's own `.git` is never touched and files its `.gitignore` ignores aren't copied. Git checkouts only |
 | **MCP servers** | `claude mcp list` run in the project's folder, so project-scoped servers show up too. `Enter` reads a server's latest log, which usually says why it failed, and `l` opens it in the Logs view, which follows new lines and filters them. For servers that need you to sign in, such as claude.ai connectors (Gmail, Google Calendar, Atlassian…) or HTTP servers, `a` runs `claude mcp login` and re-checks it when you're back; `L` signs out after asking |
 | **Skills & plugins** | Skills, subagents, commands, hooks and plugins available there, with how often each was used in the last 30 days; plugins show their always-on token cost per session, so unused ones that cost tokens stand out, and `Space` enables or disables one. The **Permissions** tab merges allow, ask and deny rules from every settings file and flags the risky ones, and suggests rules for build, test and git-reading commands you ran ten times or more in 30 days that no rule allows (it never edits your settings) (see [Security](#security)) |
 | **Security** | Credentials in this project's transcripts, risky things Claude did here, and the permission rules worth a look |
@@ -192,6 +193,7 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 | Context window when the status line hasn't reported one | `context_limit = "200k"` | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Desktop notifications and bell | `notify = false` | `--no-notify` | | on |
 | Colors | `colors = false` | | [`NO_COLOR`](https://no-color.org) | on |
+| Snapshots of project files before each prompt and after each reply (see [Projects](#3--projects)) | `snapshots = true` | | | off |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 
 Token values accept suffixes: `1M`, `200k`, `1.5m`, `500000`.

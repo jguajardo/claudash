@@ -24,6 +24,7 @@ mod report;
 mod review;
 mod sessions;
 mod setup;
+mod snapshots;
 mod specs;
 mod statusline;
 mod summary;
@@ -469,6 +470,7 @@ mod tests {
             context_limit: Some(config::Limit::Text("200k".into())),
             notify: Some(false),
             colors: None,
+            snapshots: None,
         };
         let parse = |list: &[&str], env: Option<&str>| {
             parse_args(args(list), env.map(str::to_owned), &settings)

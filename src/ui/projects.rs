@@ -295,6 +295,9 @@ fn draw_page(frame: &mut Frame, app: &mut App, area: Rect) {
                 Section::Sessions => format!("{}{}", s.title(), count(sessions)),
                 Section::Specs => format!("{}{}", s.title(), count(specs)),
                 Section::Worktrees => format!("{}{}", s.title(), count(checkouts)),
+                Section::Snapshots if app.snapshots_for(&dir) => {
+                    format!("{}{}", s.title(), count(app.snapshots.len()))
+                }
                 Section::Mcp => format!("{}{}", s.title(), count(servers)),
                 _ => s.title().to_string(),
             };
@@ -317,6 +320,7 @@ fn draw_page(frame: &mut Frame, app: &mut App, area: Rect) {
         Section::Sessions => draw_sessions_table(frame, app, content, &dir, in_content),
         Section::Specs => draw_specs(frame, app, content, &dir, in_content),
         Section::Worktrees => draw_worktrees(frame, app, content, &dir, in_content),
+        Section::Snapshots => draw_snapshots(frame, app, content, &dir, in_content),
         Section::Mcp => draw_mcp(frame, app, content),
         Section::Setup => draw_ecosystem(frame, app, content),
         Section::Security => draw_project_security(frame, app, content, &dir),
@@ -760,6 +764,142 @@ fn draw_worktrees(
             Span::styled(
                 " review a branch: claudash fetches, checks it out in a worktree of its own and \
                  Claude Code reviews it; findings by file and line",
+                dim(),
+            ),
+        ]))
+        .wrap(Wrap { trim: false })
+        .block(card("", Color::Cyan, false)),
+        hint,
+    );
+}
+
+fn draw_snapshots(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    dir: &std::path::Path,
+    focused: bool,
+) {
+    let title = "Snapshots: undo what /rewind can't";
+    if app.snapshots.is_empty() || !app.snapshots_for(dir) {
+        let on = crate::snapshots::enabled();
+        let mut lines = vec![
+            Line::from(
+                "Claude Code's checkpoints don't cover files changed by Bash commands or by \
+                 subagents. With snapshots on, claudash's hook copies the project's files to a \
+                 shadow git repository of its own before each prompt and after each reply, so \
+                 you can see what changed and put files back.",
+            ),
+            Line::default(),
+        ];
+        if on {
+            lines.push(Line::from(Span::styled(
+                "Snapshots are on; none for this project yet. They start with the next prompt \
+                 in a session here (git checkouts only).",
+                dim(),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("To turn them on, add "),
+                Span::styled("snapshots = true", Style::new().fg(ACCENT)),
+                Span::raw(" to claudash's config.toml and run "),
+                Span::styled("claudash setup --apply", Style::new().fg(ACCENT)),
+                Span::raw(" so the hook is installed."),
+            ]));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "The project's own .git is never touched, and files its .gitignore ignores \
+             (build output, .env) are not copied.",
+            dim(),
+        )));
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(card(
+                title,
+                Color::Cyan,
+                focused,
+            )),
+            area,
+        );
+        return;
+    }
+    let several = app
+        .snapshots
+        .iter()
+        .any(|(root, _)| root != &app.snapshots[0].0);
+    let rows: Vec<Row> = app
+        .snapshots
+        .iter()
+        .map(|(root, snap)| {
+            let session = app
+                .sessions
+                .iter()
+                .find(|s| s.id == snap.session_id)
+                .map_or_else(
+                    || {
+                        if snap.session_id == "claudash" {
+                            "claudash".to_string()
+                        } else {
+                            snap.session_id.chars().take(8).collect()
+                        }
+                    },
+                    |s| s.title.clone(),
+                );
+            let mut cells = vec![
+                Cell::from(crate::snapshots::when(snap.at)).style(dim()),
+                Cell::from(snap.label.clone()).style(if snap.label == "before restore" {
+                    Style::new().fg(Color::Magenta)
+                } else {
+                    Style::new().bold()
+                }),
+                Cell::from(plural(u64::from(snap.files), "file")),
+                Cell::from(session).style(dim()),
+            ];
+            if several {
+                cells.push(Cell::from(paths::display(root)).style(dim()));
+            }
+            Row::new(cells)
+        })
+        .collect();
+    let [table_area, hint] =
+        Layout::vertical([Constraint::Min(4), Constraint::Length(3)]).areas(area);
+    let mut widths = vec![
+        Constraint::Length(12),
+        Constraint::Length(14),
+        Constraint::Length(9),
+        Constraint::Fill(2),
+    ];
+    let mut header = vec!["When", "", "Changed", "Session"];
+    if several {
+        widths.push(Constraint::Fill(1));
+        header.push("Checkout");
+    }
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(header)
+                .style(Style::new().fg(Color::Cyan).bold())
+                .bottom_margin(1),
+        )
+        .column_spacing(2)
+        .row_highlight_style(if focused {
+            Style::new().fg(Color::White).bg(HIGHLIGHT)
+        } else {
+            Style::new()
+        })
+        .highlight_symbol(if focused { "▶ " } else { "  " })
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(card(title, Color::Cyan, focused));
+    if let Some(page) = &mut app.project_page {
+        frame.render_stateful_widget(table, table_area, &mut page.snapshots_state);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Enter ", Style::new().fg(Color::Black).bg(Color::Gray)),
+            Span::styled(" what changed  ", dim()),
+            Span::styled(" U ", Style::new().fg(Color::Black).bg(Color::Gray)),
+            Span::styled(
+                " put the files back as they were (asks first; the current state is \
+                 snapshotted too)",
                 dim(),
             ),
         ]))

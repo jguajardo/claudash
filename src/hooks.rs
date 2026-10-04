@@ -30,6 +30,7 @@ struct HookInput {
     session_id: Option<String>,
     hook_event_name: Option<String>,
     notification_type: Option<String>,
+    cwd: Option<String>,
 }
 
 /// What a session last reported.
@@ -112,6 +113,19 @@ fn record(input: &[u8]) -> io::Result<()> {
     };
     if !valid_id(&id) {
         return Ok(());
+    }
+    // The opt-in safety net: snapshot the project around each turn.
+    let label = match event.as_str() {
+        "UserPromptSubmit" => Some("before prompt"),
+        "Stop" => Some("after reply"),
+        _ => None,
+    };
+    if let (Some(label), Some(cwd)) = (label, hook.cwd.as_deref())
+        && crate::snapshots::enabled()
+        && let Some(root) = crate::snapshots::project_root(std::path::Path::new(cwd))
+        && let Err(e) = crate::snapshots::take(&root, &id, label)
+    {
+        eprintln!("claudash hook: snapshot failed: {e}");
     }
     let state = State {
         event,

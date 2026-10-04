@@ -17,6 +17,9 @@ pub struct Config {
     pub notify: Option<bool>,
     /// `false` draws without colors, like the `NO_COLOR` environment variable.
     pub colors: Option<bool>,
+    /// Snapshot each git project's work tree before every prompt and after
+    /// every reply, to undo what `/rewind` can't (see `snapshots`).
+    pub snapshots: Option<bool>,
 }
 
 /// `context_limit = 1000000` or `context_limit = "1M"`.
@@ -76,6 +79,11 @@ pub const TEMPLATE: &str = "\
 
 # Colors. false draws without them, like setting NO_COLOR.
 # colors = true
+
+# Safety net for what /rewind can't undo (Bash and subagent changes): before
+# each prompt and after each reply, commit the project's files to a separate
+# repository in claudash's data directory. Needs `claudash setup --apply`.
+# snapshots = false
 ";
 
 pub fn path() -> Option<PathBuf> {

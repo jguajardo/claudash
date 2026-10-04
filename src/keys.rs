@@ -27,6 +27,7 @@ pub enum Context {
     ProjectSessions,
     Specs,
     Worktrees,
+    Snapshots,
     Mcp,
     /// Skills, agents, commands, hooks, plugins and permission rules.
     Setup,
@@ -50,6 +51,7 @@ impl Context {
             Context::ProjectSessions => "Project sessions",
             Context::Specs => "Specs",
             Context::Worktrees => "Worktrees",
+            Context::Snapshots => "Snapshots",
             Context::Mcp => "MCP servers",
             Context::Setup => "Setup",
             Context::Insights => "Insights",
@@ -430,6 +432,23 @@ pub const BINDINGS: &[Binding] = &[
         ch('P'),
     ),
     key(Worktrees, "Esc  ←", "back to the menu", Some("menu"), None),
+    // Snapshots.
+    key(Snapshots, "↑/↓", "move", None, None),
+    key(
+        Snapshots,
+        "Enter",
+        "what changed in that snapshot",
+        Some("diff"),
+        ENTER,
+    ),
+    key(
+        Snapshots,
+        "U",
+        "put the files back as they were (asks first; snapshots the current state first)",
+        Some("restore"),
+        ch('U'),
+    ),
+    key(Snapshots, "Esc  ←", "back to the menu", Some("menu"), None),
     // MCP servers.
     key(Mcp, "↑/↓", "move", None, None),
     key(
@@ -648,6 +667,7 @@ mod tests {
             ProjectSessions,
             Specs,
             Worktrees,
+            Snapshots,
             Mcp,
             Setup,
             Insights,

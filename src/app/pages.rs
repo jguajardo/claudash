@@ -248,6 +248,7 @@ impl App {
             in_content: false,
             sessions_state: TableState::default().with_selected(Some(0)),
             worktrees_state: TableState::default().with_selected(Some(0)),
+            snapshots_state: TableState::default().with_selected(Some(0)),
             scroll: 0,
         });
         self.specs_state.select(Some(0));
@@ -271,6 +272,7 @@ impl App {
             Section::Sessions => self.handle_project_sessions_key(code),
             Section::Specs => self.handle_specs_key(code),
             Section::Worktrees => self.handle_worktrees_key(code),
+            Section::Snapshots => self.handle_snapshots_key(code),
             Section::Mcp => self.handle_mcp_key(code),
             Section::Setup => self.handle_eco_key(code),
             Section::Overview | Section::Security => self.leave_section(),
@@ -504,6 +506,65 @@ impl App {
                     title: format!(" {} · {} ", change.framework.title(), change.id),
                     lines,
                     scroll: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_snapshots_key(&mut self, code: KeyCode) {
+        let n = self.snapshots.len();
+        let Some(page) = &mut self.project_page else {
+            return;
+        };
+        let state = &mut page.snapshots_state;
+        let selected = self
+            .snapshots
+            .get(state.selected().unwrap_or(0).min(n.saturating_sub(1)))
+            .cloned();
+        match code {
+            KeyCode::Esc | KeyCode::Left => page.in_content = false,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                state.select(Some(state.selected().map_or(0, |i| (i + 1).min(n - 1))))
+            }
+            KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
+            KeyCode::Enter => {
+                let Some((root, snap)) = selected else {
+                    return;
+                };
+                let lines = match crate::snapshots::diff(&root, &snap.sha) {
+                    Ok(text) => text.lines().map(str::to_owned).collect(),
+                    Err(e) => vec![format!("git: {e}")],
+                };
+                self.popup = Some(Popup::Text {
+                    title: format!(" {} · {} ", snap.label, crate::snapshots::when(snap.at)),
+                    lines,
+                    scroll: 0,
+                });
+            }
+            KeyCode::Char('U') => {
+                let Some((root, snap)) = selected else {
+                    return;
+                };
+                self.popup = Some(Popup::Confirm {
+                    title: "Restore snapshot".into(),
+                    lines: vec![
+                        format!(
+                            "Put the files of {} back as they were on {} ({})?",
+                            paths::display(&root),
+                            crate::snapshots::when(snap.at),
+                            snap.label
+                        ),
+                        String::new(),
+                        "The current state is snapshotted first, so this can be undone too.".into(),
+                        "Files created after the snapshot are left where they are, and the".into(),
+                        "project's own git repository is not touched.".into(),
+                    ],
+                    yes: "restore".into(),
+                    action: Confirm::RestoreSnapshot {
+                        root,
+                        sha: snap.sha,
+                    },
                 });
             }
             _ => {}

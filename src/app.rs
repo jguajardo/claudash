@@ -104,17 +104,19 @@ pub enum Section {
     Sessions,
     Specs,
     Worktrees,
+    Snapshots,
     Mcp,
     Setup,
     Security,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::Overview,
         Section::Sessions,
         Section::Specs,
         Section::Worktrees,
+        Section::Snapshots,
         Section::Mcp,
         Section::Setup,
         Section::Security,
@@ -126,6 +128,7 @@ impl Section {
             Section::Sessions => "Sessions",
             Section::Specs => "Specs",
             Section::Worktrees => "Worktrees",
+            Section::Snapshots => "Snapshots",
             Section::Mcp => "MCP servers",
             Section::Setup => "Skills & plugins",
             Section::Security => "Security",
@@ -138,6 +141,7 @@ impl Section {
             Section::Sessions => "≡",
             Section::Specs => "▤",
             Section::Worktrees => "⎇",
+            Section::Snapshots => "↺",
             Section::Mcp => "⌁",
             Section::Setup => "⚙",
             Section::Security => "◈",
@@ -154,6 +158,7 @@ pub struct ProjectPage {
     pub in_content: bool,
     pub sessions_state: ratatui::widgets::TableState,
     pub worktrees_state: ratatui::widgets::TableState,
+    pub snapshots_state: ratatui::widgets::TableState,
     pub scroll: u16,
 }
 
@@ -341,6 +346,11 @@ pub enum Confirm {
     McpLogout {
         server: String,
         cwd: PathBuf,
+    },
+    /// Put a snapshot's files back in a work tree.
+    RestoreSnapshot {
+        root: PathBuf,
+        sha: String,
     },
 }
 
@@ -798,6 +808,10 @@ pub struct App {
     pub insights_scroll: u16,
     /// Selected alert in Now.
     pub alert_cursor: usize,
+    /// Snapshots of the open project's checkouts, newest first.
+    pub snapshots: Vec<(PathBuf, crate::snapshots::Snapshot)>,
+    /// Which project they were read for, and when.
+    snapshots_at: Option<(PathBuf, Instant)>,
     /// No colors (`NO_COLOR` or `colors = false` in the settings file).
     pub no_color: bool,
     /// Where Esc goes from a conversation, the inspector or the logs.
@@ -908,6 +922,8 @@ impl App {
             insights_scroll: 0,
             return_view: View::Sessions,
             alert_cursor: 0,
+            snapshots: Vec::new(),
+            snapshots_at: None,
             no_color: false,
             folder_filter: None,
             git_at: None,
@@ -1014,12 +1030,50 @@ impl App {
         }
         self.poll_jobs();
         self.maybe_start_mcp_check();
+        self.maybe_read_snapshots();
         if self.project_page.as_ref().is_some_and(|p| {
             self.view == View::Projects && matches!(p.section, Section::Setup | Section::Security)
         }) {
             self.ensure_ecosystem();
             self.ensure_plugin_details();
         }
+    }
+
+    /// Whether `snapshots` were read for the project at `dir`.
+    pub fn snapshots_for(&self, dir: &Path) -> bool {
+        self.snapshots_at.as_ref().is_some_and(|(d, _)| d == dir)
+    }
+
+    /// Reads the open project's snapshots again every few seconds while its
+    /// Snapshots section is shown.
+    fn maybe_read_snapshots(&mut self) {
+        let Some(page) = self
+            .project_page
+            .as_ref()
+            .filter(|p| self.view == View::Projects && p.section == Section::Snapshots)
+        else {
+            return;
+        };
+        if self
+            .snapshots_at
+            .as_ref()
+            .is_some_and(|(dir, at)| *dir == page.dir && at.elapsed() < REFRESH_EVERY)
+        {
+            return;
+        }
+        let dir = page.dir.clone();
+        let mut list: Vec<(PathBuf, crate::snapshots::Snapshot)> = self
+            .project_folders(&dir)
+            .into_iter()
+            .flat_map(|root| {
+                crate::snapshots::list(&root)
+                    .into_iter()
+                    .map(move |s| (root.clone(), s))
+            })
+            .collect();
+        list.sort_by_key(|(_, s)| std::cmp::Reverse(s.at));
+        self.snapshots = list;
+        self.snapshots_at = Some((dir, Instant::now()));
     }
 
     pub fn show_flash(&mut self, msg: impl Into<String>, is_error: bool) {
@@ -1273,6 +1327,21 @@ impl App {
                         .show_flash(format!("Removed worktree {}", paths::display(&path)), false),
                     Err(e) => self.show_flash(format!("git refused: {e}"), true),
                 }
+                self.git_at = None;
+            }
+            Confirm::RestoreSnapshot { root, sha } => {
+                match crate::snapshots::restore(&root, &sha) {
+                    Ok(()) => self.show_flash(
+                        format!(
+                            "Restored {} to snapshot {}; the state before it is a snapshot too",
+                            paths::display(&root),
+                            &sha[..sha.len().min(8)]
+                        ),
+                        false,
+                    ),
+                    Err(e) => self.show_flash(format!("Could not restore: {e}"), true),
+                }
+                self.snapshots_at = None;
                 self.git_at = None;
             }
             Confirm::McpLogout { server, cwd } => {
@@ -2453,6 +2522,7 @@ impl App {
                     Section::Sessions => Context::ProjectSessions,
                     Section::Specs => Context::Specs,
                     Section::Worktrees => Context::Worktrees,
+                    Section::Snapshots => Context::Snapshots,
                     Section::Mcp => Context::Mcp,
                     Section::Setup => Context::Setup,
                     Section::Overview | Section::Security => Context::ProjectMenu,
@@ -2484,6 +2554,7 @@ impl App {
                 Context::ProjectSessions,
                 Context::Specs,
                 Context::Worktrees,
+                Context::Snapshots,
                 Context::Mcp,
                 Context::Setup,
             ]);
@@ -2508,6 +2579,7 @@ impl App {
                 Context::ProjectSessions => Some(Section::Sessions),
                 Context::Specs => Some(Section::Specs),
                 Context::Worktrees => Some(Section::Worktrees),
+                Context::Snapshots => Some(Section::Snapshots),
                 Context::Mcp => Some(Section::Mcp),
                 Context::Setup => Some(Section::Setup),
                 _ => None,
@@ -4304,6 +4376,21 @@ mod tests {
             },
         );
         app.specs_state.select(Some(0));
+        app.snapshots = ["/r", "/r/.claude/worktrees/w"]
+            .map(|root| {
+                (
+                    PathBuf::from(root),
+                    crate::snapshots::Snapshot {
+                        sha: "0123456789abcdef".into(),
+                        at: 1_759_000_000,
+                        label: "after reply".into(),
+                        session_id: "x".into(),
+                        files: 3,
+                    },
+                )
+            })
+            .to_vec();
+        app.snapshots_at = Some((PathBuf::from("/r"), Instant::now()));
         let hit = Hit {
             session_id: "x".into(),
             title: "t".into(),
@@ -4343,6 +4430,7 @@ mod tests {
                             in_content: popup % 2 == 1,
                             sessions_state: Default::default(),
                             worktrees_state: Default::default(),
+                            snapshots_state: Default::default(),
                             scroll: u16::MAX,
                         });
                         app.eco_tab = tab;
