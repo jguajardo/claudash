@@ -88,10 +88,11 @@ Comments are written in the language of the branch's commit messages. A review u
 
 ### 4 · Insights
 
-A menu of three sections:
+A menu of sections:
 
 - **Plan & usage**: plan usage gauges with the forecast, a chart of tokens or dollars (`$`) per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week, each with what it would cost at API prices. Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers.
 - **Where the limit went**: each session's, project's and model's part of the current 5-hour and 7-day windows, with their API-equivalent cost. With the status line set up, claudash uses the exact windows Claude Code reports and splits the percentage used among sessions by cost ("api-server took ≈26 of the 64 points"); without it, the 5-hour window is estimated from your activity. How requests count against plan limits isn't published, so the split is an estimate and says so.
+- **Is your plan worth it**: what your last 30 days would have cost at API prices against what your plan costs ("≈$614 of use, 7.4× what Max 5x costs"), how many times a 5-hour or 7-day limit stopped you, and a table of what Pro, Max 5x, Max 20x and the API would have cost you a month and how often each would have stopped you. The plan comes from `plan = "max5x"` in the settings file, or from the tier Claude Code keeps in its account info. Anthropic doesn't publish plan limits in tokens, so claudash calibrates on your own data: how much API-equivalent cost a 5-hour window held when the limit stopped you (or the status line's reading of the current window), and the busiest window that didn't stop you. Other plans are scaled by Anthropic's 5x and 20x, and since limits don't follow API prices exactly, their stops are a range. `claudash plan` prints the same.
 - **Where tokens go** over the last 7 days, from your own transcripts:
   - **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
   - **Costliest prompts**: every prompt with the tokens processed by all the requests it caused.
@@ -129,6 +130,7 @@ claudash status            # ▲ 1 needs you · 2 working · 1 waiting · 5h 64%
 claudash status --json     # the same for scripts
 claudash summary           # today's summary as Markdown (-o FILE to save it)
 claudash export 6b1f3c2e   # a conversation as Markdown, by session ID or its first characters
+claudash plan              # is your plan worth it; --json
 claudash continue          # continue the sessions a plan limit stopped, once it has reset
 claudash continue --wait   # wait for the reset, then continue them (leave it running overnight)
 ```
@@ -197,6 +199,7 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 | Context window when the status line hasn't reported one | `context_limit = "200k"` | `--context-limit <TOKENS>` | `CLAUDASH_CONTEXT_LIMIT` | `1M` |
 | Desktop notifications and bell | `notify = false` | `--no-notify` | | on |
 | Colors | `colors = false` | | [`NO_COLOR`](https://no-color.org) | on |
+| Your Claude plan, for Is your plan worth it | `plan = "max5x"` (`pro`, `max20x`, `api`) | | | read from Claude Code |
 | Continue sessions a plan limit stopped as soon as it resets, while claudash is open | `auto_continue = true` | | | off |
 | Snapshots of project files before each prompt and after each reply (see [Projects](#3--projects)) | `snapshots = true` | | | off |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |

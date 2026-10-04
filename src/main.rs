@@ -16,6 +16,7 @@ mod mcp;
 mod notify;
 mod paths;
 mod permissions;
+mod plan;
 mod pricing;
 mod projects;
 mod prompts;
@@ -52,6 +53,9 @@ Usage:
                                          (--plain without colors)
   claudash quota [--json]                where the current 5-hour and 7-day windows went,
                                          by session, project and model
+  claudash plan [--json]                 is your plan worth it: your use at API prices
+                                         against its price, and how often each plan
+                                         would have stopped you
   claudash continue [--wait] [--dry-run] continue sessions a plan limit stopped, in
                                          the background, once it has reset; --wait
                                          waits for the reset first
@@ -101,6 +105,9 @@ enum Cli {
     Continue {
         wait: bool,
         dry_run: bool,
+    },
+    Plan {
+        json: bool,
     },
     Wrapped {
         month: bool,
@@ -216,6 +223,14 @@ fn parse_args(
                     [] => Ok(Cli::Quota { json: false }),
                     ["--json"] => Ok(Cli::Quota { json: true }),
                     _ => Err(format!("usage: claudash quota [--json]\n\n{HELP}")),
+                };
+            }
+            "plan" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [] => Ok(Cli::Plan { json: false }),
+                    ["--json"] => Ok(Cli::Plan { json: true }),
+                    _ => Err(format!("usage: claudash plan [--json]\n\n{HELP}")),
                 };
             }
             "continue" => {
@@ -336,6 +351,7 @@ fn main() -> std::io::Result<()> {
         }
         Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
         Ok(Cli::Quota { json }) => return exit_on_error("quota", report::quota(json)),
+        Ok(Cli::Plan { json }) => return exit_on_error("plan", report::plan(json)),
         Ok(Cli::Continue { wait, dry_run }) => {
             return exit_on_error("continue", report::continue_stopped(wait, dry_run));
         }
@@ -374,6 +390,7 @@ fn main() -> std::io::Result<()> {
     // https://no-color.org: any non-empty NO_COLOR turns colors off.
     app.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
         || settings.as_ref().is_ok_and(|s| s.colors == Some(false));
+    app.plan = crate::plan::detect(settings.as_ref().ok().and_then(|s| s.plan.as_deref()));
     app.auto_continue = settings
         .as_ref()
         .is_ok_and(|s| s.auto_continue == Some(true));
@@ -501,6 +518,7 @@ mod tests {
             colors: None,
             snapshots: None,
             auto_continue: None,
+            plan: None,
         };
         let parse = |list: &[&str], env: Option<&str>| {
             parse_args(args(list), env.map(str::to_owned), &settings)

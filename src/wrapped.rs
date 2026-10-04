@@ -190,7 +190,7 @@ fn sorted_counts(map: HashMap<String, u32>) -> Vec<(String, u32)> {
 }
 
 /// `~/code/api-server` → `api-server`.
-fn project_name(path: &str) -> String {
+pub fn project_name(path: &str) -> String {
     path.trim_end_matches('/')
         .rsplit(['/', '\\'])
         .next()
@@ -200,7 +200,7 @@ fn project_name(path: &str) -> String {
 }
 
 /// `claude-haiku-4-5-20251001` → `haiku-4-5`.
-fn short_model(model: &str) -> String {
+pub fn short_model(model: &str) -> String {
     let name = model.strip_prefix("claude-").unwrap_or(model);
     let parts: Vec<&str> = name.split('-').collect();
     match parts.last() {

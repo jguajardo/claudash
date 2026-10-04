@@ -1542,10 +1542,7 @@ fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
                 Color::Green
             }),
         ),
-        Span::styled(
-            " · /compact before a break makes the next one cheaper",
-            dim(),
-        ),
+        Span::styled(" · tip: /compact before a long break", dim()),
     ]);
     let mut tool_line = vec![
         Span::styled("Tool output  ", dim()),
@@ -2041,10 +2038,13 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
     // Live feed of tool calls.
     let rows = feed_area.height.saturating_sub(2) as usize;
     let feed = app.feed(rows.max(1));
-    let block = panel("Live feed", Color::Cyan).title_bottom(
-        Line::from(" tool calls of sessions active in the last hour · refreshes every 2s ")
-            .right_aligned(),
-    );
+    // The longer note only where it fits.
+    let note = if feed_area.width >= 80 {
+        " tool calls of sessions active in the last hour · refreshes every 2s "
+    } else {
+        " sessions active in the last hour "
+    };
+    let block = panel("Live feed", Color::Cyan).title_bottom(Line::from(note).right_aligned());
     if feed.is_empty() {
         let text = if app.analyses.is_empty() {
             format!("{} Reading sessions…", app.spinner())

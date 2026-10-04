@@ -173,7 +173,8 @@ impl RawUsage {
 
 /// "$0.42", "$12.40", "$1,284".
 pub fn format_usd(usd: f64) -> String {
-    if usd >= 1000.0 {
+    // Cents only where they matter.
+    if usd >= 100.0 {
         let whole = usd.round() as u64;
         let s = whole.to_string();
         let mut out = String::new();
@@ -234,6 +235,7 @@ mod tests {
     fn formats_dollars() {
         assert_eq!(format_usd(0.4242), "$0.42");
         assert_eq!(format_usd(12.4), "$12.40");
+        assert_eq!(format_usd(201.05), "$201");
         assert_eq!(format_usd(1284.4), "$1,284");
         assert_eq!(format_usd(1_234_567.0), "$1,234,567");
     }

@@ -358,6 +358,53 @@ pub fn wrapped(month: bool, redact: bool, plain: bool) -> io::Result<()> {
 
 /// `claudash quota`: each session's, project's and model's part of the current
 /// 5-hour and 7-day plan windows.
+/// `claudash plan`: is your plan worth it.
+pub fn plan(json: bool) -> io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    let all = sessions::load_sessions(&dir, &[])?;
+    let setting = crate::config::load().ok().and_then(|c| c.plan);
+    let plan = crate::plan::detect(setting.as_deref());
+    let fit = crate::plan::fit(
+        &all,
+        &statusline::load(),
+        plan,
+        chrono::Utc::now().timestamp(),
+    );
+    let mut out = io::stdout().lock();
+    if json {
+        let round = |x: f64| (x * 100.0).round() / 100.0;
+        let value = serde_json::json!({
+            "plan": fit.plan.map(|(p, _)| p.name()),
+            "plan_from": fit.plan.map(|(_, from)| from),
+            "days": fit.days,
+            "api_equivalent_usd": round(fit.cost),
+            "api_equivalent_usd_per_month": round(fit.monthly_cost()),
+            "value": fit.value().map(round),
+            "stopped_5h": fit.stopped_5h,
+            "stopped_7d": fit.stopped_7d,
+            "windows_5h": fit.windows,
+            "capacity_usd_per_5h": fit.capacity.as_ref().map(|c| [round(c.low), round(c.high)]),
+            "capacity_from": fit.capacity.as_ref().map(|c| &c.from),
+            "options": fit.options.iter().map(|o| serde_json::json!({
+                "plan": o.plan.name(),
+                "usd_per_month": round(o.monthly),
+                "stops_5h": o.stops.map(|(least, most)| [least, most]),
+            })).collect::<Vec<_>>(),
+            "cheapest_unstopped": fit.cheapest_unstopped().map(|o| o.plan.name()),
+        });
+        return writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    }
+    for line in crate::plan::report(&fit) {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
 /// `claudash continue`: lists sessions a plan limit stopped and continues
 /// those whose limit has reset in the background; with `wait`, waits for the
 /// next reset and continues those too.

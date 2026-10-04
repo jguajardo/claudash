@@ -23,6 +23,9 @@ pub struct Config {
     /// Continue sessions a plan limit stopped, in the background, as soon as
     /// it resets (while claudash is open).
     pub auto_continue: Option<bool>,
+    /// Your Claude plan: "pro", "max5x", "max20x" or "api". claudash reads it
+    /// from Claude Code's account info when this isn't set.
+    pub plan: Option<String>,
 }
 
 /// `context_limit = 1000000` or `context_limit = "1M"`.
@@ -91,6 +94,10 @@ pub const TEMPLATE: &str = "\
 # Continue sessions a plan limit stopped, in the background, as soon as the
 # limit resets, while claudash is open. Off: Enter on the alert in Now does it.
 # auto_continue = false
+
+# Your Claude plan, for Insights › Is your plan worth it: \"pro\", \"max5x\",
+# \"max20x\" or \"api\". Read from Claude Code's account info when not set.
+# plan = \"max5x\"
 ";
 
 pub fn path() -> Option<PathBuf> {

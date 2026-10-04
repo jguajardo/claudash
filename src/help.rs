@@ -58,7 +58,7 @@ const VIEWS: &[ViewHelp] = &[
         shows: "What needs you right now. Open sessions, the ones that need you first, with what \
                 they're asking to do, their last tool call, how full their context is and how many \
                 subagents are running; background sessions (claude --bg); alerts across projects \
-                (credentials in transcripts, risky commands, MCP servers that failed or need you to \
+                (sessions a plan limit stopped, which Enter continues once it resets; credentials in transcripts, risky commands, MCP servers that failed or need you to \
                 sign in, stale specs, forgotten worktrees); plan usage with a forecast; and a live \
                 feed of every tool call from the last hour. Tab moves into the alerts; Enter \
                 takes you where to act on one.",
@@ -76,14 +76,15 @@ const VIEWS: &[ViewHelp] = &[
         shows: "Every project as a card: its branch and git state, sessions, open ones, spec \
                 progress, MCP health and alerts. Enter opens its page, with a menu of sections: \
                 Overview, Sessions, Specs (OpenSpec, spec-kit, Kiro, Task Master, GSD), Worktrees & \
-                branches (with AI branch review), MCP servers (logs, sign in), Skills, plugins & \
-                rules, and Security.",
+                branches (with AI branch review), Snapshots (undo what /rewind can't), MCP servers \
+                (logs, sign in), Skills, plugins & rules, and Security.",
         contexts: &[
             Context::Projects,
             Context::ProjectMenu,
             Context::ProjectSessions,
             Context::Specs,
             Context::Worktrees,
+            Context::Snapshots,
             Context::Mcp,
             Context::Setup,
         ],
@@ -96,7 +97,9 @@ const VIEWS: &[ViewHelp] = &[
                 the context by command, the costliest prompts, reply length against the previous 30 \
                 days. Where the limit went: each session's, project's and model's part of the \
                 current 5-hour and 7-day windows, with the share of the limit when it's reported \
-                (estimated by API-equivalent cost). Security: credentials found in transcripts and risky things Claude did.",
+                (estimated by API-equivalent cost). Is your plan worth it: your use at API prices against \
+                the plan's price, and how often Pro, Max 5x and Max 20x would have stopped you. \
+                Security: credentials found in transcripts and risky things Claude did.",
         contexts: &[Context::Insights],
     },
     ViewHelp {
@@ -123,7 +126,7 @@ const VIEWS: &[ViewHelp] = &[
 
 pub fn lines(app: &App) -> Vec<Line<'static>> {
     let mut out = vec![
-        heading("claudash — a control panel for Claude Code"),
+        heading("claudash — the control room for Claude Code"),
         para(
             "claudash reads what Claude Code keeps on this machine and puts it on one screen, and",
         ),

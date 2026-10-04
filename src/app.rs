@@ -167,14 +167,16 @@ pub struct ProjectPage {
 pub enum InsightsSection {
     Usage,
     Quota,
+    Plan,
     Tokens,
     Security,
 }
 
 impl InsightsSection {
-    pub const ALL: [InsightsSection; 4] = [
+    pub const ALL: [InsightsSection; 5] = [
         InsightsSection::Usage,
         InsightsSection::Quota,
+        InsightsSection::Plan,
         InsightsSection::Tokens,
         InsightsSection::Security,
     ];
@@ -183,6 +185,7 @@ impl InsightsSection {
         match self {
             InsightsSection::Usage => "Plan & usage",
             InsightsSection::Quota => "Where the limit went",
+            InsightsSection::Plan => "Is your plan worth it",
             InsightsSection::Tokens => "Where tokens go",
             InsightsSection::Security => "Security",
         }
@@ -192,6 +195,7 @@ impl InsightsSection {
         match self {
             InsightsSection::Usage => "▆",
             InsightsSection::Quota => "◑",
+            InsightsSection::Plan => "$",
             InsightsSection::Tokens => "◔",
             InsightsSection::Security => "◈",
         }
@@ -484,12 +488,19 @@ pub enum Target {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Alert {
     Problem(Problem),
-    /// An MCP server checked in `dir` that failed or needs you to sign in.
+    /// An MCP server checked in `dir` that failed to connect.
     Mcp {
         dir: PathBuf,
         name: String,
         full_name: String,
-        failed: bool,
+    },
+    /// MCP servers checked in `dir` that need you to sign in: one alert for
+    /// all of them, names once each.
+    McpSignIn {
+        dir: PathBuf,
+        names: Vec<String>,
+        /// The first one's full name, selected when you go there.
+        first: String,
     },
     /// Sessions a plan limit stopped.
     LimitStopped {
@@ -826,6 +837,8 @@ pub struct App {
     pub insights_scroll: u16,
     /// Selected alert in Now.
     pub alert_cursor: usize,
+    /// Your Claude plan and where it was learned (see `plan::detect`).
+    pub plan: Option<(crate::plan::Plan, &'static str)>,
     /// `auto_continue = true`: continue stopped sessions at the reset.
     pub auto_continue: bool,
     /// Enter on the stopped-sessions alert before the reset: continue them
@@ -948,6 +961,7 @@ impl App {
             insights_scroll: 0,
             return_view: View::Sessions,
             alert_cursor: 0,
+            plan: None,
             auto_continue: false,
             continue_at_reset: false,
             continued: HashSet::new(),

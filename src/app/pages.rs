@@ -9,7 +9,7 @@ use super::{
     ActivityFocus, Alert, App, Confirm, InsightsSection, Popup, Problem, ProjectPage, Section,
     Target, View, paths, specs, token_savers,
 };
-use crate::mcp::McpStatus;
+use crate::mcp::{McpServer, McpStatus};
 use crate::{projects::Repo, sessions::Session};
 
 /// A project in the Projects grid: a repository or a folder outside git.
@@ -32,17 +32,29 @@ impl App {
             let Ok(servers) = &snapshot.result else {
                 continue;
             };
+            let mut sign_in: Vec<&McpServer> = Vec::new();
             for s in servers {
-                let failed = match s.status {
-                    McpStatus::Failed(_) => true,
-                    McpStatus::NeedsAuth => false,
-                    _ => continue,
-                };
-                alerts.push(Alert::Mcp {
+                match s.status {
+                    McpStatus::Failed(_) => alerts.push(Alert::Mcp {
+                        dir: dir.clone(),
+                        name: s.name.clone(),
+                        full_name: s.full_name.clone(),
+                    }),
+                    McpStatus::NeedsAuth => sign_in.push(s),
+                    _ => {}
+                }
+            }
+            if let Some(first) = sign_in.first() {
+                let mut names: Vec<String> = Vec::new();
+                for s in &sign_in {
+                    if !names.contains(&s.name) {
+                        names.push(s.name.clone());
+                    }
+                }
+                alerts.push(Alert::McpSignIn {
                     dir: dir.clone(),
-                    name: s.name.clone(),
-                    full_name: s.full_name.clone(),
-                    failed,
+                    names,
+                    first: first.full_name.clone(),
                 });
             }
         }
@@ -80,9 +92,12 @@ impl App {
         match alert {
             Alert::LimitStopped { closed, .. } if *closed > 0 => Some(Target::ContinueStopped),
             Alert::LimitStopped { .. } => None,
-            Alert::Mcp { dir, full_name, .. } => {
-                project(dir, Section::Mcp, Some(full_name.clone()))
-            }
+            Alert::Mcp { dir, full_name, .. }
+            | Alert::McpSignIn {
+                dir,
+                first: full_name,
+                ..
+            } => project(dir, Section::Mcp, Some(full_name.clone())),
             Alert::Problem(p) => match p {
                 Problem::SharedFolder { dir, .. } => project(dir, Section::Sessions, None),
                 Problem::SameFile { .. } => None,

@@ -146,11 +146,11 @@ fn card_lines(app: &App, c: &Card) -> Vec<Line<'static>> {
     let mut spans = vec![Span::styled(format!("◷ {last}"), dim())];
     if s.week_tokens > 0 {
         spans.push(Span::styled(
-            format!(" · {} tokens", human_tokens(s.week_tokens)),
+            format!(" · week: {} tokens", human_tokens(s.week_tokens)),
             dim(),
         ));
         spans.push(Span::styled(
-            format!(" · ≈{} this week", crate::pricing::format_usd(s.week_cost)),
+            format!(" ≈{}", crate::pricing::format_usd(s.week_cost)),
             Style::new().fg(Color::Green),
         ));
     }
@@ -198,21 +198,35 @@ fn card_lines(app: &App, c: &Card) -> Vec<Line<'static>> {
             Style::new().fg(Color::Red),
         ));
     }
+    let mut mcp_line = None;
     if let Some(Ok(servers)) = app.mcp_cache.get(&c.dir).map(|m| &m.result) {
-        let bad = servers
-            .iter()
-            .filter(|s| !matches!(s.status, crate::mcp::McpStatus::Connected))
-            .count();
-        if bad > 0 {
-            alerts.push(Span::styled(
-                format!("⚡ {bad} MCP need a look"),
+        let count = |pick: fn(&crate::mcp::McpStatus) -> bool| {
+            servers.iter().filter(|s| pick(&s.status)).count()
+        };
+        let failed = count(|s| matches!(s, crate::mcp::McpStatus::Failed(_)));
+        let sign_in = count(|s| matches!(s, crate::mcp::McpStatus::NeedsAuth));
+        // A line of its own: it doesn't fit next to the security badges.
+        let mut mcp = Vec::new();
+        if failed > 0 {
+            mcp.push(Span::styled(
+                format!("✗ {failed} MCP failed  "),
+                Style::new().fg(Color::Red),
+            ));
+        }
+        if sign_in > 0 {
+            mcp.push(Span::styled(
+                format!("◐ {sign_in} MCP to sign in"),
                 Style::new().fg(Color::Yellow),
             ));
+        }
+        if !mcp.is_empty() {
+            mcp_line = Some(Line::from(mcp));
         }
     }
     if !alerts.is_empty() {
         lines.push(Line::from(alerts));
     }
+    lines.extend(mcp_line);
     lines
 }
 
@@ -950,6 +964,9 @@ fn draw_project_security(frame: &mut Frame, app: &App, area: Rect, dir: &std::pa
     if events.is_empty() {
         lines.push(Line::from(Span::styled("  nothing risky", dim())));
     }
+    // One line each: the command is cut to the room left.
+    // Borders and padding take 4 columns.
+    let room = (area.width as usize).saturating_sub(4 + 2 + 7 + 34);
     for (e, title) in events.iter().take(40) {
         let color = match e.severity {
             Severity::High => Color::Red,
@@ -963,10 +980,13 @@ fn draw_project_security(frame: &mut Frame, app: &App, area: Rect, dir: &std::pa
             ),
             Span::styled(format!("{:<34}", e.what), Style::new().bold()),
             Span::styled(
-                e.detail.chars().take(70).collect::<String>(),
+                fit_text(
+                    &e.detail,
+                    room.saturating_sub(title.chars().count().min(24) + 4),
+                ),
                 Style::new().fg(Color::Gray),
             ),
-            Span::styled(format!("  · {title}"), dim()),
+            Span::styled(format!("  · {}", fit_text(title, 24)), dim()),
         ]));
     }
     lines.push(Line::default());
@@ -1010,4 +1030,14 @@ fn draw_project_security(frame: &mut Frame, app: &App, area: Rect, dir: &std::pa
             .block(card("Security", Color::Red, false)),
         area,
     );
+}
+
+/// `text` cut to `width` characters, with "…" when it's cut.
+fn fit_text(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut s: String = text.chars().take(width.saturating_sub(1)).collect();
+    s.push('…');
+    s
 }

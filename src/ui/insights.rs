@@ -33,9 +33,55 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.insights {
         InsightsSection::Usage => draw_usage(frame, app, content),
         InsightsSection::Quota => draw_quota(frame, app, content),
+        InsightsSection::Plan => draw_plan(frame, app, content),
         InsightsSection::Tokens => draw_token_report(frame, app, content),
         InsightsSection::Security => draw_security(frame, app, content),
     }
+}
+
+/// Is your plan worth it: your use at API prices against the plan's price,
+/// and how often each plan would have stopped you.
+fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
+    let now = chrono::Utc::now().timestamp();
+    let fit = crate::plan::fit(&app.sessions, &app.statusline, app.plan, now);
+    let report = crate::plan::report(&fit);
+    let yours = fit.plan.map(|(p, _)| p.name());
+    let mut lines: Vec<Line> = Vec::new();
+    let mut in_table = false;
+    for (i, text) in report.into_iter().enumerate() {
+        let line = if i < 2 {
+            Line::from(Span::styled(text, Style::new().bold()))
+        } else if text.starts_with("If you had") {
+            in_table = true;
+            Line::from(Span::styled(text, Style::new().fg(Color::Cyan).bold()))
+        } else if text.is_empty() {
+            in_table = false;
+            Line::default()
+        } else if in_table && yours.is_some_and(|y| text.starts_with(&format!("{y} (yours)"))) {
+            Line::from(Span::styled(
+                text,
+                Style::new().fg(Color::LightMagenta).bold(),
+            ))
+        } else if in_table {
+            Line::from(text)
+        } else if text.starts_with("How it's estimated") {
+            Line::from(Span::styled(text, dim()))
+        } else {
+            Line::from(Span::styled(text, Style::new().fg(Color::Yellow)))
+        };
+        lines.push(line);
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.insights_scroll, 0))
+            .block(card(
+                "Is your plan worth it · last 30 days",
+                Color::LightMagenta,
+                false,
+            )),
+        area,
+    );
 }
 
 /// Where the current 5-hour and 7-day windows went, side by side.
@@ -110,6 +156,20 @@ fn draw_window(
         Line::default(),
     ];
     let bar_width = 12usize;
+    // Names are cut to the room left after the bar, share and cost.
+    // Borders and padding take 4 columns.
+    let room = (area.width as usize)
+        .saturating_sub(4 + 2 + bar_width + 1 + 13 + 10)
+        .max(8);
+    let cut = |text: &str| -> String {
+        if text.chars().count() <= room {
+            text.to_string()
+        } else {
+            let mut s: String = text.chars().take(room - 1).collect();
+            s.push('…');
+            s
+        }
+    };
     let bar = |fraction: f64| {
         let filled = ((fraction * bar_width as f64).round() as usize).min(bar_width);
         format!("{}{}", "█".repeat(filled), "░".repeat(bar_width - filled))
@@ -142,10 +202,14 @@ fn draw_window(
                 format!("{:>8}  ", crate::pricing::format_usd(share.usage.cost)),
                 Style::new().fg(Color::Green),
             ),
-            Span::raw(share.title.chars().take(40).collect::<String>()),
+            Span::raw(cut(&share.title)),
         ]));
         lines.push(Line::from(Span::styled(
-            format!("{}{}", " ".repeat(bar_width + 3), share.project),
+            format!(
+                "{}{}",
+                " ".repeat(bar_width + 3),
+                cut(&crate::wrapped::project_name(&share.project))
+            ),
             dim(),
         )));
     }
@@ -155,6 +219,7 @@ fn draw_window(
             title,
             Style::new().fg(Color::LightMagenta).bold(),
         )));
+        let models = title == "Models";
         for (name, usage) in rows.iter().take(5) {
             let fraction = if ledger.total.cost > 0.0 {
                 usage.cost / ledger.total.cost
@@ -166,12 +231,19 @@ fn draw_window(
                     format!("  {} ", bar(fraction)),
                     Style::new().fg(Color::Cyan),
                 ),
-                Span::styled(format!("{:>3.0}%  ", fraction * 100.0), Style::new().bold()),
+                Span::styled(
+                    format!("{:>3.0}%{:<9}", fraction * 100.0, ""),
+                    Style::new().bold(),
+                ),
                 Span::styled(
                     format!("{:>8}  ", crate::pricing::format_usd(usage.cost)),
                     Style::new().fg(Color::Green),
                 ),
-                Span::raw(name.clone()),
+                Span::raw(if models {
+                    cut(&crate::wrapped::short_model(name))
+                } else {
+                    cut(&crate::wrapped::project_name(name))
+                }),
             ]));
         }
     }

@@ -60,6 +60,8 @@ pub struct SessionTokens {
     pub timeline: Vec<(i64, Usage)>,
     /// The session's last reply was a plan-limit error: it stopped there.
     pub limit_stop: Option<LimitStop>,
+    /// Every time a plan limit stopped the main conversation, oldest first.
+    pub limit_hits: Vec<LimitStop>,
 }
 
 /// Where a session stopped because it hit a plan limit.
@@ -226,6 +228,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
     let mut model = None;
     let mut cost_usd = None;
     let mut limit_stop = None;
+    let mut limit_hits = Vec::new();
 
     for line in reader.lines().map_while(Result::ok) {
         // Cheap filter before deserializing: skips user messages, attachments,
@@ -262,6 +265,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
                         resets_at,
                         window: quota.rate_limit_type.clone(),
                     });
+                    limit_hits.extend(limit_stop.clone());
                 }
                 if let Some(msg) = record.message
                     && let Some(usage) = msg.usage()
@@ -339,6 +343,7 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             subagent_total,
             timeline,
             limit_stop,
+            limit_hits,
         },
     })
 }
@@ -434,7 +439,9 @@ mod tests {
         assert_eq!(stopped.at, 1_791_100_617);
         assert_eq!(stopped.window_label(), "5-hour");
         // It went on later: not stopped any more.
-        assert_eq!(parse(&[stop, reply]).tokens.limit_stop, None);
+        let went_on = parse(&[stop, reply]).tokens;
+        assert_eq!(went_on.limit_stop, None);
+        assert_eq!(went_on.limit_hits.len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 

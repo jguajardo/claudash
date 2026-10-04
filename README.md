@@ -35,7 +35,7 @@ claudash                 # 1 Now · 2 Sessions · 3 Projects · 4 Insights · : 
 You run Claude Code in three terminals and a background session. One has been waiting on a permission prompt for twenty minutes. You hit your 5-hour limit and don't know which session ate it. Last week you pasted an API key into a prompt, and it's still sitting in a plain-text transcript. claudash puts all of that on one screen:
 
 - **What needs you, and what it wants.** Every open session, interactive or background, the ones waiting on you first, with the exact command or edit each one is asking to run. Desktop notification when one starts waiting.
-- **Where the limit went.** Each session's, project's and model's part of the current 5-hour and 7-day windows, and what all of it would cost at API prices, by day, project, model and session. Sessions the limit stopped continue on their own when it resets.
+- **Where the limit went.** Each session's, project's and model's part of the current 5-hour and 7-day windows, and what all of it would cost at API prices, by day, project, model and session. Sessions the limit stopped continue on their own when it resets, and you see whether Pro, Max 5x, Max 20x or the API fits your use.
 - **What Claude left on disk.** API keys and tokens in your transcripts and prompt history (shown masked), force pushes, `curl | sh`, `sudo` and other risky commands, and permission rules broader than you think.
 - **Each project on one page.** Its sessions, MCP servers (with their logs and sign-in), spec-driven changes (OpenSpec, spec-kit, Kiro, Task Master) and their next step, worktrees, snapshots that undo what `/rewind` can't (Bash commands, subagents), an AI review of any branch, skills and plugins with what they cost you per session.
 
@@ -63,6 +63,7 @@ claudash status            # ▲ 1 needs you · 2 working · 5h 64% → limit 13
 claudash usage             # tokens and API-equivalent dollars by day; monthly, projects, models, sessions; --json
 claudash quota             # where the current 5-hour and 7-day windows went; --json
 claudash wrapped --redact  # your week on a card; month; --plain
+claudash plan              # is your plan worth it: API-equivalent use vs. price, stops per plan
 claudash continue --wait   # continue the sessions a plan limit stopped when it resets
 claudash summary           # today as Markdown
 claudash export <ID>       # a conversation as Markdown, credentials masked
@@ -126,6 +127,8 @@ claudash makes no network requests of its own. It reads local files and runs the
 | Skills, agents, commands, hooks | `SKILL.md` and Markdown frontmatter, `hooks` in settings files and plugins' `hooks/hooks.json` | Documented |
 | Sessions, conversations, tokens, cost | `~/.claude/projects/<project>/<session-id>.jsonl` | Internal |
 | Prompt history | `~/.claude/history.jsonl` (pasted content is left out) | Internal |
+| Your plan (Pro, Max 5x, Max 20x) | `oauthAccount` rate-limit tier in `~/.claude.json`, unless `plan` is set in the settings file | Internal |
+| Where a plan limit stopped a session, and when it resets | The `rate_limit` error reply in its transcript | Internal |
 | MCP server logs | `~/.cache/claude-cli-nodejs/<project>/mcp-logs-<server>/` | Internal |
 
 Its settings file is `~/.config/claudash/config.toml` (see [Configuration](docs/guide.md#configuration)). claudash's own data lives in `~/.local/share/claudash/` (`~/Library/Application Support/claudash/` on macOS): `library.json` for tags, notes and stars, `usage-history.json` for the charts, `trash/`, and `snapshots/` when snapshots are on.

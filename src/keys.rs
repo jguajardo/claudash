@@ -126,7 +126,7 @@ pub const BINDINGS: &[Binding] = &[
     key(
         Global,
         "4",
-        "Insights: usage, where tokens go, security",
+        "Insights: usage, limits, your plan, where tokens go, security",
         None,
         ch('4'),
     ),

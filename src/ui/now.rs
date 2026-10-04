@@ -147,18 +147,29 @@ fn alert_line(alert: &Alert) -> Line<'static> {
             spans.push(Span::styled(format!(" · {}", what.join(" · ")), dim()));
             Line::from(spans)
         }
-        Alert::Mcp {
-            dir, name, failed, ..
-        } => {
-            let (mark, color, what) = if *failed {
-                ("✗ ", Color::Red, "failed to connect")
-            } else {
-                ("◐ ", Color::Yellow, "needs you to sign in")
+        Alert::Mcp { dir, name, .. } => Line::from(vec![
+            Span::styled("✗ ", Style::new().fg(Color::Red)),
+            Span::styled(format!("MCP {name}"), Style::new().fg(Color::Red)),
+            Span::styled(
+                format!(" failed to connect · {}", paths::display(dir)),
+                dim(),
+            ),
+        ]),
+        Alert::McpSignIn { dir, names, .. } => {
+            let what = match names.as_slice() {
+                [one] => format!("MCP {one} needs you to sign in"),
+                [first, second] => format!("MCP {first} and {second} need you to sign in"),
+                [first, second, rest @ ..] => format!(
+                    "{} MCP servers need you to sign in: {first}, {second} and {} more",
+                    names.len(),
+                    rest.len()
+                ),
+                [] => String::new(),
             };
             Line::from(vec![
-                Span::styled(mark, Style::new().fg(color)),
-                Span::styled(format!("MCP {name}"), Style::new().fg(color)),
-                Span::styled(format!(" {what} · {}", paths::display(dir)), dim()),
+                Span::styled("◐ ", Style::new().fg(Color::Yellow)),
+                Span::styled(what, Style::new().fg(Color::Yellow)),
+                Span::styled(format!(" · {}", paths::display(dir)), dim()),
             ])
         }
     }
@@ -173,11 +184,8 @@ fn draw_plan_card(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(_, u)| u.cost)
         .sum();
     let today_cost = days.get(&today).map_or(0.0, |u| u.cost);
-    let title = format!(
-        "Plan · ≈{} today · ≈{} this week",
-        crate::pricing::format_usd(today_cost),
-        crate::pricing::format_usd(week)
-    );
+    // Whole dollars: the title must fit a narrow card.
+    let title = format!("Plan · today ≈${today_cost:.0} · week ≈${week:.0}");
     let block = card(&title, Color::LightMagenta, false);
     let windows = plan_windows(app);
     if windows.is_empty() {
