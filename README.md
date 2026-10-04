@@ -60,7 +60,7 @@ Anywhere: `f` searches every conversation, `h` searches every prompt you've type
 From the command line, for scripts and status bars:
 
 ```sh
-claudash status            # ▲ 1 needs you · 2 working · 5h 64% · 7d 31%   (tmux, Waybar…; --json)
+claudash status            # ▲ 1 needs you · 2 working · 5h 64% → limit 13:10 · 7d 31%   (tmux, Waybar…; --json)
 claudash usage             # tokens and API-equivalent dollars by day; monthly, projects, models, sessions; --json
 claudash quota             # where the current 5-hour and 7-day windows went; --json
 claudash wrapped --redact  # your week on a card; month; --plain

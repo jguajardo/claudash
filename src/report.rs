@@ -20,6 +20,8 @@ pub struct Status {
     /// Plan usage percentages, when the status line has reported them.
     pub five_hour: Option<f64>,
     pub seven_day: Option<f64>,
+    /// When the 5-hour limit is reached at the current pace (local "HH:MM").
+    pub limit_at: Option<String>,
 }
 
 impl Status {
@@ -41,7 +43,10 @@ impl Status {
         }
         for (label, pct) in [("5h", self.five_hour), ("7d", self.seven_day)] {
             if let Some(pct) = pct {
-                parts.push(format!("{label} {pct:.0}%"));
+                match (&self.limit_at, label) {
+                    (Some(at), "5h") => parts.push(format!("{label} {pct:.0}% → limit {at}")),
+                    _ => parts.push(format!("{label} {pct:.0}%")),
+                }
             }
         }
         parts.join(" · ")
@@ -54,6 +59,7 @@ impl Status {
             "waiting": self.waiting,
             "five_hour": self.five_hour,
             "seven_day": self.seven_day,
+            "five_hour_limit_at": self.limit_at,
         })
         .to_string()
     }
@@ -71,10 +77,18 @@ fn current() -> Result<Status, String> {
             Activity::Waiting | Activity::Ended => status.waiting += 1,
         }
     }
-    if let Some((limits, _)) = statusline::load().rate_limits {
+    let store = statusline::load();
+    if let Some((limits, _)) = &store.rate_limits {
         let pct = |w: Option<Window>| w.filter(Window::is_current).map(|w| w.used_percentage);
         status.five_hour = pct(limits.five_hour);
         status.seven_day = pct(limits.seven_day);
+    }
+    let now = chrono::Utc::now().timestamp();
+    if let Some(statusline::Forecast::LimitAt(at)) =
+        statusline::forecast(&store.samples, |s| s.five_hour, 3_600, now)
+    {
+        status.limit_at = chrono::DateTime::from_timestamp(at, 0)
+            .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
     }
     Ok(status)
 }
@@ -462,6 +476,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(status.line(), "▲ 1 needs you · 2 working · 5h 64%");
+        let pacing = Status {
+            five_hour: Some(80.0),
+            seven_day: Some(31.0),
+            limit_at: Some("13:10".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            pacing.line(),
+            "no open sessions · 5h 80% → limit 13:10 · 7d 31%"
+        );
         assert_eq!(Status::default().line(), "no open sessions");
         assert!(status.json().contains("\"needs_you\":1"));
     }
