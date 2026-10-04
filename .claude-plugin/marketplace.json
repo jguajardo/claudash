@@ -1,0 +1,15 @@
+{
+  "name": "claudash",
+  "description": "claudash, the control room for Claude Code",
+  "owner": {
+    "name": "Jorge Guajardo",
+    "url": "https://github.com/jguajardo"
+  },
+  "plugins": [
+    {
+      "name": "claudash",
+      "source": "./plugin",
+      "description": "Lets Claude answer what your sessions cost, where your plan limit went, what needs you and what you did this week, using the claudash CLI"
+    }
+  ]
+}

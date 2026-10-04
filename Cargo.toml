@@ -10,7 +10,7 @@ homepage = "https://github.com/jguajardo/claudash"
 readme = "README.md"
 keywords = ["claude-code", "claude", "tui", "dashboard", "usage"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github", "/assets", "/demo", "dist-workspace.toml"]
+exclude = ["/.github", "/assets", "/demo", "/plugin", "/.claude-plugin", "dist-workspace.toml"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }

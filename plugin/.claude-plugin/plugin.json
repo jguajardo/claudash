@@ -1,0 +1,13 @@
+{
+  "name": "claudash",
+  "description": "Lets Claude answer what your sessions cost, where your plan limit went, what needs you and what you did this week, using the claudash CLI",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jorge Guajardo",
+    "url": "https://github.com/jguajardo"
+  },
+  "homepage": "https://github.com/jguajardo/claudash",
+  "repository": "https://github.com/jguajardo/claudash",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["usage", "cost", "limits", "dashboard", "sessions"]
+}

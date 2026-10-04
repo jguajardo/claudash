@@ -169,6 +169,17 @@ cd claudash
 cargo install --path .
 ```
 
+### Claude Code plugin
+
+claudash also ships as a Claude Code plugin, so Claude itself can answer "what did this week cost?", "what used up my limit?" or "which session is waiting?" by running the claudash CLI (it needs claudash installed):
+
+```sh
+claude plugin marketplace add jguajardo/claudash
+claude plugin install claudash@claudash
+```
+
+It adds one skill (`/claudash:report`), about 160 tokens per session, and nothing else.
+
 ## Setup: alerts, plan usage and the real context window
 
 Some data is only available from Claude Code while a session runs: plan usage and the real context window size come through the [status line](https://code.claude.com/docs/en/statusline), and knowing that a session is waiting for your permission needs [hooks](https://code.claude.com/docs/en/hooks). One command connects both:
