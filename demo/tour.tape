@@ -7,6 +7,7 @@ Set Width 1400
 Set Height 820
 Set Padding 16
 Set Theme "Catppuccin Mocha"
+Set Framerate 20
 Set TypingSpeed 70ms
 
 Hide
@@ -30,6 +31,7 @@ Sleep 800ms
 Tab
 Tab
 Sleep 600ms
+Down
 Down
 Down
 Down
@@ -60,6 +62,7 @@ Sleep 1.5s
 Down
 Down
 Down
+Down
 Sleep 2s
 Enter
 Sleep 600ms
@@ -81,7 +84,7 @@ Sleep 400ms
 Escape
 Sleep 600ms
 
-# Insights: usage, where tokens go, security.
+# Insights: usage, where the limit went, whether the plan is worth it.
 Type "4"
 Sleep 2.5s
 Down

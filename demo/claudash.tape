@@ -25,25 +25,23 @@ Sleep 2.5s
 Escape
 Sleep 600ms
 
-# Alerts take you where to act.
+# A session the 5-hour limit stopped: Enter continues it now that it reset.
 Tab
 Tab
-Sleep 800ms
-Down
-Down
-Down
-Down
 Sleep 1.2s
 Enter
-Sleep 2.5s
+Sleep 2.8s
 Escape
+Sleep 300ms
 Escape
 Sleep 300ms
 
-# Where the 5-hour and weekly limits went.
+# Where the limits went, and whether the plan is worth it.
 Type "4"
-Sleep 500ms
+Sleep 400ms
 Down
-Sleep 3s
+Sleep 2.2s
+Down
+Sleep 3.5s
 Hide
 Type "q"

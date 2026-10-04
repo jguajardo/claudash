@@ -76,6 +76,36 @@ session "$C" api-server main "Fix flaky integration tests" 7300 30 164000
 session "$D" data-pipeline main "Speed up the nightly ETL job" 190000 80 530000
 session "$E" cli-tool release/2.0 "Write the v2.0 changelog" 520000 26 92000
 session "$F" data-pipeline main "Migrate jobs to the new scheduler" 1300000 120 610000
+# A month of earlier work, so the plan and usage views have history.
+n=0
+for entry in \
+    "api-server|Add rate limiting to the public API" \
+    "web-app|Move the dashboard to server components" \
+    "data-pipeline|Backfill the events table" \
+    "cli-tool|Add shell completions" \
+    "api-server|Upgrade to the new ORM" \
+    "web-app|Fix the checkout race condition" \
+    "data-pipeline|Partition the warehouse tables" \
+    "api-server|Write the webhook retry worker" \
+    "web-app|Add end-to-end tests for signup" \
+    "cli-tool|Rewrite the config loader" \
+    "data-pipeline|Cut the Spark job's memory use" \
+    "api-server|Audit the auth middleware"; do
+    n=$((n + 1))
+    project=${entry%%|*} title=${entry#*|}
+    session "$(printf 'd%07x-0000-4000-8000-%012x' "$n" "$n")" "$project" main "$title" $((n * 190000 + 260000)) 170 640000
+done
+G=c17d9c8e-6aa7-4c7e-9dbb-7fd06cc18a07
+session "$G" cli-tool main "Port the importer to async" 10800 90 720000
+
+# The 5-hour limit stopped that one; it has reset since, so Now offers to
+# continue it, and Is your plan worth it calibrates on it.
+printf '{"type":"assistant","timestamp":"%s","error":"rate_limit","isApiErrorMessage":true,"quotaLimits":{"status":"rejected","resetsAt":%d,"rateLimitType":"five_hour"},"message":{"model":"<synthetic>","content":[{"type":"text","text":"You'"'"'ve hit your session limit"}]}}\n' \
+    "$(iso $((NOW - 10790)))" $((NOW - 600)) >> "$CLAUDE/projects/-tmp-demo-code-cli-tool/$G.jsonl"
+touch -d "@$((NOW - 10790))" "$CLAUDE/projects/-tmp-demo-code-cli-tool/$G.jsonl"
+
+# The account's plan, where Claude Code keeps it.
+printf '{"oauthAccount":{"organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_5x"}}\n' > "$CLAUDE/.claude.json"
 
 # Made-up credentials that ended up in transcripts, for the security views.
 # Assembled from pieces so this script never contains a whole token.

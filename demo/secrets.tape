@@ -21,6 +21,7 @@ Sleep 800ms
 Down
 Down
 Down
+Down
 Sleep 4s
 Type "1"
 Sleep 3.5s
