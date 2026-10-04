@@ -22,7 +22,7 @@ Every Claude Code session on your machine, newest first, with its title, project
 
 - `Enter` resumes the session with `claude --resume` in its project folder and returns to claudash when you exit.
 - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
-- `i` inspects the session: a chart of its context per request with compactions, every tool it called with its failure rate, the tool output that entered its context, its costliest prompts, an audit of risky actions and secrets, the files it edited, its subagents (type, model, tokens) and the skills, MCP servers and commands it used. `Tab` selects a subagent and `Enter` opens its own conversation.
+- `i` inspects the session: a chart of its context per request with compactions (and, for each compaction, which of the files worked on before it the summary doesn't mention, so you know what to remind Claude of), every tool it called with its failure rate, the tool output that entered its context, its costliest prompts, an audit of risky actions and secrets, the files it edited, its subagents (type, model, tokens) and the skills, MCP servers and commands it used. `Tab` selects a subagent and `Enter` opens its own conversation.
 - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
 - `Tab` opens the session's project page.
 - `/` filters by title, path, branch, tag or note (`#tag` works too). `t` tags a session, `c` adds a note and `*` stars it; they're kept by claudash, not in Claude Code's files.

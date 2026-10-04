@@ -93,6 +93,19 @@ pub struct Analysis {
     pub cache_ttl: Option<i64>,
     /// Context size of the last request: what a cold restart re-writes.
     pub last_context: u64,
+    /// What each compaction's summary kept of the files worked on before it.
+    pub compactions: Vec<CompactionReport>,
+}
+
+/// A compaction, and the files the session read or wrote before it that its
+/// summary doesn't mention: what Claude likely no longer remembers in detail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactionReport {
+    pub at: Option<DateTime<Local>>,
+    /// Files read or written since the previous compaction.
+    pub files: usize,
+    /// Those the summary doesn't name.
+    pub missing: Vec<String>,
 }
 
 /// A prompt sent after the cache expired.
@@ -319,6 +332,8 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
     // Which prompt each request answered, and the day it was made.
     let mut request_prompt: HashMap<String, (Option<usize>, Option<NaiveDate>)> = HashMap::new();
     let mut current_prompt: Option<usize> = None;
+    // Files read or written since the last compaction (main session).
+    let mut since_compaction: BTreeSet<String> = BTreeSet::new();
     // Main-session requests in order: id, time, final usage, cache TTL, model.
     let mut main_requests: Vec<MainRequest> = Vec::new();
     let mut request_index: HashMap<String, usize> = HashMap::new();
@@ -440,6 +455,7 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                         .or(input["notebook_path"].as_str())
                     {
                         out.touched.insert(file.to_string());
+                        since_compaction.insert(file.to_string());
                     }
                     if matches!(
                         name.as_str(),
@@ -463,6 +479,33 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
             }
             Some("user") => {
                 let content = &record["message"]["content"];
+                if main && record["isCompactSummary"].as_bool() == Some(true) {
+                    let summary = match content {
+                        Value::String(s) => s.clone(),
+                        _ => content
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|b| b["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
+                    let files = std::mem::take(&mut since_compaction);
+                    let missing = files
+                        .iter()
+                        .filter(|f| {
+                            let name = f.rsplit(['/', '\\']).next().unwrap_or(f);
+                            !summary.contains(name)
+                        })
+                        .cloned()
+                        .collect();
+                    out.compactions.push(CompactionReport {
+                        at,
+                        files: files.len(),
+                        missing,
+                    });
+                    continue;
+                }
                 if let Some(day) = at.map(|t| t.date_naive()) {
                     for block in content.as_array().into_iter().flatten() {
                         if block["type"].as_str() != Some("tool_result") {
@@ -738,6 +781,31 @@ mod tests {
         assert!((r.cost - 0.488).abs() < 1e-9, "{}", r.cost);
         assert_eq!(a.cache_ttl, Some(3_600));
         assert_eq!(a.last_context, 61_505);
+    }
+
+    #[test]
+    fn reports_files_a_compaction_summary_left_out() {
+        let dir = std::env::temp_dir().join(format!("claudash-compact-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let tool = |id: &str, file: &str| {
+            format!(
+                r#"{{"type":"assistant","requestId":"{id}","message":{{"model":"m","usage":{{"input_tokens":1}},"content":[{{"type":"tool_use","id":"{id}","name":"Read","input":{{"file_path":"{file}"}}}}]}}}}"#
+            )
+        };
+        let lines = [
+            tool("a", "/p/src/auth.rs"),
+            tool("b", "/p/src/db.rs"),
+            r#"{"type":"system","subtype":"compact_boundary"}"#.to_string(),
+            r#"{"type":"user","isCompactSummary":true,"message":{"content":"We fixed login in auth.rs."}}"#.to_string(),
+            tool("c", "/p/src/api.rs"),
+        ];
+        fs::write(dir.join("s.jsonl"), lines.join("\n")).unwrap();
+        let a = analyze(&dir.join("s.jsonl"));
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(a.compactions.len(), 1);
+        assert_eq!(a.compactions[0].files, 2);
+        assert_eq!(a.compactions[0].missing, ["/p/src/db.rs"]);
     }
 
     #[test]

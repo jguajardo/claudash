@@ -2570,6 +2570,49 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
+    if !a.compactions.is_empty() {
+        section(&mut lines, "Compactions: what the summary kept");
+        for c in &a.compactions {
+            let when =
+                c.at.map(|t| t.format("%b %d %H:%M").to_string())
+                    .unwrap_or_default();
+            let kept = c.files - c.missing.len();
+            let mut spans = vec![
+                Span::styled(format!("  {when:<14}"), dim()),
+                Span::styled(
+                    format!("summary names {kept} of {} file(s)", c.files),
+                    Style::new().bold(),
+                ),
+            ];
+            if !c.missing.is_empty() {
+                let names: Vec<&str> = c
+                    .missing
+                    .iter()
+                    .take(6)
+                    .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f))
+                    .collect();
+                let more = c.missing.len().saturating_sub(6);
+                spans.push(Span::styled(
+                    format!(
+                        "  · not mentioned: {}{}",
+                        names.join(", "),
+                        if more > 0 {
+                            format!(" and {more} more")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(Span::styled(
+            "  Files the summary doesn't name are what Claude likely remembers least; mention them again if they matter.",
+            dim().italic(),
+        )));
+    }
+
     section(&mut lines, "Tool output that entered the context");
     let mut outputs: BTreeMap<&str, crate::analysis::OutputStat> = BTreeMap::new();
     for ((_, label), stat) in &a.tool_output {
