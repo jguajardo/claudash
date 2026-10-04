@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in claudash is wrong, missing or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please don't paste transcripts, prompts or anything with credentials: claudash reads private files, and a screenshot with names blurred is enough.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what claudash did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: claudash doctor
+      description: The output of `claudash doctor`, which shows the claudash and Claude Code versions and how they're connected.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: claudash version
+      description: "`claudash --version`"
+      placeholder: claudash 1.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS, Windows, Other]
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: For drawing problems, the terminal and its size.
+      placeholder: "kitty, 120×40"

@@ -1,0 +1,20 @@
+name: Idea
+description: Something claudash could show or do.
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The situation with Claude Code where claudash didn't help. The problem matters more than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: What you'd like to see or do in claudash.
+  - type: markdown
+    attributes:
+      value: |
+        claudash reads what Claude Code keeps on disk and runs the `claude` CLI; it doesn't replace Claude Code or call the API. Ideas that fit that are the likeliest to land.
