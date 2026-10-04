@@ -131,6 +131,7 @@ claudash status --json     # the same for scripts
 claudash summary           # today's summary as Markdown (-o FILE to save it)
 claudash export 6b1f3c2e   # a conversation as Markdown, by session ID or its first characters
 claudash plan              # is your plan worth it; --json
+claudash plan --share      # the same as a card to post (--plain without colors)
 claudash continue          # continue the sessions a plan limit stopped, once it has reset
 claudash continue --wait   # wait for the reset, then continue them (leave it running overnight)
 ```

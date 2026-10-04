@@ -359,7 +359,7 @@ pub fn wrapped(month: bool, redact: bool, plain: bool) -> io::Result<()> {
 /// `claudash quota`: each session's, project's and model's part of the current
 /// 5-hour and 7-day plan windows.
 /// `claudash plan`: is your plan worth it.
-pub fn plan(json: bool) -> io::Result<()> {
+pub fn plan(json: bool, share: bool, plain: bool) -> io::Result<()> {
     let dir = paths::projects_dir()
         .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
     let all = sessions::load_sessions(&dir, &[])?;
@@ -372,6 +372,15 @@ pub fn plan(json: bool) -> io::Result<()> {
         chrono::Utc::now().timestamp(),
     );
     let mut out = io::stdout().lock();
+    if share {
+        let card = crate::plan::card(&fit);
+        let text = if plain {
+            crate::wrapped::boxed_plain(crate::plan::CARD_TITLE, &card)
+        } else {
+            crate::wrapped::boxed_ansi(crate::plan::CARD_TITLE, &card)
+        };
+        return out.write_all(text.as_bytes());
+    }
     if json {
         let round = |x: f64| (x * 100.0).round() / 100.0;
         let value = serde_json::json!({

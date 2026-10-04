@@ -414,7 +414,17 @@ pub fn title(s: &Stats) -> String {
 
 /// The card as plain text with a border, for terminals and Markdown.
 pub fn plain(s: &Stats, redact: bool) -> String {
-    let lines: Vec<String> = card(s, redact)
+    boxed_plain(&title(s), &card(s, redact))
+}
+
+/// The card with ANSI colors, for a terminal you'll screenshot.
+pub fn ansi(s: &Stats, redact: bool) -> String {
+    boxed_ansi(&title(s), &card(s, redact))
+}
+
+/// `lines` in a box titled `title`, signed "made with claudash".
+pub fn boxed_plain(title: &str, lines: &[Line]) -> String {
+    let lines: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect())
         .collect();
@@ -423,11 +433,10 @@ pub fn plain(s: &Stats, redact: bool) -> String {
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0)
-        .max(title(s).chars().count() + 4);
+        .max(title.chars().count() + 4);
     let mut out = format!(
-        "╭─ {} {}╮\n",
-        title(s),
-        "─".repeat(width - title(s).chars().count() - 1)
+        "╭─ {title} {}╮\n",
+        "─".repeat(width - title.chars().count() - 1)
     );
     for line in &lines {
         out.push_str(&format!(
@@ -443,23 +452,21 @@ pub fn plain(s: &Stats, redact: bool) -> String {
     out
 }
 
-/// The card with ANSI colors, for a terminal you'll screenshot.
-pub fn ansi(s: &Stats, redact: bool) -> String {
-    let lines = card(s, redact);
+/// `lines` in a box with ANSI colors.
+pub fn boxed_ansi(title: &str, lines: &[Line]) -> String {
     let width = lines
         .iter()
         .map(|l| l.width())
         .max()
         .unwrap_or(0)
-        .max(title(s).chars().count() + 4);
+        .max(title.chars().count() + 4);
     let border = |text: &str| format!("\x1b[38;5;213m{text}\x1b[0m");
     let mut out = border(&format!(
-        "╭─ {} {}╮",
-        title(s),
-        "─".repeat(width - title(s).chars().count() - 1)
+        "╭─ {title} {}╮",
+        "─".repeat(width - title.chars().count() - 1)
     ));
     out.push('\n');
-    for line in &lines {
+    for line in lines {
         out.push_str(&border("│ "));
         for span in &line.spans {
             out.push_str(&styled(&span.content, span.style));

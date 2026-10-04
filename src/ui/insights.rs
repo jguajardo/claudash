@@ -71,6 +71,12 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(line);
     }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("Share it: ", dim()),
+        Span::styled("claudash plan --share", Style::new().fg(Color::Cyan)),
+        Span::styled(" prints this as a card for a screenshot", dim()),
+    ]));
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })

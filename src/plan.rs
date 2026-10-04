@@ -484,11 +484,130 @@ pub fn report(fit: &Fit) -> Vec<String> {
     lines
 }
 
+/// The shareable card: `claudash plan --share`.
+pub fn card(fit: &Fit) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::{
+        style::{Color, Style},
+        text::{Line, Span},
+    };
+    let dim = Style::new().fg(Color::DarkGray);
+    let bold = Style::new().bold();
+    let accent = Style::new().fg(Color::LightMagenta).bold();
+    let green = Style::new().fg(Color::Green).bold();
+    let current = fit.plan.map(|(p, _)| p);
+    let mut lines = Vec::new();
+    match fit.plan {
+        Some((plan, _)) if plan != Plan::Api => {
+            let price = plan.price().unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled(plan.name().to_string(), accent),
+                Span::styled(format!(" · {}/month", whole(price)), dim),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(format!("≈{}", whole(fit.monthly_cost())), green),
+                Span::raw(" a month of Claude Code at API prices"),
+            ]));
+            let value = fit.value().unwrap_or_default();
+            let filled = (value.min(10.0) * 2.0).round() as usize;
+            lines.push(Line::from(vec![
+                Span::styled("█".repeat(filled), Style::new().fg(Color::Cyan)),
+                Span::styled("░".repeat(20 - filled.min(20)), dim),
+                Span::styled(format!(" {value:.1}×"), accent),
+                Span::raw(" what the plan costs"),
+            ]));
+        }
+        _ => {
+            lines.push(Line::from(vec![
+                Span::styled(format!("≈{}", whole(fit.monthly_cost())), green),
+                Span::raw(" a month of Claude Code at API prices"),
+            ]));
+        }
+    }
+    let times = |n: usize| {
+        if n == 1 {
+            "1 time".to_string()
+        } else {
+            format!("{n} times")
+        }
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "The 5-hour limit stopped me {} in {} days",
+            times(fit.stopped_5h),
+            fit.days
+        ),
+        dim,
+    )));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!("{:<18}{:>9}   {}", "With", "a month", "5-hour stops"),
+        Style::new().fg(Color::Cyan).bold(),
+    )));
+    for o in &fit.options {
+        let mine = Some(o.plan) == current;
+        let name = match o.plan {
+            Plan::Api => "API".to_string(),
+            p if mine => format!("{} (mine)", p.name()),
+            p => p.name().to_string(),
+        };
+        let monthly = if o.plan == Plan::Api {
+            format!("≈{}", whole(o.monthly))
+        } else {
+            whole(o.monthly)
+        };
+        let stops = match (o.plan, o.stops) {
+            (Plan::Api, _) => "never".to_string(),
+            (_, Some((n, _))) if mine => n.to_string(),
+            (_, Some((a, b))) if a == b => format!("≈{a}"),
+            (_, Some((a, b))) => format!("≈{a}–{b}"),
+            (_, None) => "?".to_string(),
+        };
+        let style = if mine { accent } else { bold };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{name:<18}"), style),
+            Span::raw(format!("{monthly:>9}   ")),
+            Span::raw(stops),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Estimated from my own Claude Code transcripts",
+        dim,
+    )));
+    lines
+}
+
+/// The card's title.
+pub const CARD_TITLE: &str = "Is my Claude plan worth it?";
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sessions::{LimitStop, SessionTokens, Usage};
     use std::{path::PathBuf, time::SystemTime};
+
+    #[test]
+    fn the_card_names_the_plan_and_the_value() {
+        let fit = Fit {
+            plan: Some((Plan::Max5, "test")),
+            days: 30,
+            cost: 600.0,
+            stopped_5h: 1,
+            stopped_7d: 0,
+            windows: 20,
+            capacity: None,
+            options: vec![Choice {
+                plan: Plan::Max5,
+                monthly: 100.0,
+                stops: Some((1, 1)),
+            }],
+        };
+        let text = crate::wrapped::boxed_plain(CARD_TITLE, &card(&fit));
+        assert!(text.contains("Max 5x · $100/month"));
+        assert!(text.contains("6.0× what the plan costs"));
+        assert!(text.contains("Max 5x (mine)"));
+        assert!(text.contains("made with claudash"));
+    }
 
     #[test]
     fn reads_plan_names() {

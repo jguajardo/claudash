@@ -63,7 +63,7 @@ claudash status            # ▲ 1 needs you · 2 working · 5h 64% → limit 13
 claudash usage             # tokens and API-equivalent dollars by day; monthly, projects, models, sessions; --json
 claudash quota             # where the current 5-hour and 7-day windows went; --json
 claudash wrapped --redact  # your week on a card; month; --plain
-claudash plan              # is your plan worth it: API-equivalent use vs. price, stops per plan
+claudash plan --share      # is your plan worth it, as a card to post: API-equivalent use vs. price
 claudash continue --wait   # continue the sessions a plan limit stopped when it resets
 claudash summary           # today as Markdown
 claudash export <ID>       # a conversation as Markdown, credentials masked

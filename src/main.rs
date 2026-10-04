@@ -53,9 +53,10 @@ Usage:
                                          (--plain without colors)
   claudash quota [--json]                where the current 5-hour and 7-day windows went,
                                          by session, project and model
-  claudash plan [--json]                 is your plan worth it: your use at API prices
+  claudash plan [--json | --share]       is your plan worth it: your use at API prices
                                          against its price, and how often each plan
-                                         would have stopped you
+                                         would have stopped you; --share prints a card
+                                         to post (--plain without colors)
   claudash continue [--wait] [--dry-run] continue sessions a plan limit stopped, in
                                          the background, once it has reset; --wait
                                          waits for the reset first
@@ -109,6 +110,8 @@ enum Cli {
     },
     Plan {
         json: bool,
+        share: bool,
+        plain: bool,
     },
     Wrapped {
         month: bool,
@@ -229,12 +232,20 @@ fn parse_args(
                 };
             }
             "plan" => {
-                let rest: Vec<String> = args.collect();
-                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                    [] => Ok(Cli::Plan { json: false }),
-                    ["--json"] => Ok(Cli::Plan { json: true }),
-                    _ => Err(format!("usage: claudash plan [--json]\n\n{HELP}")),
-                };
+                let (mut json, mut share, mut plain) = (false, false, false);
+                for arg in args {
+                    match arg.as_str() {
+                        "--json" => json = true,
+                        "--share" => share = true,
+                        "--plain" => plain = true,
+                        _ => {
+                            return Err(format!(
+                                "usage: claudash plan [--json | --share [--plain]]\n\n{HELP}"
+                            ));
+                        }
+                    }
+                }
+                return Ok(Cli::Plan { json, share, plain });
             }
             "continue" => {
                 let (mut wait, mut dry_run) = (false, false);
@@ -354,7 +365,10 @@ fn main() -> std::io::Result<()> {
         }
         Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
         Ok(Cli::Quota { json }) => return exit_on_error("quota", report::quota(json)),
-        Ok(Cli::Plan { json }) => return exit_on_error("plan", report::plan(json)),
+        Ok(Cli::Plan { json, share, plain }) => {
+            let plain = plain || std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+            return exit_on_error("plan", report::plan(json, share, plain));
+        }
         Ok(Cli::Continue { wait, dry_run }) => {
             return exit_on_error("continue", report::continue_stopped(wait, dry_run));
         }
