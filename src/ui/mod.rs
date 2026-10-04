@@ -771,8 +771,16 @@ fn plan_windows(app: &App) -> Vec<(&'static str, Window)> {
         .collect()
 }
 
+/// "14:20 (in 1h 12m)".
 fn reset_time(window: &Window) -> String {
-    local_time(window.resets_at)
+    let left = window.resets_at - chrono::Utc::now().timestamp();
+    let countdown = match left {
+        l if l <= 0 => return local_time(window.resets_at),
+        l if l < 3_600 => format!("{}m", (l + 59) / 60),
+        l if l < 86_400 => format!("{}h {}m", l / 3_600, l % 3_600 / 60),
+        l => format!("{}d {}h", l / 86_400, l % 86_400 / 3_600),
+    };
+    format!("{} (in {countdown})", local_time(window.resets_at))
 }
 
 /// "14:20" today, "Sat 09:00" on another day.

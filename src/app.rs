@@ -54,6 +54,8 @@ pub const USAGE_WINDOW_DAYS: u64 = 30;
 
 /// How long a footer notice stays visible.
 const FLASH_DURATION: Duration = Duration::from_secs(4);
+/// From this much of a window used, claudash tells you when it resets.
+const LIMIT_RESET_ALERT: f64 = 90.0;
 /// Plan usage percentages that trigger an alert, once per window.
 const PLAN_ALERTS: [f64; 2] = [80.0, 95.0];
 
@@ -746,6 +748,8 @@ pub struct App {
     pub hooks_configured: bool,
     /// Activity seen at the previous check, to notify on changes only.
     seen_activity: Option<HashMap<String, Activity>>,
+    /// A window that came close to its limit, and when it resets.
+    limit_reset_due: Option<(&'static str, i64)>,
     /// Plan alerts already sent: (window label, resets_at, threshold).
     plan_alerts_sent: HashSet<(&'static str, i64, u64)>,
 
@@ -875,6 +879,7 @@ impl App {
             hooks_configured: false,
             seen_activity: None,
             plan_alerts_sent: HashSet::new(),
+            limit_reset_due: None,
             project: None,
             project_since: Instant::now(),
             mcp_cache: HashMap::new(),
@@ -1814,6 +1819,17 @@ impl App {
 
     /// Alerts once per window when plan usage crosses a threshold.
     fn check_plan_alerts(&mut self) {
+        // A window that ran close to its limit has reset: say so once.
+        let now = chrono::Utc::now().timestamp();
+        if let Some((label, resets_at)) = self.limit_reset_due
+            && now >= resets_at
+        {
+            self.limit_reset_due = None;
+            self.alert(
+                &format!("Claude plan: {label} limit reset"),
+                "You can pick up where you stopped",
+            );
+        }
         let Some((limits, _)) = self.statusline.rate_limits.clone() else {
             return;
         };
@@ -1826,6 +1842,11 @@ impl App {
                 .rev()
                 .find(|&&t| w.used_percentage >= t)
                 .copied();
+            if w.used_percentage >= LIMIT_RESET_ALERT
+                && self.limit_reset_due.is_none_or(|(_, at)| at != w.resets_at)
+            {
+                self.limit_reset_due = Some((label, w.resets_at));
+            }
             if let Some(threshold) = crossed
                 && self
                     .plan_alerts_sent
@@ -4579,6 +4600,34 @@ mod tests {
         assert_eq!(app.alert_target(&history), Some(Target::InsightsSecurity));
         app.go_to(Target::InsightsSecurity);
         assert!(app.view == View::Insights && app.insights == InsightsSection::Security);
+    }
+
+    #[test]
+    fn says_when_a_window_that_ran_close_resets() {
+        let mut app = App::new(1_000_000, false);
+        let now = chrono::Utc::now().timestamp();
+        app.statusline.rate_limits = Some((
+            statusline::RateLimits {
+                five_hour: Some(statusline::Window {
+                    used_percentage: 96.0,
+                    resets_at: now + 600,
+                }),
+                seven_day: None,
+            },
+            std::time::SystemTime::now(),
+        ));
+        app.check_plan_alerts();
+        assert_eq!(app.limit_reset_due, Some(("5-hour", now + 600)));
+        // Ten minutes later the window has reset.
+        app.statusline.rate_limits = None;
+        app.limit_reset_due = Some(("5-hour", now - 1));
+        app.check_plan_alerts();
+        assert!(app.limit_reset_due.is_none());
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.0.contains("5-hour limit reset"))
+        );
     }
 
     #[test]
