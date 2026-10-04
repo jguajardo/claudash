@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "claudash"
-version = "0.9.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
  "crossterm",
