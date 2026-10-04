@@ -805,6 +805,53 @@ fn forecast_span(app: &App, label: &str) -> Option<Span<'static>> {
 
 /// Cache reuse for the session, plus Claude Code's live cache diagnostics when
 /// the status line has reported them.
+/// Seconds until a session's cached context expires (negative once it has),
+/// and what the next prompt would then re-write: tokens and API cost.
+fn cache_clock(app: &App, s: &sessions::Session) -> Option<(i64, u64, f64)> {
+    let a = app.analysis(s)?;
+    let (last, ttl) = (a.last_request?, a.cache_ttl?);
+    let left = ttl - (Local::now() - last).num_seconds();
+    let tokens = a.last_context;
+    let cost = s
+        .tokens
+        .model
+        .as_deref()
+        .and_then(crate::pricing::lookup)
+        .map_or(0.0, |p| {
+            let write = if ttl >= 3_600 { p.write_1h } else { p.write_5m };
+            tokens as f64 * write / 1e6
+        });
+    Some((left, tokens, cost))
+}
+
+/// "cache warm 12m" or "cache cold: next prompt re-caches 412k ≈$3.30".
+fn cache_clock_span(app: &App, s: &sessions::Session) -> Option<Span<'static>> {
+    let (left, tokens, cost) = cache_clock(app, s)?;
+    if tokens < 20_000 {
+        return None;
+    }
+    Some(if left > 0 {
+        let minutes = (left + 59) / 60;
+        Span::styled(
+            format!("  · cache warm {minutes}m"),
+            Style::new().fg(if minutes <= 2 {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        )
+    } else {
+        Span::styled(
+            format!(
+                "  · cache cold: next prompt re-caches {} ≈{}",
+                human_tokens(tokens),
+                crate::pricing::format_usd(cost)
+            ),
+            Style::new().fg(Color::Yellow),
+        )
+    })
+}
+
 fn cache_line(app: &App, session: &sessions::Session) -> Line<'static> {
     let t = &session.tokens.total;
     let total = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens;
@@ -837,7 +884,22 @@ fn cache_line(app: &App, session: &sessions::Session) -> Line<'static> {
             Style::new().fg(Color::Yellow),
         ));
     }
+    if let Some(a) = app.analysis(session)
+        && !a.cold_restarts.is_empty()
+    {
+        let cost: f64 = a.cold_restarts.iter().map(|r| r.cost).sum();
+        spans.push(Span::styled(
+            format!(
+                "  · {} cold restart(s) ≈{}",
+                a.cold_restarts.len(),
+                crate::pricing::format_usd(cost)
+            ),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     let Some(cache) = snapshot_cache else {
+        // Without the status line, claudash's own estimate from the transcript.
+        spans.extend(cache_clock_span(app, session));
         return Line::from(spans);
     };
     let now = chrono::Utc::now().timestamp();
@@ -1382,7 +1444,7 @@ fn change(now: f64, before: f64) -> String {
 fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
     let report = app.token_report(TOKEN_WINDOW_DAYS);
     let [summary_area, body] =
-        Layout::vertical([Constraint::Length(5), Constraint::Min(6)]).areas(area);
+        Layout::vertical([Constraint::Length(6), Constraint::Min(6)]).areas(area);
 
     let per = |total: u64, n: u32| if n > 0 { total as f64 / n as f64 } else { 0.0 };
     let ((r_now, o_now), (r_before, o_before)) = report.replies;
@@ -1413,6 +1475,41 @@ fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
         )),
     ];
     reply_line.extend(compare(reply_now, reply_before));
+    // Prompts sent after the cache expired, re-writing the whole context.
+    let week_ago = Local::now() - Days::days(TOKEN_WINDOW_DAYS);
+    let (mut restarts, mut restart_tokens, mut restart_cost) = (0, 0u64, 0.0);
+    for s in &app.sessions {
+        for r in app
+            .analysis(s)
+            .map(|a| a.cold_restarts.as_slice())
+            .unwrap_or_default()
+        {
+            if r.at.is_some_and(|t| t >= week_ago) {
+                restarts += 1;
+                restart_tokens += r.tokens;
+                restart_cost += r.cost;
+            }
+        }
+    }
+    let idle_line = Line::from(vec![
+        Span::styled("Idle gaps    ", dim()),
+        Span::raw(format!(
+            "{restarts} prompts after the cache expired re-cached {} tokens ",
+            human_tokens(restart_tokens)
+        )),
+        Span::styled(
+            format!("≈{}", crate::pricing::format_usd(restart_cost)),
+            Style::new().fg(if restart_cost > 0.0 {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        ),
+        Span::styled(
+            " · /compact before a break makes the next one cheaper",
+            dim(),
+        ),
+    ]);
     let mut tool_line = vec![
         Span::styled("Tool output  ", dim()),
         Span::raw(format!(
@@ -1441,7 +1538,13 @@ fn draw_token_report(frame: &mut Frame, app: &App, area: Rect) {
         ]),
     };
     frame.render_widget(
-        Paragraph::new(vec![Line::from(reply_line), Line::from(tool_line), savers]).block(panel(
+        Paragraph::new(vec![
+            Line::from(reply_line),
+            Line::from(tool_line),
+            idle_line,
+            savers,
+        ])
+        .block(panel(
             &format!("Where tokens go · last {TOKEN_WINDOW_DAYS} days"),
             Color::Cyan,
         )),
@@ -1863,6 +1966,12 @@ fn draw_activity(frame: &mut Frame, app: &mut App, area: Rect) {
                     format!("  · context {pct:.0}%"),
                     Style::new().fg(level_color(pct / 100.0)),
                 ));
+                // Only while the session waits for a prompt: a working one keeps its cache warm.
+                if !matches!(app.activity(&s.id), Some(Activity::Working))
+                    && let Some(span) = cache_clock_span(app, s)
+                {
+                    detail.push(span);
+                }
                 let running = analysis.map_or(0, |a| {
                     a.subagents
                         .iter()

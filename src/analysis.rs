@@ -84,7 +84,34 @@ pub struct Analysis {
     pub audit: Vec<crate::audit::Event>,
     /// Credentials that appear in the transcript (masked).
     pub secrets: Vec<crate::audit::Secret>,
+    /// Requests that re-wrote most of the context to the cache because the
+    /// previous one was longer ago than the cache lasts.
+    pub cold_restarts: Vec<ColdRestart>,
+    /// The last request of the main session, and how long its cache lasts
+    /// (seconds): when the next prompt will have to re-cache everything.
+    pub last_request: Option<DateTime<Local>>,
+    pub cache_ttl: Option<i64>,
+    /// Context size of the last request: what a cold restart re-writes.
+    pub last_context: u64,
 }
+
+/// A prompt sent after the cache expired.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColdRestart {
+    pub at: Option<DateTime<Local>>,
+    /// Seconds since the previous request.
+    pub gap: i64,
+    /// Tokens written to the cache again.
+    pub tokens: u64,
+    /// What writing them cost at API prices.
+    pub cost: f64,
+}
+
+/// A main-session request: id, time, final usage, cache lifetime, model.
+type MainRequest = (String, Option<DateTime<Local>>, Usage, i64, String);
+
+/// A cold restart re-writes at least this many tokens and half the context.
+const COLD_RESTART_TOKENS: u64 = 20_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OutputStat {
@@ -292,6 +319,9 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
     // Which prompt each request answered, and the day it was made.
     let mut request_prompt: HashMap<String, (Option<usize>, Option<NaiveDate>)> = HashMap::new();
     let mut current_prompt: Option<usize> = None;
+    // Main-session requests in order: id, time, final usage, cache TTL, model.
+    let mut main_requests: Vec<MainRequest> = Vec::new();
+    let mut request_index: HashMap<String, usize> = HashMap::new();
     let mut calls = 0u32;
     let mut pending_compaction = false;
     let Ok(file) = fs::File::open(path) else {
@@ -320,12 +350,31 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
                 if message["model"].as_str() == Some("<synthetic>") {
                     continue;
                 }
-                if let (Some(req), Ok(usage)) = (
-                    record["requestId"].as_str(),
-                    serde_json::from_value::<crate::pricing::RawUsage>(message["usage"].clone())
-                        .map(|u| u.priced(message["model"].as_str().unwrap_or_default())),
-                ) {
+                let raw =
+                    serde_json::from_value::<crate::pricing::RawUsage>(message["usage"].clone());
+                let model = message["model"].as_str().unwrap_or_default();
+                if let (Some(req), Ok(raw)) = (record["requestId"].as_str(), raw) {
+                    let usage = raw.priced(model);
                     let first_time = !usage_by_request.contains_key(req);
+                    if main {
+                        let ttl = if raw.one_hour_cache() { 3_600 } else { 300 };
+                        match request_index.get(req) {
+                            Some(&i) => {
+                                main_requests[i].2 = usage;
+                                main_requests[i].3 = ttl;
+                            }
+                            None => {
+                                request_index.insert(req.to_string(), main_requests.len());
+                                main_requests.push((
+                                    req.to_string(),
+                                    at,
+                                    usage,
+                                    ttl,
+                                    model.to_string(),
+                                ));
+                            }
+                        }
+                    }
                     usage_by_request.insert(req.to_string(), usage);
                     if main && first_time {
                         request_prompt.insert(
@@ -481,6 +530,39 @@ fn read_file(path: &Path, main: bool, out: &mut Analysis) -> (Usage, u32) {
             _ => {}
         }
     }
+    // Cold restarts: a request after a gap longer than the previous cache's
+    // lifetime that re-wrote most of the context.
+    for pair in main_requests.windows(2) {
+        let (_, Some(before), _, ttl, _) = &pair[0] else {
+            continue;
+        };
+        let (_, Some(at), usage, _, model) = &pair[1] else {
+            continue;
+        };
+        let gap = (*at - *before).num_seconds();
+        let written = usage.cache_creation_input_tokens;
+        if gap < *ttl || written < COLD_RESTART_TOKENS || written * 2 < usage.context() {
+            continue;
+        }
+        let other = crate::pricing::lookup(model).map_or(0.0, |p| {
+            (usage.input_tokens as f64 * p.input
+                + usage.cache_read_input_tokens as f64 * p.read
+                + usage.output_tokens as f64 * p.output)
+                / 1e6
+        });
+        out.cold_restarts.push(ColdRestart {
+            at: Some(*at),
+            gap,
+            tokens: written,
+            cost: (usage.cost - other).max(0.0),
+        });
+    }
+    if let Some((_, at, usage, ttl, _)) = main_requests.last() {
+        out.last_request = *at;
+        out.cache_ttl = Some(*ttl);
+        out.last_context = usage.context();
+    }
+
     let mut total = Usage::default();
     for (req, u) in &usage_by_request {
         total.add(u);
@@ -601,6 +683,61 @@ mod tests {
         assert_eq!(a.prompts[1].text, "/opsx:apply add-login");
         assert_eq!(a.invocations, ["opsx:apply add-login"]);
         assert_eq!(a.replies.values().next(), Some(&(3, 13)));
+    }
+
+    #[test]
+    fn finds_prompts_sent_after_the_cache_expired() {
+        let dir = std::env::temp_dir().join(format!("claudash-cold-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let line = |req: &str, time: &str, write: u64, read: u64, ttl: &str| {
+            format!(
+                r#"{{"type":"assistant","requestId":"{req}","timestamp":"{time}","message":{{"model":"claude-opus-5-5","usage":{{"input_tokens":5,"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"output_tokens":10,"cache_creation":{{"{ttl}":{write}}}}}}}}}"#
+            )
+        };
+        let lines = [
+            line(
+                "r1",
+                "2026-01-01T10:00:00Z",
+                60_000,
+                0,
+                "ephemeral_5m_input_tokens",
+            ),
+            // Two minutes later: still warm, mostly read from cache.
+            line(
+                "r2",
+                "2026-01-01T10:02:00Z",
+                1_000,
+                60_000,
+                "ephemeral_5m_input_tokens",
+            ),
+            // Twenty minutes later: the 5-minute cache expired, everything re-written.
+            line(
+                "r3",
+                "2026-01-01T10:22:00Z",
+                61_000,
+                0,
+                "ephemeral_1h_input_tokens",
+            ),
+            // Thirty minutes after that: the 1-hour cache is still warm.
+            line(
+                "r4",
+                "2026-01-01T10:52:00Z",
+                500,
+                61_000,
+                "ephemeral_1h_input_tokens",
+            ),
+        ];
+        fs::write(dir.join("s.jsonl"), lines.join("\n")).unwrap();
+        let a = analyze(&dir.join("s.jsonl"));
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(a.cold_restarts.len(), 1);
+        let r = &a.cold_restarts[0];
+        assert_eq!((r.gap, r.tokens), (1_200, 61_000));
+        // 61k tokens at Opus 5.5's 1-hour write price ($8/MTok).
+        assert!((r.cost - 0.488).abs() < 1e-9, "{}", r.cost);
+        assert_eq!(a.cache_ttl, Some(3_600));
+        assert_eq!(a.last_context, 61_505);
     }
 
     #[test]

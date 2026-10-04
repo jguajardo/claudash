@@ -94,6 +94,7 @@ A menu of three sections:
 - **Where tokens go** over the last 7 days, from your own transcripts:
   - **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
   - **Costliest prompts**: every prompt with the tokens processed by all the requests it caused.
+  - **Idle gaps**: prompts sent after a session's cache expired (5 minutes or 1 hour after the previous request, depending on the cache Claude Code used), which re-write the whole context at cache-write prices, and what they cost. Now shows each waiting session's cache as "warm 12m" or "cold: next prompt re-caches 412k ≈$3.30", so you know when a `/compact` before a break pays off.
   - **Reply length and tool output per call** against the previous 30 days. If you install a token saver such as [caveman](https://github.com/JuliusBrussee/caveman) (shorter replies) or [rtk](https://github.com/rtk-ai/rtk) (shorter command output), claudash says it's installed and these numbers show what it actually saves you. Tool output is measured in characters, about 4 per token.
 - **Security**: everything below, across every session.
 

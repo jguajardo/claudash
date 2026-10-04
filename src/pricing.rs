@@ -118,6 +118,13 @@ pub struct RawUsage {
 }
 
 impl RawUsage {
+    /// Whether this response wrote to the 1-hour cache (Claude Code's
+    /// default on some plans) rather than the 5-minute one.
+    pub fn one_hour_cache(&self) -> bool {
+        self.cache_creation
+            .is_some_and(|c| c.ephemeral_1h_input_tokens > c.ephemeral_5m_input_tokens)
+    }
+
     /// Token counts and their API-equivalent cost for `model`.
     pub fn priced(&self, model: &str) -> Usage {
         let mut usage = Usage {
