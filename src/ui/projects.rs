@@ -360,8 +360,11 @@ fn draw_overview(frame: &mut Frame, app: &App, area: Rect, dir: &std::path::Path
         lines.push(line);
     }
     let sessions = app.project_sessions(dir);
+    // Long lines wrap, so count the rows they take (borders and padding leave 4 columns less).
+    let inner = usize::from(left.width.saturating_sub(4)).max(1);
+    let rows: usize = lines.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
     let [loads, recent] = Layout::vertical([
-        Constraint::Length((lines.len() as u16 + 2).min(left.height / 2)),
+        Constraint::Length((rows as u16 + 2).min(left.height / 2)),
         Constraint::Min(4),
     ])
     .spacing(1)
@@ -440,10 +443,7 @@ fn draw_overview(frame: &mut Frame, app: &App, area: Rect, dir: &std::path::Path
             vec![
                 Span::raw(format!("{} tokens", human_tokens(s.week_tokens))),
                 Span::styled(
-                    format!(
-                        " · ≈{} API-equivalent",
-                        crate::pricing::format_usd(s.week_cost)
-                    ),
+                    format!(" · ≈{}", crate::pricing::format_usd(s.week_cost)),
                     Style::new().fg(Color::Green),
                 ),
             ],

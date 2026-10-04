@@ -720,7 +720,10 @@ impl App {
                 self.popup = Some(Popup::Confirm {
                     title: "Prune worktrees".into(),
                     lines: vec![
-                        format!("Drop {missing} worktree record(s) whose directory is gone?"),
+                        format!(
+                            "Drop {missing} worktree {} whose directory is gone?",
+                            if missing == 1 { "record" } else { "records" }
+                        ),
                         String::new(),
                         "This runs `git worktree prune`; no files are touched.".into(),
                     ],

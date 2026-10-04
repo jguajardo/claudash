@@ -13,6 +13,7 @@ use crate::{
     git,
     sessions::{Usage, human_tokens},
     transcript::{self, Kind},
+    ui::plural,
 };
 
 /// What the summary needs from a session.
@@ -106,8 +107,11 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
         }
     }
     let mut md = format!(
-        "# Claude Code · {}\n\n**{sessions} session(s) · {prompts} prompt(s) · {tools} tool call(s) · {} tokens · ≈{} API-equivalent**\n\n",
+        "# Claude Code · {}\n\n**{} · {} · {} · {} tokens · ≈{} API-equivalent**\n\n",
         day.format("%A, %B %-d %Y"),
+        plural(sessions as u64, "session"),
+        plural(prompts as u64, "prompt"),
+        plural(tools as u64, "tool call"),
         human_tokens(tokens),
         crate::pricing::format_usd(cost)
     );
@@ -120,16 +124,16 @@ pub fn build(inputs: Vec<Input>, day: NaiveDate) -> String {
         md.push_str(&format!("## {project}\n\n"));
         for s in list {
             md.push_str(&format!(
-                "- **{}**: {} prompt(s), {} tool call(s){}, {} file(s) edited, {} tokens, ≈{}\n",
+                "- **{}**: {}, {}{}, {} edited, {} tokens, ≈{}\n",
                 s.title,
-                s.prompts,
-                s.tools,
+                plural(s.prompts as u64, "prompt"),
+                plural(s.tools as u64, "tool call"),
                 if s.failed > 0 {
                     format!(" ({} failed)", s.failed)
                 } else {
                     String::new()
                 },
-                s.files.len(),
+                plural(s.files.len() as u64, "file"),
                 human_tokens(s.tokens),
                 crate::pricing::format_usd(s.cost)
             ));
@@ -206,14 +210,10 @@ mod tests {
         );
         fs::remove_dir_all(&dir).unwrap();
         assert!(md.contains(
-            "**1 session(s) · 1 prompt(s) · 1 tool call(s) · 1.5k tokens · ≈$0.04 API-equivalent**"
+            "**1 session · 1 prompt · 1 tool call · 1.5k tokens · ≈$0.04 API-equivalent**"
         ));
         assert!(md.contains("## ~/p"));
-        assert!(
-            md.contains(
-                "- **Fix login**: 1 prompt(s), 1 tool call(s) (1 failed), 1 file(s) edited"
-            )
-        );
+        assert!(md.contains("- **Fix login**: 1 prompt, 1 tool call (1 failed), 1 file edited"));
         assert!(md.contains("`a.rs`"));
     }
 }

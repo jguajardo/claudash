@@ -77,7 +77,7 @@ const VIEWS: &[ViewHelp] = &[
                 progress, MCP health and alerts. Enter opens its page, with a menu of sections: \
                 Overview, Sessions, Specs (OpenSpec, spec-kit, Kiro, Task Master, GSD), Worktrees & \
                 branches (with AI branch review), Snapshots (undo what /rewind can't), MCP servers \
-                (logs, sign in), Skills, plugins & rules, and Security.",
+                (logs, sign in), Skills & plugins (with permission rules), and Security.",
         contexts: &[
             Context::Projects,
             Context::ProjectMenu,

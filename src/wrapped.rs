@@ -14,6 +14,7 @@ use crate::{
     analysis::Analysis,
     pricing::format_usd,
     sessions::{Session, human_tokens},
+    ui::plural,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,8 +385,9 @@ pub fn card(s: &Stats, redact: bool) -> Vec<Line<'static>> {
             label("Security"),
             Span::styled(
                 format!(
-                    "{} secret(s) in transcripts · {} risky command(s)",
-                    s.secrets, s.risky
+                    "{} in transcripts · {}",
+                    plural(s.secrets as u64, "secret"),
+                    plural(s.risky as u64, "risky command")
                 ),
                 Style::new().fg(Color::Red),
             ),

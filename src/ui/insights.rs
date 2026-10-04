@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::{card, dim, draw_menu, draw_token_report, draw_usage};
+use super::{card, dim, draw_menu, draw_token_report, draw_usage, plural};
 use crate::{
     app::{App, InsightsSection},
     audit::Severity,
@@ -352,7 +352,7 @@ fn draw_security(frame: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "Permission rules are per project: Projects › a project › Skills, plugins & rules.",
+        "Permission rules are per project: Projects › a project › Skills & plugins.",
         dim().italic(),
     )));
     let max = (lines.len() as u16).saturating_sub(area.height.saturating_sub(2));
@@ -362,7 +362,7 @@ fn draw_security(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
             .block(card(
-                &format!("Security · {} risky action(s)", events.len()),
+                &format!("Security · {}", plural(events.len() as u64, "risky action")),
                 Color::Red,
                 false,
             )),

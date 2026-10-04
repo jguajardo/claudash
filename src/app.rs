@@ -1009,7 +1009,8 @@ impl App {
         if expired > 0 {
             app.show_flash(
                 format!(
-                    "Emptied {expired} session(s) older than {} days from the trash",
+                    "Emptied {} older than {} days from the trash",
+                    crate::ui::plural(expired as u64, "session"),
                     library::TRASH_DAYS
                 ),
                 false,
@@ -2129,6 +2130,11 @@ impl App {
         *terminal = ratatui::try_init()?;
 
         match status {
+            // Not every command is a session: `claude mcp login` only signs in.
+            Ok(s) if s.success() && args.first().is_some_and(|a| a == "mcp") => self.show_flash(
+                "Back from Claude Code; checking the MCP servers again",
+                false,
+            ),
             Ok(s) if s.success() => self.show_flash("Claude Code session ended", false),
             Ok(s) => self.show_flash(format!("claude exited with {s}"), true),
             Err(e) => self.show_flash(format!("Could not run `claude`: {e}"), true),
@@ -2337,7 +2343,8 @@ impl App {
             }
         }
         let mut msg = format!(
-            "Moved {moved} session(s) to the trash, {:.1} MB (T to restore)",
+            "Moved {} to the trash, {:.1} MB (T to restore)",
+            crate::ui::plural(moved as u64, "session"),
             bytes as f64 / 1e6
         );
         if failed > 0 {
@@ -3323,8 +3330,8 @@ impl App {
                     }
                     if reply.permission_denials > 0 {
                         info.push(format!(
-                            "{} tool call(s) denied: headless runs can't ask for permission",
-                            reply.permission_denials
+                            "{} denied: headless runs can't ask for permission",
+                            crate::ui::plural(reply.permission_denials as u64, "tool call")
                         ));
                     }
                     lines.push(info.join(" · "));

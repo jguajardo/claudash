@@ -162,7 +162,7 @@ fn panel(title: &str, accent: Color) -> Block<'_> {
 }
 
 /// "1 use", "3 uses".
-fn plural(n: u64, word: &str) -> String {
+pub fn plural(n: u64, word: &str) -> String {
     if n == 1 {
         format!("1 {word}")
     } else {
@@ -548,7 +548,7 @@ fn mcp_summary(app: &App) -> Option<Line<'static>> {
     ];
     if auth > 0 {
         spans.push(Span::styled(
-            format!(" · {auth} need sign-in"),
+            format!(" · {auth} need{} sign-in", if auth == 1 { "s" } else { "" }),
             Style::new().fg(Color::Yellow),
         ));
     }
@@ -898,8 +898,8 @@ fn cache_line(app: &App, session: &sessions::Session) -> Line<'static> {
         let cost: f64 = a.cold_restarts.iter().map(|r| r.cost).sum();
         spans.push(Span::styled(
             format!(
-                "  · {} cold restart(s) ≈{}",
-                a.cold_restarts.len(),
+                "  · {} ≈{}",
+                plural(a.cold_restarts.len() as u64, "cold restart"),
                 crate::pricing::format_usd(cost)
             ),
             Style::new().fg(Color::Yellow),
@@ -1893,7 +1893,8 @@ fn short_age(secs: i64) -> String {
     match secs.max(0) {
         s @ 0..60 => format!("{s}s"),
         s @ 60..3_600 => format!("{}m", s / 60),
-        s => format!("{}h", s / 3_600),
+        s @ 3_600..172_800 => format!("{}h", s / 3_600),
+        s => format!("{}d", s / 86_400),
     }
 }
 
@@ -2468,12 +2469,12 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled("Context per request  ", Style::new().bold()),
                     Span::styled(
                         format!(
-                            "{} requests · first {} · peak {} · now {} · {} compaction(s)",
+                            "{} requests · first {} · peak {} · now {} · {}",
                             points.len(),
                             human_tokens(a.first_context().unwrap_or(0)),
                             human_tokens(peak),
                             human_tokens(points.last().copied().unwrap_or(0)),
-                            compactions
+                            plural(compactions as u64, "compaction")
                         ),
                         dim(),
                     ),
@@ -2580,7 +2581,7 @@ fn draw_inspect(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(format!("  {when:<14}"), dim()),
                 Span::styled(
-                    format!("summary names {kept} of {} file(s)", c.files),
+                    format!("summary names {kept} of {}", plural(c.files as u64, "file")),
                     Style::new().bold(),
                 ),
             ];
@@ -2808,7 +2809,19 @@ fn transcript_rows(view: &TranscriptView, width: u16) -> Vec<TranscriptRow> {
             .unwrap_or_default()
     };
 
+    // Whether the rows being written belong to a reply of Claude's: a reply
+    // that starts with a tool call has no text to hang its header on.
+    let mut claude_speaking = false;
     for (i, e) in view.entries.iter().enumerate() {
+        if matches!(e.kind, Kind::Thinking | Kind::ToolUse { .. }) && !claude_speaking {
+            push(i, String::new(), Style::new());
+            push(
+                i,
+                format!("▌ Claude{}", time(e)),
+                Style::new().fg(Color::Cyan).bold(),
+            );
+            claude_speaking = true;
+        }
         let hit = needle.as_ref().is_some_and(|n| {
             transcript::searchable(e).is_some_and(|t| t.to_lowercase().contains(n))
         });
@@ -2826,6 +2839,7 @@ fn transcript_rows(view: &TranscriptView, width: u16) -> Vec<TranscriptRow> {
                 } else {
                     ("Claude", Color::Cyan)
                 };
+                claude_speaking = e.kind == Kind::Assistant;
                 push(i, String::new(), Style::new());
                 push(
                     i,
@@ -2838,7 +2852,7 @@ fn transcript_rows(view: &TranscriptView, width: u16) -> Vec<TranscriptRow> {
             }
             Kind::Thinking => push(i, "  ✻ thinking".into(), dim().italic()),
             Kind::ToolUse { name } => {
-                let line = format!("  ⚙ {name}  {}", e.text);
+                let line = format!("  ⚙ {}  {}", tool_label(name), e.text);
                 let line = if line.chars().count() > width {
                     let cut: String = line.chars().take(width.saturating_sub(1)).collect();
                     format!("{cut}…")
@@ -2871,7 +2885,7 @@ fn transcript_rows(view: &TranscriptView, width: u16) -> Vec<TranscriptRow> {
                     let summary = if *is_error {
                         format!("    ↳ error: {}", e.text.lines().next().unwrap_or_default())
                     } else {
-                        format!("    ↳ {count} line(s) of output")
+                        format!("    ↳ {} of output", plural(count as u64, "line"))
                     };
                     let summary: String = summary.chars().take(width).collect();
                     push(i, summary, mark(Style::new().fg(color)));
@@ -3159,10 +3173,10 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                         Line::from(Span::styled(t.title.clone(), Style::new().bold())),
                         Line::from(Span::styled(
                             format!(
-                                "  {}  · {:.1} MB · deleted for good in {} day(s)",
+                                "  {}  · {:.1} MB · deleted for good in {}",
                                 t.project,
                                 t.size as f64 / 1e6,
-                                days_left.max(0)
+                                plural(days_left.max(0) as u64, "day")
                             ),
                             dim(),
                         )),
@@ -3205,8 +3219,8 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "{} session(s), {:.1} MB. Open and starred sessions are never included.",
-                        candidates.len(),
+                        "{}, {:.1} MB. Open and starred sessions are never included.",
+                        plural(candidates.len() as u64, "session"),
                         bytes as f64 / 1e6
                     ),
                     dim(),
@@ -3369,7 +3383,7 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                     }
                     if b.ahead > 0 {
                         first.push(Span::styled(
-                            format!("  +{} commit(s)", b.ahead),
+                            format!("  +{}", plural(u64::from(b.ahead), "commit")),
                             Style::new().fg(Color::Cyan),
                         ));
                     }
@@ -3667,7 +3681,16 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             let (month, redact) = (*month, *redact);
             let stats = app.wrapped_stats(month);
             let lines = crate::wrapped::card(&stats, redact);
-            let width = lines.iter().map(|l| l.width()).max().unwrap_or(40) as u16 + 6;
+            let signature = " made with claudash ";
+            let keys = format!(
+                " Tab {} · x {} names · e export · Esc ",
+                if month { "week" } else { "month" },
+                if redact { "show" } else { "hide" }
+            );
+            // Wide enough for the card and for the signature and the keys side by side.
+            let content = lines.iter().map(|l| l.width()).max().unwrap_or(40) + 6;
+            let footer = signature.chars().count() + keys.chars().count() + 3;
+            let width = content.max(footer) as u16;
             let height = lines.len() as u16 + 4;
             let area = centered(
                 frame.area(),
@@ -3677,15 +3700,8 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Clear, area);
             let block = card(&crate::wrapped::title(&stats), ACCENT, true)
                 .padding(Padding::new(2, 2, 1, 0))
-                .title_bottom(Line::from(" made with claudash ").left_aligned())
-                .title_bottom(
-                    Line::from(format!(
-                        " Tab {} · x {} names · e export · Esc ",
-                        if month { "week" } else { "month" },
-                        if redact { "show" } else { "hide" }
-                    ))
-                    .right_aligned(),
-                );
+                .title_bottom(Line::from(signature).left_aligned())
+                .title_bottom(Line::from(keys).right_aligned());
             frame.render_widget(Paragraph::new(lines).block(block), area);
         }
         Some(Popup::Palette {
@@ -3833,6 +3849,66 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_that_starts_with_a_tool_call_gets_its_header() {
+        let entry = |kind, text: &str| transcript::Entry {
+            kind,
+            at: None,
+            text: text.into(),
+        };
+        let view = TranscriptView {
+            session_id: String::new(),
+            title: String::new(),
+            path: std::path::PathBuf::new(),
+            project: String::new(),
+            branch: None,
+            entries: vec![
+                entry(Kind::User, "fix it"),
+                entry(
+                    Kind::ToolUse {
+                        name: "Bash".into(),
+                    },
+                    "cargo test",
+                ),
+                entry(Kind::Assistant, "Done."),
+                entry(
+                    Kind::ToolUse {
+                        name: "Read".into(),
+                    },
+                    "a.rs",
+                ),
+            ],
+            show_output: false,
+            query: None,
+            matches: Vec::new(),
+            match_pos: 0,
+            scroll: 0,
+            at_end: false,
+            jump_to: None,
+            rows: Vec::new(),
+            rows_key: None,
+        };
+        let rows: Vec<String> = transcript_rows(&view, 80)
+            .into_iter()
+            .map(|r| r.text)
+            .filter(|t| !t.is_empty())
+            .collect();
+        // The tool call after the prompt is Claude's, not yours; the one after
+        // Claude's text needs no second header.
+        assert_eq!(
+            rows,
+            [
+                "▌ You",
+                "  fix it",
+                "▌ Claude",
+                "  ⚙ Bash  cargo test",
+                "▌ Claude",
+                "  Done.",
+                "  ⚙ Read  a.rs"
+            ]
+        );
+    }
 
     #[test]
     fn hard_wraps_by_characters() {

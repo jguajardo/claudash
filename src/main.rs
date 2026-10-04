@@ -473,7 +473,10 @@ fn export(id: &str, output: Option<&str>) -> std::io::Result<()> {
     };
     let (markdown, removed) = audit::redact(&app::session_markdown(session)?);
     if removed > 0 {
-        eprintln!("Removed {removed} secret(s) from the export (API keys, tokens or private keys)");
+        eprintln!(
+            "Removed {} from the export (API keys, tokens or private keys)",
+            ui::plural(removed as u64, "secret")
+        );
     }
     match output {
         Some(file) => {
