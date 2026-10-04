@@ -17,6 +17,9 @@ pub enum Kind {
     Deny,
     /// `permissions.defaultMode`.
     Mode,
+    /// A rule claudash suggests adding: a safe command you run often that no
+    /// rule allows, so Claude Code asks every time.
+    Suggest,
 }
 
 impl Kind {
@@ -26,6 +29,7 @@ impl Kind {
             Kind::Ask => "ask",
             Kind::Deny => "deny",
             Kind::Mode => "mode",
+            Kind::Suggest => "add?",
         }
     }
 }
@@ -185,6 +189,90 @@ fn flag_conflicts(rules: &mut [Rule]) {
     }
 }
 
+/// Build, test and git-reading commands: the ones Claude Code usually asks
+/// about and that are worth allowing. Plain shell utilities (ls, cat…) are
+/// left out because Claude Code may already treat them as read-only, and
+/// anything that deletes, publishes, reaches the network or runs arbitrary
+/// code stays out whatever its count.
+const SAFE_COMMANDS: [&str; 20] = [
+    "cargo test",
+    "cargo build",
+    "cargo check",
+    "cargo clippy",
+    "cargo fmt",
+    "npm test",
+    "npm run",
+    "pnpm test",
+    "pnpm run",
+    "yarn test",
+    "go test",
+    "go build",
+    "go vet",
+    "pytest",
+    "make",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch",
+];
+
+/// Whether an allow rule already lets `command` (a command key such as
+/// `cargo test`) run without asking.
+fn allowed(rules: &[Rule], command: &str) -> bool {
+    rules.iter().filter(|r| r.kind == Kind::Allow).any(|r| {
+        let rule = r.rule.trim();
+        if rule == "Bash" {
+            return true;
+        }
+        rule.strip_prefix("Bash(")
+            .and_then(|i| i.strip_suffix(')'))
+            .map(|inner| inner.trim_end_matches(":*").trim_end_matches('*').trim())
+            .is_some_and(|prefix| {
+                !prefix.is_empty()
+                    && (command == prefix
+                        || command.starts_with(&format!("{prefix} "))
+                        || prefix.starts_with(&format!("{command} ")))
+            })
+    })
+}
+
+/// Rules worth adding: safe commands run at least `min_uses` times that no
+/// allow rule covers, most used first. `uses` is (command key, times run).
+pub fn suggestions(rules: &[Rule], uses: &[(String, u32)], min_uses: u32) -> Vec<Rule> {
+    let defaults = rules.iter().any(|r| {
+        r.kind == Kind::Mode && matches!(r.rule.as_str(), "bypassPermissions" | "dontAsk")
+    });
+    if defaults {
+        return Vec::new();
+    }
+    let mut out: Vec<(u32, Rule)> = uses
+        .iter()
+        .filter(|(command, n)| {
+            *n >= min_uses && SAFE_COMMANDS.contains(&command.as_str()) && !allowed(rules, command)
+        })
+        .map(|(command, n)| {
+            (
+                *n,
+                Rule {
+                    kind: Kind::Suggest,
+                    rule: format!("Bash({command}:*)"),
+                    scope: "suggested",
+                    file: std::path::PathBuf::new(),
+                    flag: Some((
+                        Severity::Low,
+                        format!(
+                            "run {n} times in 30 days and no rule allows it, so each run asked"
+                        ),
+                    )),
+                },
+            )
+        })
+        .collect();
+    out.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +310,31 @@ mod tests {
         assert_eq!(flag("Read", "project"), Some(Severity::Low));
         // High first.
         assert_eq!(rules[0].flag.as_ref().unwrap().0, Severity::High);
+    }
+
+    #[test]
+    fn suggests_rules_only_for_safe_commands_nothing_allows() {
+        let rule = |rule: &str| Rule {
+            kind: Kind::Allow,
+            rule: rule.into(),
+            scope: "user",
+            file: PathBuf::new(),
+            flag: None,
+        };
+        let uses = [
+            ("cargo test".to_string(), 84),
+            ("git diff".to_string(), 40),
+            ("rm".to_string(), 90),
+            ("ls".to_string(), 30),
+            ("cargo build".to_string(), 12),
+        ];
+        let rules = [rule("Bash(git diff:*)")];
+        let got: Vec<String> = suggestions(&rules, &uses, 10)
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        // git diff is allowed, rm is never safe, ls is left to Claude Code.
+        assert_eq!(got, ["Bash(cargo test:*)", "Bash(cargo build:*)"]);
+        assert!(suggestions(&[rule("Bash")], &uses, 10).is_empty());
     }
 }

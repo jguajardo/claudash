@@ -1150,6 +1150,35 @@ fn draw_ecosystem(frame: &mut Frame, app: &mut App, area: Rect) {
                 r.rule.clone(),
                 Style::new().bold(),
             )));
+            if r.kind == crate::permissions::Kind::Suggest {
+                lines.push(Line::from(Span::styled(
+                    "suggested by claudash · not in any settings file",
+                    dim(),
+                )));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    r.flag
+                        .as_ref()
+                        .map(|(_, why)| why.clone())
+                        .unwrap_or_default(),
+                    Style::new().fg(Color::Cyan),
+                )));
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::raw("If Claude Code asks you each time it runs this, add it to "),
+                    Span::styled("permissions.allow", Style::new().bold()),
+                    Span::raw(" in .claude/settings.json (this project) or ~/.claude/settings.json, or run "),
+                    Span::styled("/permissions", Style::new().bold()),
+                    Span::raw(" in Claude Code. claudash only suggests build, test and git-reading commands; it never edits your settings."),
+                ]));
+                frame.render_widget(
+                    Paragraph::new(lines)
+                        .wrap(Wrap { trim: false })
+                        .block(panel("Details", Color::Magenta)),
+                    detail_area,
+                );
+                return;
+            }
             lines.push(Line::from(Span::styled(
                 format!("{} · {} settings", r.kind.label(), r.scope),
                 dim(),

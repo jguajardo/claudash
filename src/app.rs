@@ -2721,6 +2721,45 @@ impl App {
         }
     }
 
+    /// Adds rule suggestions to the loaded permissions: safe commands this
+    /// project's sessions ran often in the last 30 days that no rule allows.
+    fn suggest_rules(&mut self) {
+        let Some((project, eco)) = &self.eco else {
+            return;
+        };
+        let since = chrono::Local::now().date_naive() - chrono::Days::new(USAGE_WINDOW_DAYS);
+        let mut uses: HashMap<String, u32> = HashMap::new();
+        for s in &self.sessions {
+            if let Some(dir) = project
+                && !s.cwd.as_deref().is_some_and(|c| c.starts_with(dir))
+            {
+                continue;
+            }
+            let Some(a) = self.analysis(s) else {
+                continue;
+            };
+            for ((day, label), stat) in &a.tool_output {
+                if *day >= since
+                    && let Some(command) = label.strip_prefix("Bash: ")
+                {
+                    *uses.entry(command.to_string()).or_default() += stat.calls;
+                }
+            }
+        }
+        let uses: Vec<(String, u32)> = uses.into_iter().collect();
+        let rules: Vec<crate::permissions::Rule> = eco
+            .permissions
+            .iter()
+            .filter(|r| r.kind != crate::permissions::Kind::Suggest)
+            .cloned()
+            .collect();
+        let suggested = crate::permissions::suggestions(&rules, &uses, 10);
+        if let Some((_, eco)) = &mut self.eco {
+            eco.permissions = rules;
+            eco.permissions.extend(suggested);
+        }
+    }
+
     /// Whether an allow rule matched anything in the last 30 days; `None` when
     /// claudash can't tell (file and domain patterns).
     pub fn rule_used(&self, rule: &str) -> Option<bool> {
@@ -2968,6 +3007,7 @@ impl App {
                 self.analyses = cache;
             }
             self.analysis_job = None;
+            self.suggest_rules();
         }
         if let Some(job) = &self.git_job
             && let Some(result) = job.poll()
@@ -3045,6 +3085,7 @@ impl App {
             let eco = result.unwrap_or_default();
             self.eco = Some((project.clone(), eco));
             self.eco_job = None;
+            self.suggest_rules();
             for (i, tab) in EcoTab::ALL.into_iter().enumerate() {
                 let len = self.eco_len(tab);
                 let state = &mut self.eco_states[i];
