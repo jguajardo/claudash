@@ -262,6 +262,10 @@ pub fn find_secrets(line: &str, out: &mut Vec<Secret>) {
     };
     for (kind, re) in SECRET_PATTERNS.iter() {
         for m in re.find_iter(line) {
+            // Anthropic keys start with "sk-" too; they have their own pattern.
+            if *kind == "OpenAI API key" && m.as_str().starts_with("sk-ant-") {
+                continue;
+            }
             let secret = Secret {
                 kind,
                 masked: mask(m.as_str()),
@@ -351,6 +355,13 @@ mod tests {
         assert_eq!(found[0].kind, "GitHub token");
         assert_eq!(found[0].masked, "ghp_a1B2…");
         assert_eq!(found[0].place, "your prompt");
+        // An Anthropic key is one secret, not also an OpenAI one.
+        let mut keys = Vec::new();
+        find_secrets(&format!("key sk-ant-api03-{}", "x".repeat(40)), &mut keys);
+        assert_eq!(
+            keys.iter().map(|k| k.kind).collect::<Vec<_>>(),
+            ["Anthropic API key"]
+        );
         let (clean, n) = redact(&format!("token: {token}"));
         assert_eq!(n, 1);
         assert!(!clean.contains(&token));

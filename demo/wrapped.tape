@@ -1,5 +1,5 @@
-# Records demo/claudash.gif, the README's hero, with made-up data (see demo/README.md).
-Output demo/claudash.gif
+# Records demo/wrapped.gif: a week on one card (made-up data).
+Output demo/wrapped.gif
 
 Set Shell "bash"
 Set FontSize 14
@@ -16,34 +16,13 @@ Sleep 1s
 Type "claudash"
 Enter
 Sleep 2.5s
-Show
-Sleep 2s
-
-# A session needs you: Enter shows exactly what it's asking to run.
-Enter
-Sleep 2.5s
-Escape
+Type "w"
 Sleep 600ms
-
-# Alerts take you where to act.
-Tab
-Tab
-Sleep 800ms
-Down
-Down
-Down
-Down
-Sleep 1.2s
-Enter
-Sleep 2.5s
-Escape
-Escape
-Sleep 300ms
-
-# Where the 5-hour and weekly limits went.
-Type "4"
-Sleep 500ms
-Down
+Show
 Sleep 3s
+Type "x"
+Sleep 2.5s
+Tab
+Sleep 2.5s
 Hide
 Type "q"

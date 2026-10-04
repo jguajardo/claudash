@@ -42,6 +42,10 @@ You run Claude Code in three terminals and a background session. One has been wa
 
 It never drives Claude Code: Claude Code does the work, claudash keeps track of it. Everything it changes, it asks first.
 
+| Where the limit went, and what it cost | What Claude left on disk | Your week on one card |
+| --- | --- | --- |
+| ![Insights: each session's part of the 5-hour and 7-day windows, and dollars per day](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/limits.gif) | ![Insights › Security: masked API keys found in transcripts and a force push](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/secrets.gif) | ![The wrapped card: prompts, cost, streak, projects, models, tools, hours](https://raw.githubusercontent.com/jguajardo/claudash/main/demo/wrapped.gif) |
+
 ## Tour
 
 | View | What's there |

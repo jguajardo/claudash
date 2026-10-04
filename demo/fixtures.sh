@@ -77,6 +77,25 @@ session "$D" data-pipeline main "Speed up the nightly ETL job" 190000 80 530000
 session "$E" cli-tool release/2.0 "Write the v2.0 changelog" 520000 26 92000
 session "$F" data-pipeline main "Migrate jobs to the new scheduler" 1300000 120 610000
 
+# Made-up credentials that ended up in transcripts, for the security views.
+# Assembled from pieces so this script never contains a whole token.
+FAKE_ANTHROPIC="sk-ant-""api03-DEMOonlyNOTaREALkey000000000000"
+FAKE_GITHUB="ghp_""DEMOonlyNOTaREALtoken0000000000000000"
+dir="$CLAUDE/projects/-tmp-demo-code-web-app"
+printf '{"type":"user","timestamp":"%s","message":{"content":"the deploy fails, my key is %s, can you check?"}}\n' \
+    "$(iso $((NOW - 400)))" "$FAKE_ANTHROPIC" >> "$dir/$B.jsonl"
+dir="$CLAUDE/projects/-tmp-demo-code-data-pipeline"
+printf '{"type":"user","timestamp":"%s","message":{"content":[{"type":"tool_result","tool_use_id":"x1","content":"GITHUB_TOKEN=%s"}]}}\n' \
+    "$(iso $((NOW - 190000)))" "$FAKE_GITHUB" >> "$dir/$D.jsonl"
+printf '{"type":"assistant","requestId":"risk_1","timestamp":"%s","cwd":"%s","message":{"model":"claude-opus-5-5","usage":{"input_tokens":3,"output_tokens":40},"content":[{"type":"tool_use","id":"r1","name":"Bash","input":{"command":"git push --force origin main"}}]}}\n' \
+    "$(iso $((NOW - 3000)))" "$DEMO/code/web-app" >> "$CLAUDE/projects/-tmp-demo-code-web-app/$B.jsonl"
+touch -d "@$((NOW - 150))" "$CLAUDE/projects/-tmp-demo-code-web-app/$B.jsonl"
+
+# What the OAuth session is waiting on: an edit, shown in full in Now.
+printf '%s\n' '{"type":"assistant","requestId":"ask_1","timestamp":"'"$(iso $((NOW - 40)))"'","message":{"model":"claude-opus-5-5","usage":{"input_tokens":3,"output_tokens":120},"content":[{"type":"tool_use","id":"ask1","name":"Edit","input":{"file_path":"'"$DEMO"'/code/api-server/src/auth.rs","old_string":"pub fn login(user: &str, password: &str) -> Result<Session> {\n    let row = db.query(&format!(\"SELECT id FROM users WHERE name = '"'"'{user}'"'"'\"))?;","new_string":"pub fn login(user: &str, password: &str) -> Result<Session> {\n    let row = db.query(\"SELECT id, hash FROM users WHERE name = ?\", &[user])?;\n    verify_password(password, &row.hash)?;"}}]}}' \
+    >> "$CLAUDE/projects/-tmp-demo-code-api-server/$A.jsonl"
+touch -d "@$((NOW - 40))" "$CLAUDE/projects/-tmp-demo-code-api-server/$A.jsonl"
+
 # Subagents of the OAuth session.
 sub_dir="$CLAUDE/projects/-tmp-demo-code-api-server/$A/subagents"
 mkdir -p "$sub_dir"
