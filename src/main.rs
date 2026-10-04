@@ -77,6 +77,7 @@ Options:
                             Also set with CLAUDASH_CONTEXT_LIMIT. Default: 1M.
   --no-notify               No desktop notifications or bell.
   -h, --help                Print this help.
+  -V, --version             Print the version.
 
 Flags win over CLAUDASH_CONTEXT_LIMIT, which wins over the settings file.
 In the dashboard, press : to find any action by name, ? for help.";
@@ -115,6 +116,7 @@ enum Cli {
         plain: bool,
     },
     Help,
+    Version,
     Setup(setup::Mode),
     Statusline {
         wrapped: Vec<String>,
@@ -158,6 +160,7 @@ fn parse_args(
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Cli::Help),
+            "-V" | "--version" => return Ok(Cli::Version),
             "--no-notify" => notify = false,
             "setup" => {
                 let rest: Vec<String> = args.collect();
@@ -363,6 +366,10 @@ fn main() -> std::io::Result<()> {
             let plain = plain || std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
             return exit_on_error("wrapped", report::wrapped(month, redact, plain));
         }
+        Ok(Cli::Version) => {
+            println!("claudash {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Ok(Cli::Help) => {
             println!("{HELP}");
             return Ok(());
@@ -552,6 +559,7 @@ mod tests {
     fn parses_subcommands() {
         let parse = |list: &[&str]| parse_args(args(list), None, &config::Config::default());
         assert_eq!(parse(&["--help"]), Ok(Cli::Help));
+        assert_eq!(parse(&["--version"]), Ok(Cli::Version));
         assert_eq!(
             parse(&["--no-notify"]),
             Ok(Cli::Dashboard {

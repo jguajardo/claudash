@@ -19,5 +19,7 @@ hosting = "github"
 install-updater = false
 # A custom Homebrew tap (brew install jguajardo/tap/claudash)
 tap = "jguajardo/homebrew-tap"
+# Publish the formula to the tap on release (needs the HOMEBREW_TAP_TOKEN secret)
+publish-jobs = ["homebrew"]
 # Build provenance attestations (gh attestation verify)
 github-attestations = true
