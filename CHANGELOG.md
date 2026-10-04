@@ -2,7 +2,7 @@
 
 What changed in each release of claudash. Install or update with `brew upgrade claudash`, `cargo binstall claudash` or the installers on the [releases page](https://github.com/jguajardo/claudash/releases).
 
-## Unreleased
+## 1.1.1 — 2026-10-04
 
 - `claudash plan --share` prints whether your plan is worth it as a card to post, signed "made with claudash".
 
