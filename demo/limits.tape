@@ -9,13 +9,12 @@ Set Padding 16
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 60ms
 
+# Build the made-up data and open claudash; wait until it has loaded.
 Hide
-Type "sh demo/fixtures.sh && export HOME=/tmp/demo CLAUDE_CONFIG_DIR=/tmp/demo/.claude XDG_CACHE_HOME=/tmp/demo/.cache PATH=/tmp/demo/bin:$PWD/target/x86_64-unknown-linux-musl/release:$PATH && clear"
+Type "sh demo/fixtures.sh && export HOME=/tmp/demo CLAUDE_CONFIG_DIR=/tmp/demo/.claude XDG_CACHE_HOME=/tmp/demo/.cache PATH=/tmp/demo/bin:$PWD/target/x86_64-unknown-linux-musl/release:$PATH && clear && claudash --view insights"
 Enter
-Sleep 1s
-Type "claudash --view insights"
-Enter
-Sleep 2.5s
+Wait+Screen@180s /1 Now/
+Sleep 4s
 Show
 Sleep 1.5s
 Type "$"

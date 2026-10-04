@@ -20,6 +20,190 @@ printf '# API server\n\nRun `cargo test` before committing.\n' > "$DEMO/code/api
 printf '# Agents\n\nShared instructions for every coding agent.\n' > "$DEMO/code/api-server/AGENTS.md"
 printf '# Web app\n\nUse pnpm, never npm.\n' > "$DEMO/code/web-app/AGENTS.md"
 
+# --- The API server's code, spec-driven changes and commands -------------------
+api="$DEMO/code/api-server"
+stage="$DEMO/.stage"
+mkdir -p "$api/src" "$api/tests" "$api/.claude/commands/opsx" "$stage"
+printf '[package]\nname = "api-server"\nversion = "0.4.0"\nedition = "2024"\n' > "$api/Cargo.toml"
+printf 'target/\n.claude/worktrees/\n' > "$api/.gitignore"
+cat > "$api/src/lib.rs" <<'EOF'
+pub mod auth;
+
+pub fn handle_health() -> &'static str {
+    "ok"
+}
+EOF
+cat > "$api/src/auth.rs" <<'EOF'
+use crate::db;
+
+pub fn login(user: &str, password: &str) -> Result<Session> {
+    let row = db.query(&format!("SELECT id FROM users WHERE name = '{user}'"))?;
+    Session::start(row.id)
+}
+EOF
+cat > "$api/tests/login.rs" <<'EOF'
+#[test]
+fn logs_in_with_the_right_password() {
+    assert!(api_server::auth::login("ada", "correct horse").is_ok());
+}
+EOF
+for command in apply archive continue; do
+    printf -- '---\ndescription: OpenSpec: %s a change\n---\nRun the %s step for openspec/changes/$ARGUMENTS.\n' \
+        "$command" "$command" > "$api/.claude/commands/opsx/$command.md"
+done
+
+# OpenSpec: one change being implemented, one finished, one still being planned.
+change="$api/openspec/changes/add-oauth-login"
+mkdir -p "$change"
+printf '# Add OAuth login\n\n## Why\n\nCustomers ask to sign in with GitHub and Google instead of a password.\n\n## What changes\n\nAn OAuth callback, linked accounts and sessions with a hashed token.\n' > "$change/proposal.md"
+printf '# Design\n\nThe callback exchanges the code for a token, then creates or links the user.\nSessions keep only a hash of the token.\n' > "$change/design.md"
+cat > "$change/tasks.md" <<'EOF'
+## 1. Provider setup
+- [x] 1.1 Register the GitHub and Google OAuth apps
+- [x] 1.2 Keep the client secrets in the vault
+
+## 2. Callback
+- [x] 2.1 Add the /oauth/callback route
+- [x] 2.2 Exchange the code for a token
+- [x] 2.3 Create or link the user
+
+## 3. Sessions
+- [ ] 3.1 Issue a session with a hashed token
+- [ ] 3.2 Refresh tokens before they expire
+- [ ] 3.3 Integration tests for both providers
+EOF
+change="$api/openspec/changes/audit-log-export"
+mkdir -p "$change"
+printf '# Export the audit log\n\nAdmins need the audit log as CSV for their compliance reviews.\n' > "$change/proposal.md"
+printf -- '- [x] 1.1 Add GET /audit/export\n- [x] 1.2 Stream the rows as CSV\n- [x] 1.3 Limit it to admins\n- [x] 1.4 Document it\n' > "$change/tasks.md"
+change="$api/openspec/changes/rate-limit-public-api"
+mkdir -p "$change"
+printf '# Rate limit the public API\n\nOne client took the API down twice last month. Limit requests per API key.\n' > "$change/proposal.md"
+
+# What a teammate's branch adds, for the branch review.
+cat > "$stage/rate_limit.rs" <<'EOF'
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Requests allowed per window, per API key.
+pub struct RateLimiter {
+    window: Duration,
+    limit: u32,
+    hits: HashMap<String, Vec<Instant>>,
+}
+
+impl RateLimiter {
+    pub fn new(limit: u32, window: Duration) -> Self {
+        Self { window, limit, hits: HashMap::new() }
+    }
+
+    /// Whether the request is allowed, recording it if so.
+    pub fn allow(&mut self, key: &str) -> bool {
+        let now = Instant::now();
+        let hits = self.hits.entry(key.to_string()).or_default();
+        hits.retain(|t| now.duration_since(*t) < self.window);
+        if hits.len() as u32 > self.limit {
+            return false;
+        }
+        hits.push(now);
+        true
+    }
+}
+
+pub fn key_from_header(header: &str) -> String {
+    header.split(' ').nth(1).unwrap().to_string()
+}
+EOF
+cat > "$stage/rate_limit_test.rs" <<'EOF'
+use api_server::rate_limit::RateLimiter;
+use std::time::Duration;
+
+#[test]
+fn allows_again_after_the_window() {
+    let mut limiter = RateLimiter::new(2, Duration::from_secs(1));
+    assert!(limiter.allow("key"));
+    assert!(limiter.allow("key"));
+    assert!(!limiter.allow("key"));
+
+    // Wait for the whole window before trying again.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(limiter.allow("key"));
+}
+EOF
+
+# --- Git: real repositories with a remote, branches to review and a worktree ---
+# Without git the projects show as plain folders and the rest still works.
+if command -v git > /dev/null 2>&1; then
+    # g <dir> <author> <age in seconds> <git arguments…>
+    g() {
+        gdir=$1 gauthor=$2 gwhen="@$((NOW - $3)) +0000"
+        shift 3
+        GIT_AUTHOR_DATE="$gwhen" GIT_COMMITTER_DATE="$gwhen" git -C "$gdir" \
+            -c user.name="$gauthor" -c user.email=dev@example.com \
+            -c commit.gpgsign=false -c init.defaultBranch=main \
+            -c advice.detachedHead=false "$@"
+    }
+    # repo <project> <author> <age> <message>: commit what's there, add a remote
+    repo() {
+        rdir="$DEMO/code/$1"
+        g "$rdir" "$2" "$3" init -q
+        g "$rdir" "$2" "$3" add -A
+        g "$rdir" "$2" "$3" commit -q --allow-empty -m "$4"
+        git clone -q --bare "$rdir" "$DEMO/remotes/$1.git"
+        g "$rdir" "$2" "$3" remote add origin "$DEMO/remotes/$1.git"
+        g "$rdir" "$2" "$3" fetch -q origin
+        g "$rdir" "$2" "$3" branch -q --set-upstream-to=origin/main main
+    }
+    mkdir -p "$DEMO/remotes"
+    # The identity git uses when claudash runs it (fetch, worktrees).
+    printf '[user]\n\tname = Dana Kim\n\temail = dana@example.com\n' > "$DEMO/.gitconfig"
+    repo api-server "Dana Kim" 2600000 "API server with password login"
+    repo web-app "Mia Torres" 1900000 "Pricing page scaffold"
+    repo data-pipeline "Dana Kim" 3100000 "Nightly ETL job"
+    repo cli-tool "Sam Ortiz" 2200000 "Importer and config loader"
+
+    # Teammates' branches on the remote, newest first in the branch picker.
+    g "$api" "Sam Ortiz" 432000 checkout -q -b chore/bump-deps main
+    printf '[package]\nname = "api-server"\nversion = "0.4.1"\nedition = "2024"\n' > "$api/Cargo.toml"
+    g "$api" "Sam Ortiz" 432000 commit -q -am "Bump dependencies for the 0.4.1 release"
+    g "$api" "Sam Ortiz" 432000 push -q origin chore/bump-deps
+    g "$api" "Priya Nair" 172800 checkout -q -b fix/session-expiry main
+    printf '\npub const SESSION_HOURS: u64 = 12;\n' >> "$api/src/auth.rs"
+    g "$api" "Priya Nair" 172800 commit -q -am "Expire sessions after twelve hours"
+    g "$api" "Priya Nair" 172800 push -q origin fix/session-expiry
+    g "$api" "Sam Ortiz" 14400 checkout -q -b feat/rate-limit main
+    cp "$stage/rate_limit.rs" "$api/src/rate_limit.rs"
+    printf 'pub mod auth;\npub mod rate_limit;\n\npub fn handle_health() -> &'"'"'static str {\n    "ok"\n}\n' > "$api/src/lib.rs"
+    g "$api" "Sam Ortiz" 14400 add -A
+    g "$api" "Sam Ortiz" 14400 commit -q -m "Add a sliding-window rate limiter per API key"
+    cp "$stage/rate_limit_test.rs" "$api/tests/rate_limit.rs"
+    g "$api" "Sam Ortiz" 10800 add -A
+    g "$api" "Sam Ortiz" 10800 commit -q -m "Read the API key from the Authorization header"
+    g "$api" "Sam Ortiz" 10800 push -q origin feat/rate-limit
+
+    # Your own branch: two commits pushed, one not yet, and work in progress.
+    g "$api" "Dana Kim" 90000 checkout -q -b feat/oauth main
+    printf 'pub fn callback(code: &str) -> Result<Session> {\n    todo!("exchange {code} for a token")\n}\n' > "$api/src/oauth.rs"
+    g "$api" "Dana Kim" 90000 add -A
+    g "$api" "Dana Kim" 90000 commit -q -m "Add the OAuth callback route"
+    printf '\npub fn link_user(provider: &str, id: &str) {}\n' >> "$api/src/oauth.rs"
+    g "$api" "Dana Kim" 86400 commit -q -am "Create or link the user after the callback"
+    g "$api" "Dana Kim" 86400 push -q -u origin feat/oauth
+    printf '\npub fn refresh(session: &Session) {}\n' >> "$api/src/oauth.rs"
+    g "$api" "Dana Kim" 3600 commit -q -am "Refresh tokens before they expire"
+    printf '\n#[test]\nfn logs_in_with_github() {}\n' >> "$api/tests/login.rs"
+    for branch in chore/bump-deps fix/session-expiry feat/rate-limit; do
+        g "$api" "Dana Kim" 3600 branch -q -D "$branch"
+    done
+
+    # A worktree Claude Code made for a spike, with work nobody committed.
+    g "$api" "Dana Kim" 260000 worktree add -q -b spike/pagination "$api/.claude/worktrees/pagination" main
+    printf 'pub fn page(offset: usize, limit: usize) {}\n' > "$api/.claude/worktrees/pagination/src/pagination.rs"
+
+    printf '<main>three tiers, annual toggle</main>\n' > "$DEMO/code/web-app/pricing.html"
+    g "$DEMO/code/cli-tool" "Sam Ortiz" 520000 checkout -q -b release/2.0
+fi
+
 # --- Sessions -------------------------------------------------------------------
 # session <id> <project> <branch> <title> <age-seconds> <requests> <context>
 session() {
@@ -104,6 +288,105 @@ printf '{"type":"assistant","timestamp":"%s","error":"rate_limit","isApiErrorMes
     "$(iso $((NOW - 10790)))" $((NOW - 600)) >> "$CLAUDE/projects/-tmp-demo-code-cli-tool/$G.jsonl"
 touch -d "@$((NOW - 10790))" "$CLAUDE/projects/-tmp-demo-code-cli-tool/$G.jsonl"
 
+# A session with a real back-and-forth, for the conversation view and the search.
+H=d28e0d9f-7bb8-4d8f-8ecc-80e17dd29b08
+if command -v python3 > /dev/null 2>&1; then
+    python3 - "$CLAUDE/projects/-tmp-demo-code-web-app/$H.jsonl" "$DEMO/code/web-app" "$NOW" "$H" <<'PY'
+import datetime
+import json
+import sys
+
+path, cwd, now, sid = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+clock = now - 3 * 3600
+records = [{"type": "ai-title", "aiTitle": "Fix the cart total rounding bug", "sessionId": sid}]
+requests = 0
+
+
+def stamp(seconds):
+    global clock
+    clock += seconds
+    when = datetime.datetime.fromtimestamp(clock, datetime.timezone.utc)
+    return when.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def user(text):
+    records.append({"type": "user", "cwd": cwd, "gitBranch": "main", "sessionId": sid,
+                    "timestamp": stamp(90), "message": {"role": "user", "content": text}})
+
+
+def reply(*blocks):
+    global requests
+    requests += 1
+    usage = {"input_tokens": 4, "cache_creation_input_tokens": 2800,
+             "cache_read_input_tokens": 38000 + requests * 2600, "output_tokens": 420}
+    records.append({"type": "assistant", "requestId": f"req_cart_{requests}", "sessionId": sid,
+                    "timestamp": stamp(18),
+                    "message": {"role": "assistant", "model": "claude-opus-5-5", "usage": usage,
+                                "content": list(blocks)}})
+
+
+def text(words):
+    return {"type": "text", "text": words}
+
+
+def call(call_id, name, **arguments):
+    return {"type": "tool_use", "id": call_id, "name": name, "input": arguments}
+
+
+def result(call_id, output, failed=False):
+    block = {"type": "tool_result", "tool_use_id": call_id, "content": output, "is_error": failed}
+    records.append({"type": "user", "sessionId": sid, "timestamp": stamp(5),
+                    "message": {"role": "user", "content": [block]}})
+
+
+user("The cart total is off by one cent for some orders. Find out why and fix it.")
+reply(text("I'll reproduce it with the order from the bug report, then look at how the total is computed."),
+      call("c1", "Grep", pattern="function cartTotal"))
+result("c1", "src/cart.ts:42:export function cartTotal(items: Item[]): number {")
+reply(call("c2", "Read", file_path=f"{cwd}/src/cart.ts"))
+result("c2", "42  export function cartTotal(items: Item[]): number {\n"
+             "43    const net = items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n"
+             "44    return Math.round(net * (1 + TAX_RATE) * 100) / 100;\n"
+             "45  }")
+reply(text("The total is summed in floating point and rounded once at the end, but the invoice "
+           "rounds the tax of every line. For three items at 19.99 with 7.25% tax the two differ "
+           "by one cent."),
+      call("c3", "Bash", command="pnpm test cart", description="Run the cart tests"))
+result("c3", " FAIL  tests/cart.test.ts > total matches the invoice\n"
+             "   expected 64.32, received 64.31\n"
+             " Tests  1 failed | 5 passed (6)", failed=True)
+reply(call("c4", "Edit", file_path=f"{cwd}/src/cart.ts",
+           old_string="  const net = items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n"
+                      "  return Math.round(net * (1 + TAX_RATE) * 100) / 100;",
+           new_string="  // Work in integer cents and round the tax of each line, like the invoice.\n"
+                      "  const cents = items.reduce((sum, item) => sum + lineCents(item), 0);\n"
+                      "  return cents / 100;"))
+result("c4", f"The file {cwd}/src/cart.ts has been updated.")
+reply(call("c5", "Bash", command="pnpm test cart", description="Run the cart tests again"))
+result("c5", " ✓ tests/cart.test.ts (6 tests) 41ms\n Tests  6 passed (6)")
+reply(text("Fixed. Totals are now computed in integer cents and the tax is rounded per line, "
+           "which is what the invoice does. All six cart tests pass."))
+user("Add a regression test with the order from the bug report.")
+reply(call("c6", "Write", file_path=f"{cwd}/tests/cart.rounding.test.ts",
+           content="import { cartTotal } from '../src/cart';\n\n"
+                   "test('three items at 19.99 match the invoice', () => {\n"
+                   "  const items = Array(3).fill({ price: 19.99, quantity: 1 });\n"
+                   "  expect(cartTotal(items)).toBe(64.32);\n"
+                   "});\n"))
+result("c6", f"File created at {cwd}/tests/cart.rounding.test.ts")
+reply(call("c7", "Bash", command="pnpm test cart", description="Run the cart tests with the new one"))
+result("c7", " ✓ tests/cart.test.ts (6 tests) 38ms\n ✓ tests/cart.rounding.test.ts (1 test) 9ms\n"
+             " Tests  7 passed (7)")
+reply(text("Added tests/cart.rounding.test.ts with the three 19.99 items from the report. "
+           "It fails on the old code and passes now."))
+
+with open(path, "w", encoding="utf-8") as out:
+    for record in records:
+        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+PY
+    touch -d "@$((NOW - 10000))" "$CLAUDE/projects/-tmp-demo-code-web-app/$H.jsonl"
+fi
+
 # The account's plan, where Claude Code keeps it.
 printf '{"oauthAccount":{"organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_5x"}}\n' > "$CLAUDE/.claude.json"
 
@@ -151,6 +434,7 @@ mkdir -p "$DEMO/.local/share/claudash"
         "api-server|$A|Add OAuth login to the API with GitHub and Google" \
         "api-server|$A|commit the OAuth changes with a short message" \
         "web-app|$B|Redesign the pricing page, three tiers, annual toggle" \
+        "web-app|$H|The cart total is off by one cent for some orders. Find out why and fix it." \
         "api-server|$C|Fix the flaky integration tests in tests/db.rs" \
         "api-server|$C|commit only the test fixes" \
         "data-pipeline|$D|Profile the nightly ETL job and speed up the slowest step" \
@@ -205,8 +489,25 @@ case "\$1 \$2" in
     echo "filesystem: npx -y @modelcontextprotocol/server-filesystem - ✔ Connected"
     echo "github: https://api.githubcopilot.com/mcp/ (HTTP) - ✔ Connected"
     echo "plugin:context7:context7: https://mcp.context7.com/mcp (HTTP) - ✔ Connected"
-    echo "claude.ai Linear: https://mcp.linear.app/mcp - ! Needs authentication"
+    if [ -e "$DEMO/.signed-in" ]; then
+      echo "claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected"
+    else
+      echo "claude.ai Linear: https://mcp.linear.app/mcp - ! Needs authentication"
+    fi
     echo "postgres: npx -y @modelcontextprotocol/server-postgres - ✘ Failed to connect — connection refused"
+    ;;
+  "mcp login")
+    echo "Opening your browser to sign in to \$3…"
+    sleep 2
+    : > "$DEMO/.signed-in"
+    echo "✔ Signed in to \$3"
+    sleep 1
+    ;;
+  "-p --session-id")
+    # A static branch review: reads the prompt, takes a while, answers with findings.
+    cat > /dev/null
+    sleep 3
+    cat "$DEMO/review.json"
     ;;
   "agents --json")
     echo '[{"pid":4101,"kind":"interactive","sessionId":"$A","status":"waiting","waitingFor":"permission prompt","cwd":"$DEMO/code/api-server"},{"pid":4102,"kind":"interactive","sessionId":"$B","status":"busy","cwd":"$DEMO/code/web-app"},{"pid":4103,"kind":"background","id":"bg7k2","sessionId":"$C","state":"working","status":"busy","name":"Fix flaky integration tests","cwd":"$DEMO/code/api-server"}]'
@@ -228,6 +529,11 @@ case "\$1 \$2" in
 esac
 EOF
 chmod +x "$DEMO/bin/claude"
+
+# What the review of feat/rate-limit finds.
+cat > "$DEMO/review.json" <<'EOF'
+{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"summary":"Adds a sliding-window rate limiter per API key. The approach is sound, but the limit is off by one and a malformed Authorization header panics; fix both before merging.","findings":[{"file":"src/rate_limit.rs","line":21,"severity":"high","comment":"Off by one: `>` lets limit + 1 requests through in each window. With a limit of 100, the 101st request is still allowed.","suggestion":"if hits.len() as u32 >= self.limit {"},{"file":"src/rate_limit.rs","line":30,"severity":"high","comment":"`unwrap()` panics on a header with no space, such as `Authorization: abc`, so one malformed request takes the worker down. Return an Option and answer 401.","suggestion":"header.split_once(' ').map(|(_, key)| key.to_string())"},{"file":"src/rate_limit.rs","line":8,"severity":"medium","comment":"`hits` never drops keys that stopped sending requests, so the map grows with every API key ever seen. Remove a key when its list is empty after `retain`."},{"file":"tests/rate_limit.rs","line":12,"severity":"low","comment":"The test sleeps for the whole window. Inject the clock so it runs in milliseconds and can cover the boundary."}]}}
+EOF
 
 # --- What the status line and hooks would have recorded ----------------------------------
 mkdir -p "$CACHE/claudash/statusline" "$CACHE/claudash/state"

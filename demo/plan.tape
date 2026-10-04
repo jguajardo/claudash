@@ -9,10 +9,14 @@ Set Padding 20
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 55ms
 
+# Build the made-up data and leave a clean prompt.
 Hide
-Type "sh demo/fixtures.sh && export HOME=/tmp/demo CLAUDE_CONFIG_DIR=/tmp/demo/.claude XDG_CACHE_HOME=/tmp/demo/.cache PATH=/tmp/demo/bin:$PWD/target/x86_64-unknown-linux-musl/release:$PATH && clear"
+Type "sh demo/fixtures.sh && export HOME=/tmp/demo CLAUDE_CONFIG_DIR=/tmp/demo/.claude XDG_CACHE_HOME=/tmp/demo/.cache PATH=/tmp/demo/bin:$PWD/target/x86_64-unknown-linux-musl/release:$PATH && clear && echo READY"
 Enter
-Sleep 1s
+Wait+Screen@180s /READY/
+Type "clear"
+Enter
+Sleep 700ms
 Show
 Sleep 500ms
 Type "claudash plan --share"
