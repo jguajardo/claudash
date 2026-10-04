@@ -312,6 +312,92 @@ pub fn usage(args: &UsageArgs) -> io::Result<()> {
     )
 }
 
+/// `claudash quota`: each session's, project's and model's part of the current
+/// 5-hour and 7-day plan windows.
+pub fn quota(json: bool) -> io::Result<()> {
+    let dir = paths::projects_dir()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    let all = sessions::load_sessions(&dir, &[])?;
+    let store = statusline::load();
+    let now = chrono::Utc::now().timestamp();
+    let windows = [
+        ("5-hour", crate::quota::five_hour(&all, &store, now)),
+        ("7-day", Some(crate::quota::seven_day(&store, now))),
+    ];
+    let mut out = io::stdout().lock();
+    if json {
+        let value: Vec<serde_json::Value> = windows
+            .iter()
+            .filter_map(|(name, w)| w.map(|w| (name, w)))
+            .map(|(name, w)| {
+                let ledger = crate::quota::ledger(&all, &w);
+                serde_json::json!({
+                    "window": name,
+                    "start": w.start,
+                    "reported": w.reported,
+                    "used_percentage": w.used,
+                    "cost_usd": (ledger.total.cost * 100.0).round() / 100.0,
+                    "sessions": ledger.sessions.iter().map(|s| serde_json::json!({
+                        "session_id": s.session_id,
+                        "title": s.title,
+                        "project": s.project,
+                        "share": (s.fraction * 1000.0).round() / 1000.0,
+                        "limit_points": s.limit_points(&w),
+                        "cost_usd": (s.usage.cost * 100.0).round() / 100.0,
+                    })).collect::<Vec<_>>(),
+                    "projects": ledger.projects.iter().map(|(p, u)| serde_json::json!({
+                        "project": p, "cost_usd": (u.cost * 100.0).round() / 100.0,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return writeln!(out, "{}", serde_json::Value::Array(value));
+    }
+    for (name, window) in windows {
+        let Some(window) = window else {
+            writeln!(out, "{name} window: no requests in the last five hours\n")?;
+            continue;
+        };
+        let ledger = crate::quota::ledger(&all, &window);
+        let start = chrono::DateTime::from_timestamp(window.start, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%a %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let used = match window.used {
+            Some(u) => format!("{u:.0}% of the limit used"),
+            None if window.reported => "use not reported".into(),
+            None => "estimated window (run `claudash setup` for the exact one)".into(),
+        };
+        writeln!(
+            out,
+            "{name} window since {start} · {used} · ≈{} API-equivalent",
+            crate::pricing::format_usd(ledger.total.cost)
+        )?;
+        for s in ledger.sessions.iter().take(10) {
+            let points = s
+                .limit_points(&window)
+                .map(|p| format!(" ≈{p:>3.0} pts"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "  {:>4.0}%{points}  {:>9}  {}  ({})",
+                s.fraction * 100.0,
+                crate::pricing::format_usd(s.usage.cost),
+                s.title,
+                s.project
+            )?;
+        }
+        writeln!(out)?;
+    }
+    writeln!(
+        out,
+        "Shares are by API-equivalent cost; how requests count against plan limits isn't published."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

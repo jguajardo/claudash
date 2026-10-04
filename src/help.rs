@@ -94,7 +94,9 @@ const VIEWS: &[ViewHelp] = &[
                 or month, by model and project, \
                 kept beyond Claude Code's 30-day cleanup. Where tokens go: tool output that entered \
                 the context by command, the costliest prompts, reply length against the previous 30 \
-                days. Security: credentials found in transcripts and risky things Claude did.",
+                days. Where the limit went: each session's, project's and model's part of the \
+                current 5-hour and 7-day windows, with the share of the limit when it's reported \
+                (estimated by API-equivalent cost). Security: credentials found in transcripts and risky things Claude did.",
         contexts: &[Context::Insights],
     },
     ViewHelp {

@@ -19,6 +19,7 @@ mod permissions;
 mod pricing;
 mod projects;
 mod prompts;
+mod quota;
 mod report;
 mod review;
 mod sessions;
@@ -44,6 +45,8 @@ Usage:
   claudash summary [-o FILE]             today's summary as Markdown
   claudash usage [daily|monthly|projects|models|sessions] [--since DATE] [--json]
                                          tokens and API-equivalent dollars
+  claudash quota [--json]                where the current 5-hour and 7-day windows went,
+                                         by session, project and model
   claudash export <SESSION-ID> [-o FILE] a conversation as Markdown (stdout
                                          without -o)
   claudash setup [--apply | --remove]    connect claudash to Claude Code (status
@@ -84,6 +87,9 @@ enum Cli {
         output: Option<String>,
     },
     Usage(report::UsageArgs),
+    Quota {
+        json: bool,
+    },
     Help,
     Setup(setup::Mode),
     Statusline {
@@ -164,6 +170,14 @@ fn parse_args(
                         output: Some(file.to_string()),
                     }),
                     _ => Err(format!("usage: claudash summary [-o FILE]\n\n{HELP}")),
+                };
+            }
+            "quota" => {
+                let rest: Vec<String> = args.collect();
+                return match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    [] => Ok(Cli::Quota { json: false }),
+                    ["--json"] => Ok(Cli::Quota { json: true }),
+                    _ => Err(format!("usage: claudash quota [--json]\n\n{HELP}")),
                 };
             }
             "usage" => {
@@ -268,6 +282,7 @@ fn main() -> std::io::Result<()> {
             return exit_on_error("summary", report::summary(output.as_deref()));
         }
         Ok(Cli::Usage(usage)) => return exit_on_error("usage", report::usage(&usage)),
+        Ok(Cli::Quota { json }) => return exit_on_error("quota", report::quota(json)),
         Ok(Cli::Help) => {
             println!("{HELP}");
             return Ok(());

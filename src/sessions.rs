@@ -55,6 +55,9 @@ pub struct SessionTokens {
     /// Subagent transcripts, and their combined usage.
     pub subagents: usize,
     pub subagent_total: Usage,
+    /// Every response with its time (epoch seconds), subagents included,
+    /// oldest first: what a plan window's usage is attributed from.
+    pub timeline: Vec<(i64, Usage)>,
 }
 
 /// Usage per local calendar day, then per model.
@@ -211,9 +214,9 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
                     && let Some(usage) = msg.usage()
                 {
                     if let Some(req) = record.request_id {
-                        let day = record.timestamp.as_deref().and_then(local_day);
+                        let at = record.timestamp.as_deref().and_then(parse_time);
                         let model_name = msg.model.clone().unwrap_or_default();
-                        usage_by_request.insert(req, (usage, day, model_name));
+                        usage_by_request.insert(req, (usage, at, model_name));
                     }
                     last_usage = Some(usage);
                     model = msg.model;
@@ -242,16 +245,19 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
         }
     }
     let mut daily = Daily::new();
-    for (usage, day, model) in all_requests.values() {
-        if let Some(day) = day {
+    let mut timeline = Vec::with_capacity(all_requests.len());
+    for (usage, at, model) in all_requests.values() {
+        if let Some(at) = at {
             daily
-                .entry(*day)
+                .entry(at.date_naive())
                 .or_default()
                 .entry(model.clone())
                 .or_default()
                 .add(usage);
+            timeline.push((at.timestamp(), *usage));
         }
     }
+    timeline.sort_by_key(|(at, _)| *at);
     let context_used = last_usage.map(|u| u.context()).unwrap_or(0);
 
     let title = ai_title
@@ -278,12 +284,13 @@ fn parse_session(path: &Path, dir_name: &str, modified: SystemTime, size: u64) -
             daily,
             subagents,
             subagent_total,
+            timeline,
         },
     })
 }
 
-/// One response's usage, its local day and its model.
-type RequestUsage = (Usage, Option<NaiveDate>, String);
+/// One response's usage, its local time and its model.
+type RequestUsage = (Usage, Option<DateTime<Local>>, String);
 
 /// Usage of every response in `<session-dir>/subagents/*.jsonl`, by
 /// requestId, and how many subagent transcripts there are.
@@ -312,19 +319,19 @@ fn subagent_usage(session_dir: &Path) -> (HashMap<String, RequestUsage>, usize) 
             if let (Some(req), Some(msg)) = (record.request_id, record.message)
                 && let Some(u) = msg.usage()
             {
-                let day = record.timestamp.as_deref().and_then(local_day);
-                usage.insert(req, (u, day, msg.model.unwrap_or_default()));
+                let at = record.timestamp.as_deref().and_then(parse_time);
+                usage.insert(req, (u, at, msg.model.unwrap_or_default()));
             }
         }
     }
     (usage, files)
 }
 
-/// Local calendar day of an RFC 3339 timestamp such as `2026-09-29T23:25:05.989Z`.
-fn local_day(timestamp: &str) -> Option<NaiveDate> {
+/// Local time of an RFC 3339 timestamp such as `2026-09-29T23:25:05.989Z`.
+fn parse_time(timestamp: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
-        .map(|t| t.with_timezone(&Local).date_naive())
+        .map(|t| t.with_timezone(&Local))
 }
 
 /// "5 min ago", "3 h ago", "yesterday", "4 days ago"...
@@ -412,7 +419,7 @@ mod tests {
         assert_eq!(s.tokens.context_used, 320);
         assert_eq!(s.tokens.cost_usd, Some(1.5));
 
-        let day = local_day("2026-01-02T12:00:00Z").unwrap();
+        let day = parse_time("2026-01-02T12:00:00Z").unwrap().date_naive();
         let daily = s.tokens.daily[&day]["m"];
         assert_eq!(daily.input_tokens, 31);
         assert_eq!(daily.output_tokens, 14);

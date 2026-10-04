@@ -95,6 +95,7 @@ Comments are written in the language of the branch's commit messages. A review u
 A menu of three sections:
 
 - **Plan & usage**: plan usage gauges with the forecast, a chart of tokens or dollars (`$`) per day (or per month with `m`), totals for today, 7 days, 30 days and a year, usage by model, and your most active projects this week, each with what it would cost at API prices. Claude Code deletes transcripts after 30 days by default, so claudash keeps its own copy of the daily numbers.
+- **Where the limit went**: each session's, project's and model's part of the current 5-hour and 7-day windows, with their API-equivalent cost. With the status line set up, claudash uses the exact windows Claude Code reports and splits the percentage used among sessions by cost ("api-server took ≈26 of the 64 points"); without it, the 5-hour window is estimated from your activity. How requests count against plan limits isn't published, so the split is an estimate and says so.
 - **Where tokens go** over the last 7 days, from your own transcripts:
   - **Tool output that entered the context**, by tool and, for Bash, by command (`$ cargo test`, `$ git diff`…), with calls and tokens per call. Verbose commands are the usual reason a context fills up.
   - **Costliest prompts**: every prompt with the tokens processed by all the requests it caused.
@@ -120,6 +121,7 @@ claudash usage                 # last 30 days, by day
 claudash usage monthly         # every month in claudash's history
 claudash usage projects        # or models, sessions; --since 2026-09-01
 claudash usage --json          # for scripts
+claudash quota                 # where the current 5-hour and 7-day windows went (--json)
 ```
 
 ### From the command line and status bars

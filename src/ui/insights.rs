@@ -15,7 +15,7 @@ use crate::{
     audit::Severity,
 };
 
-const MENU_WIDTH: u16 = 26;
+const MENU_WIDTH: u16 = 30;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let [menu, content] = Layout::horizontal([Constraint::Length(MENU_WIDTH), Constraint::Min(20)])
@@ -32,9 +32,158 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_menu(frame, menu, "Insights", &entries, selected, true);
     match app.insights {
         InsightsSection::Usage => draw_usage(frame, app, content),
+        InsightsSection::Quota => draw_quota(frame, app, content),
         InsightsSection::Tokens => draw_token_report(frame, app, content),
         InsightsSection::Security => draw_security(frame, app, content),
     }
+}
+
+/// Where the current 5-hour and 7-day windows went, side by side.
+fn draw_quota(frame: &mut Frame, app: &App, area: Rect) {
+    let now = chrono::Utc::now().timestamp();
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .spacing(1)
+            .areas(area);
+    let five = crate::quota::five_hour(&app.sessions, &app.statusline, now);
+    draw_window(frame, app, left, "5-hour window", five);
+    let seven = crate::quota::seven_day(&app.statusline, now);
+    draw_window(frame, app, right, "7-day window", Some(seven));
+}
+
+fn draw_window(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    name: &str,
+    window: Option<crate::quota::Window>,
+) {
+    let Some(window) = window else {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "No request in the last five hours: nothing counts against this window.",
+                dim(),
+            ))
+            .wrap(Wrap { trim: false })
+            .block(card(name, Color::LightMagenta, false)),
+            area,
+        );
+        return;
+    };
+    let ledger = crate::quota::ledger(&app.sessions, &window);
+    let local = |t: i64| {
+        chrono::DateTime::from_timestamp(t, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%a %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Since ", dim()),
+            Span::styled(local(window.start), Style::new().bold()),
+            Span::styled(
+                format!(
+                    "  ·  ≈{} API-equivalent",
+                    crate::pricing::format_usd(ledger.total.cost)
+                ),
+                Style::new().fg(Color::Green),
+            ),
+        ]),
+        Line::from(match window.used {
+            Some(used) => Span::styled(
+                format!("{used:.0}% of the limit used, split below by each session's cost"),
+                Style::new().fg(Color::Yellow),
+            ),
+            None => Span::styled(
+                if window.reported {
+                    "Claude Code didn't report how much is used".to_string()
+                } else {
+                    "Estimated window: `claudash setup` gives the exact one and the % used"
+                        .to_string()
+                },
+                dim(),
+            ),
+        }),
+        Line::default(),
+    ];
+    let bar_width = 12usize;
+    let bar = |fraction: f64| {
+        let filled = ((fraction * bar_width as f64).round() as usize).min(bar_width);
+        format!("{}{}", "█".repeat(filled), "░".repeat(bar_width - filled))
+    };
+    lines.push(Line::from(Span::styled(
+        "Sessions",
+        Style::new().fg(Color::LightMagenta).bold(),
+    )));
+    if ledger.sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no requests in this window",
+            dim(),
+        )));
+    }
+    for share in ledger.sessions.iter().take(8) {
+        let points = share
+            .limit_points(&window)
+            .map(|p| format!(" ≈{p:.0} pts"))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} ", bar(share.fraction)),
+                Style::new().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{:>3.0}%{points:<9}", share.fraction * 100.0),
+                Style::new().bold(),
+            ),
+            Span::styled(
+                format!("{:>8}  ", crate::pricing::format_usd(share.usage.cost)),
+                Style::new().fg(Color::Green),
+            ),
+            Span::raw(share.title.chars().take(40).collect::<String>()),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", " ".repeat(bar_width + 3), share.project),
+            dim(),
+        )));
+    }
+    for (title, rows) in [("Projects", &ledger.projects), ("Models", &ledger.models)] {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::new().fg(Color::LightMagenta).bold(),
+        )));
+        for (name, usage) in rows.iter().take(5) {
+            let fraction = if ledger.total.cost > 0.0 {
+                usage.cost / ledger.total.cost
+            } else {
+                0.0
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", bar(fraction)),
+                    Style::new().fg(Color::Cyan),
+                ),
+                Span::styled(format!("{:>3.0}%  ", fraction * 100.0), Style::new().bold()),
+                Span::styled(
+                    format!("{:>8}  ", crate::pricing::format_usd(usage.cost)),
+                    Style::new().fg(Color::Green),
+                ),
+                Span::raw(name.clone()),
+            ]));
+        }
+    }
+    let max = (lines.len() as u16).saturating_sub(area.height.saturating_sub(2));
+    let scroll = app.insights_scroll.min(max);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(card(name, Color::LightMagenta, false)),
+        area,
+    );
 }
 
 fn severity_color(s: Severity) -> Color {

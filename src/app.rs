@@ -159,13 +159,15 @@ pub struct ProjectPage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InsightsSection {
     Usage,
+    Quota,
     Tokens,
     Security,
 }
 
 impl InsightsSection {
-    pub const ALL: [InsightsSection; 3] = [
+    pub const ALL: [InsightsSection; 4] = [
         InsightsSection::Usage,
+        InsightsSection::Quota,
         InsightsSection::Tokens,
         InsightsSection::Security,
     ];
@@ -173,6 +175,7 @@ impl InsightsSection {
     pub fn title(self) -> &'static str {
         match self {
             InsightsSection::Usage => "Plan & usage",
+            InsightsSection::Quota => "Where the limit went",
             InsightsSection::Tokens => "Where tokens go",
             InsightsSection::Security => "Security",
         }
@@ -181,6 +184,7 @@ impl InsightsSection {
     pub fn icon(self) -> &'static str {
         match self {
             InsightsSection::Usage => "▆",
+            InsightsSection::Quota => "◑",
             InsightsSection::Tokens => "◔",
             InsightsSection::Security => "◈",
         }
