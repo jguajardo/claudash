@@ -2,7 +2,7 @@
 name = "claudash"
 version = "1.0.0-rc.1"
 edition = "2024"
-description = "Unofficial terminal dashboard for Claude Code: sessions and attention alerts, plan and context usage, prompt cache, MCP health, instructions, skills and plugins"
+description = "The control room for Claude Code: sessions that need you, where your plan limits and dollars went, MCP, specs and secrets in transcripts. Unofficial."
 authors = ["Jorge Guajardo <jguajardo87@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jguajardo/claudash"

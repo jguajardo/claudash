@@ -37,7 +37,7 @@ const DEFAULT_CONTEXT_LIMIT: u64 = 1_000_000;
 const CONTEXT_LIMIT_ENV: &str = "CLAUDASH_CONTEXT_LIMIT";
 
 const HELP: &str = "\
-claudash — control dashboard for Claude Code (unofficial project)
+claudash — the control room for Claude Code (unofficial project)
 
 Usage:
   claudash [OPTIONS]                     open the dashboard
