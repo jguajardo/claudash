@@ -17,7 +17,6 @@ A single Rust binary that reads Claude Code's local files and runs the `claude` 
 
 ```sh
 brew install jguajardo/tap/claudash                 # macOS, Linux
-npx @jguajardo/claudash                             # no install, needs Node
 cargo binstall claudash                             # prebuilt, with cargo-binstall
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jguajardo/claudash/releases/latest/download/claudash-installer.sh | sh
 ```

@@ -1,6 +1,6 @@
 [package]
 name = "claudash"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 edition = "2024"
 description = "The control room for Claude Code: sessions that need you, where your plan limits and dollars went, MCP, specs and secrets in transcripts. Unofficial."
 authors = ["Jorge Guajardo <jguajardo87@gmail.com>"]
