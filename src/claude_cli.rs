@@ -24,6 +24,10 @@ const PROGRAM: &str = "claude";
 /// If it isn't found on `PATH`, the bare name is used so that spawning fails
 /// with the usual "not found" error.
 pub fn command() -> Command {
+    // Tests never run the real Claude Code: this name isn't on any PATH.
+    if cfg!(test) {
+        return Command::new("claude-is-not-run-in-tests");
+    }
     match path() {
         Some(path) => Command::new(path),
         None => Command::new(PROGRAM),

@@ -11,7 +11,7 @@ Four views, switched with `1`–`4`: **Now** (what needs you), **Sessions**, **P
 The screen claudash opens on: what needs a decision from you.
 
 - **Open sessions**, the ones that need you first: their state and why they wait (for example "permission prompt"), what exactly a session that needs you is asking to do (the command it wants to run, the edit it wants to make; `Enter` shows all of it), their last tool call, how full their context is and how many subagents are running. claudash sends a desktop notification and rings the terminal bell when a session starts needing you or finishes.
-- **Background sessions** (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)), finished ones included. `Tab` moves to them: `Enter` attaches to one in this terminal (`claude attach`), `l` shows its output, and `S` stops it and `R` respawns it, both after asking.
+- **Background sessions** (`claude --bg`, [agent view](https://code.claude.com/docs/en/agent-view)), finished ones included. `Tab` moves to them: `Enter` attaches to one (`claude attach`; in a new tab inside Zellij or tmux, otherwise in this terminal), `l` shows its output, and `S` stops it and `R` respawns it, both after asking.
 - **Needs a look**: alerts across projects. Sessions a plan limit stopped come first: once the limit resets, `Enter` continues them in the background (`claude --bg --resume <id>` in each one's folder, after asking), and before it, `Enter` has them continue at the reset if claudash is still open (`auto_continue = true` in the settings file always does). Sessions that are still open are left to you, in their own terminal. Credentials in transcripts, risky commands from the last week, MCP servers that failed or need you to sign in, two open sessions in one folder or editing the same file, worktrees with forgotten work, stale or finished spec changes. When there's nothing, it says so. `Tab` moves into the alerts and `Enter` takes you to the place to act on one: the session's audit in the inspector, or the project's MCP servers, worktrees, specs or sessions, with that item selected.
 - **Plan**: 5-hour and 7-day limits with their reset times and how long until then, and a forecast of when you'll hit the limit at your current pace. claudash alerts you at 80% and 95%, and once a window you used 90% or more of resets, so you know you can pick up again.
 - **Live feed** of every tool call from sessions active in the last hour, failures in red, refreshed every 2 seconds.
@@ -20,7 +20,7 @@ The screen claudash opens on: what needs a decision from you.
 
 Every Claude Code session on your machine, newest first, with its title, project folder, git branch and last activity, marked `▲ needs you`, `● working` or `● waiting` when open.
 
-- `Enter` resumes the session with `claude --resume` in its project folder and returns to claudash when you exit.
+- `Enter` resumes the session with `claude --resume` in its project folder. Inside Zellij or tmux it opens in a new tab (a window, in tmux), so claudash stays on screen and you can open more sessions meanwhile; anywhere else it takes over claudash's terminal and returns when you exit. See [Where sessions open](#where-sessions-open).
 - `v` opens the conversation: your prompts and Claude's replies with their times, tool calls, compaction points and, with `o`, tool output. `/` searches inside it, `n`/`N` jump between matches, `r` reloads it to follow a running session, and `e` exports it to Markdown in `~/Documents/claudash-exports/`.
 - `i` inspects the session: a chart of its context per request with compactions (and, for each compaction, which of the files worked on before it the summary doesn't mention, so you know what to remind Claude of), every tool it called with its failure rate, the tool output that entered its context, its costliest prompts, an audit of risky actions and secrets, the files it edited, its subagents (type, model, tokens) and the skills, MCP servers and commands it used. `Tab` selects a subagent and `Enter` opens its own conversation.
 - `p` sends a one-off prompt to the session (`claude -p --resume`) and shows the reply.
@@ -34,6 +34,7 @@ From any view:
 
 - `f` searches the content of every conversation and opens the one you pick at the match.
 - `h` searches every prompt you've typed in Claude Code, newest first. `Enter` puts the chosen one in the prompt box for the selected session, `Tab` copies it to the clipboard (OSC 52, works over SSH).
+- `B` lists the branch reviews of every project: the ones running, the ones waiting to be read and earlier ones. `Enter` opens one's findings.
 - `s` summarizes today across projects: sessions, prompts, tool calls and failures, files edited, tokens, dollars and each repository's commits. `e` exports it to Markdown in `~/Documents/claudash-exports/`.
 - `w` shows your **wrapped** card: the last week (or month, with `Tab`) on one screen made to be shared. Prompts, requests, sessions, tokens and API-equivalent dollars, active days and streak, the busiest day, the top session, projects and models by share, most used tools and commands, the hours you work, and secrets or risky commands found. `x` hides project and session names before you post it, and `e` exports it. `claudash wrapped [week|month] [--redact]` prints it in color in the terminal.
 
@@ -48,8 +49,8 @@ A project's page has a menu of sections on the left (`↑`/`↓` to choose, `Ent
 | **Overview** | What Claude Code loads there, its git state, recent sessions, activity, security and specs at a glance |
 | **Sessions** | The project's sessions in a table; `Enter` resumes, `v` reads, `i` inspects |
 | **Specs** | Spec-driven changes and their next step (see below) |
-| **Worktrees** | Every checkout with its git state and sessions; `Enter` shows its sessions, `b` reviews a branch, `D` removes a worktree with `git worktree remove` (never `--force`), `P` prunes records of worktrees whose directory is gone; both ask first |
-| **Snapshots** | An undo for what `/rewind` can't undo: Claude Code's checkpoints don't cover files changed by Bash commands or subagents. With `snapshots = true` in the settings file (and the hook installed by `claudash setup --apply`), the hook copies the project's files to a shadow git repository in claudash's data directory before each prompt and after each reply, only when something changed. `Enter` shows what changed in a snapshot; `U` puts the files back as they were, after asking and after snapshotting the current state, so a restore can be undone too. Files created later are left alone. The project's own `.git` is never touched and files its `.gitignore` ignores aren't copied. Git checkouts only |
+| **Worktrees** | Every checkout with what it holds that exists nowhere else (modified and untracked files, unpushed commits), its sessions and how many are open, and whose lock it carries: `lock in use` when the process that set it still runs, `stale lock` when that process has ended. `Enter` shows its sessions and `b` reviews a branch. `D` removes a worktree: it first says what stands in the way and what it will do about it, then asks. It stops a background session running there, unlocks a stale lock or one set by hand (saying which), and deletes the worktree's modified and untracked files only after listing them and a second `D`; files its `.gitignore` ignores go with it, and the question names them. It refuses while a session has the worktree open in another terminal or its lock is in use. `C` removes at once every worktree with no changes, no open session and no lock in use. `P` prunes records of worktrees whose directory is gone. The branch is always kept |
+| **Snapshots** | An undo for what `/rewind` can't undo: Claude Code's checkpoints don't cover files changed by Bash commands or subagents. A snapshot is a copy of the project's files, saved before each prompt you send and after each reply, only when something changed. They're off until you turn them on: `T` here asks, then writes `snapshots = true` to the settings file for you (and, if `claudash setup --apply` hasn't been run, does what it does: status line and hook). The copies go to a separate git repository in claudash's data directory. `Enter` shows what changed since the copy before; `U` puts the files back as they were then, after asking and after saving the current state, so a restore can be undone too. Files created later are left alone. The project's own `.git` is never touched and files its `.gitignore` ignores aren't copied. Git checkouts only |
 | **MCP servers** | `claude mcp list` run in the project's folder, so project-scoped servers show up too. `Enter` reads a server's latest log, which usually says why it failed, and `l` opens it in the Logs view, which follows new lines and filters them. For servers that need you to sign in, such as claude.ai connectors (Gmail, Google Calendar, Atlassian…) or HTTP servers, `a` runs `claude mcp login` and re-checks it when you're back; `L` signs out after asking |
 | **Skills & plugins** | Skills, subagents, commands, hooks and plugins available there, with how often each was used in the last 30 days; plugins show their always-on token cost per session, so unused ones that cost tokens stand out, and `Space` enables or disables one. The **Permissions** tab merges allow, ask and deny rules from every settings file and flags the risky ones, and suggests rules for build, test and git-reading commands you ran ten times or more in 30 days that no rule allows (it never edits your settings) (see [Security](#security)) |
 | **Security** | Credentials in this project's transcripts, risky things Claude did here, and the permission rules worth a look |
@@ -80,9 +81,11 @@ Now's alerts also flag changes with tasks left that nobody touched for 14 days, 
 1. claudash runs `git fetch` and lists the remote's branches, newest first, with their last commit, author, how many commits they add and whether you've reviewed them. Type to search. Your own checkout's branch comes first when it has commits the base doesn't, so you can review your work before pushing it (only committed work is reviewed).
 2. Pick one: it shows its size against the base (`develop`, or `main`, or `master`, whichever the remote has first) and asks how far to go:
    - **Static review**: Claude Code reads the commits, the diff and the code around it, in the background. It can only read files and run `git log`, `git diff` and `git show`; nothing runs and nothing changes.
-   - **Review and run the tests** or **Review and start the project**: Claude Code opens in the terminal, reviews, then finds how to run the tests or start the project and does it, asking you before each command. The findings show when you exit.
+   - **Review and run the tests** or **Review and start the project**: Claude Code opens (in a tab of its own inside Zellij or tmux), reviews, then finds how to run the tests or start the project and does it, asking you before each command. The findings show when that session ends.
 3. The branch is checked out, detached, in a worktree under claudash's cache (`~/.cache/claudash/reviews/`), so your checkout, your branch and your `git status` are never touched.
 4. The findings list each comment by file, line and severity, with a suggested change where it helps. `Enter` shows one with the code around that line, `Tab` copies it to paste into GitHub or Bitbucket, `e` exports the whole review to Markdown, `v` opens the review's Claude Code session to ask follow-up questions, and `D` removes the worktree. claudash never posts anything.
+
+Several reviews can run at once, of branches of one project or of several: start one, go to another card, start the next (up to four, and one per branch). A review that ends while nothing else is going on opens its findings; the others wait, announced in the footer, until you read them. `B`, anywhere, lists every project's reviews: the ones running, the ones waiting to be read, and earlier ones.
 
 Comments are written in the language of the branch's commit messages. A review uses your plan like any other Claude Code session.
 
@@ -190,7 +193,16 @@ A letter means the same thing in every view where it works, `Enter` opens or run
 | `S` · `R` | background | Stop · respawn |
 | `P` | worktrees | Prune missing worktrees |
 
-### Configuration
+### Where sessions open
+
+Resuming a session, attaching to a background one, running a spec's next step and the interactive branch reviews all start an interactive Claude Code session. Where it opens depends on where claudash runs:
+
+- **Inside Zellij or tmux**: in a new tab (a window, in tmux) named after the session. claudash stays where it is, so you can open the next session, start a review or look something up while that one works, the way you would with terminal tabs. The tab closes when the session ends; if Claude Code exits with an error, it waits for Enter so you can read it. `open_in = "pane"` opens a pane next to claudash instead, and `open_in = "here"` keeps the behavior below.
+- **Anywhere else**: in claudash's own terminal. claudash steps aside and comes back when you exit the session.
+
+Signing in to an MCP server (`a`) always runs in claudash's terminal: it's short, and the servers are checked again as soon as it returns.
+
+## Configuration
 
 Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/claudash/config.toml` on macOS); `claudash config --init` writes one with every setting commented out. Flags win over environment variables, which win over the file.
 
@@ -202,7 +214,8 @@ Settings go in `~/.config/claudash/config.toml` (`~/Library/Application Support/
 | Colors | `colors = false` | | [`NO_COLOR`](https://no-color.org) | on |
 | Your Claude plan, for Is your plan worth it | `plan = "max5x"` (`pro`, `max20x`, `api`) | | | read from Claude Code |
 | Continue sessions a plan limit stopped as soon as it resets, while claudash is open | `auto_continue = true` | | | off |
-| Snapshots of project files before each prompt and after each reply (see [Projects](#3--projects)) | `snapshots = true` | | | off |
+| Snapshots of project files before each prompt and after each reply (see [Projects](#3--projects)); `T` in a project's Snapshots writes it for you | `snapshots = true` | | | off |
+| Where a session opens inside Zellij or tmux (see [Where sessions open](#where-sessions-open)) | `open_in = "pane"` (`tab`, `here`) | | | `tab` |
 | Claude Code's config directory | | | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 
 Token values accept suffixes: `1M`, `200k`, `1.5m`, `500000`.

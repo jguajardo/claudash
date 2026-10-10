@@ -6,7 +6,10 @@
 //! undoes it. An existing status line is kept by wrapping it:
 //! `claudash statusline -- <your command>`.
 
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde_json::{Map, Value, json};
 
@@ -170,11 +173,19 @@ fn unquote(word: &str) -> String {
     }
 }
 
-pub fn run(mode: Mode) -> io::Result<()> {
-    let home = crate::paths::claude_home()
-        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
-    let file = home.join("settings.json");
-    let mut settings: Map<String, Value> = match fs::read_to_string(&file) {
+/// What applying a mode to the settings file did.
+pub struct Applied {
+    pub file: PathBuf,
+    /// What changed, or would change with `Mode::Show`, one line each.
+    pub changes: Vec<String>,
+    /// The copy made of the file before writing it.
+    pub backup: Option<PathBuf>,
+}
+
+/// Updates the settings file at `file` so Claude Code runs `exe` for the
+/// status line and the hooks (or stops doing it). `Mode::Show` only reports.
+fn apply_to(file: &Path, exe: &str, mode: Mode) -> io::Result<Applied> {
+    let mut settings: Map<String, Value> = match fs::read_to_string(file) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| {
             io::Error::other(format!(
                 "{} isn't valid JSON ({e}); fix it first",
@@ -184,14 +195,39 @@ pub fn run(mode: Mode) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Map::new(),
         Err(e) => return Err(e),
     };
+    let changes = update(&mut settings, exe, mode);
+    let backup = if changes.is_empty() || mode == Mode::Show {
+        None
+    } else {
+        write_with_backup(file, &settings)?
+    };
+    Ok(Applied {
+        file: file.to_path_buf(),
+        changes,
+        backup,
+    })
+}
 
-    let changes = update(&mut settings, &exe(), mode);
-    if changes.is_empty() {
-        println!("Nothing to do: {} is already up to date.", file.display());
+/// `apply_to` on Claude Code's user settings, without printing anything.
+pub fn apply(mode: Mode) -> io::Result<Applied> {
+    // Tests never write Claude Code's real settings; they use `apply_to`.
+    if cfg!(test) {
+        return Err(io::Error::other("no settings file in tests"));
+    }
+    let home = crate::paths::claude_home()
+        .ok_or_else(|| io::Error::other("could not find Claude Code's config directory"))?;
+    apply_to(&home.join("settings.json"), &exe(), mode)
+}
+
+pub fn run(mode: Mode) -> io::Result<()> {
+    let done = apply(mode)?;
+    let file = done.file.display();
+    if done.changes.is_empty() {
+        println!("Nothing to do: {file} is already up to date.");
         return Ok(());
     }
-    println!("Changes to {}:", file.display());
-    for change in &changes {
+    println!("Changes to {file}:");
+    for change in &done.changes {
         println!("  • {change}");
     }
     if mode == Mode::Show {
@@ -202,25 +238,32 @@ pub fn run(mode: Mode) -> io::Result<()> {
         );
         return Ok(());
     }
-    write_with_backup(&file, &settings)?;
+    if let Some(backup) = &done.backup {
+        println!("Backup: {}", backup.display());
+    }
     println!("\nDone. New Claude Code sessions pick it up; restart open ones.");
     Ok(())
 }
 
-fn write_with_backup(file: &Path, settings: &Map<String, Value>) -> io::Result<()> {
-    if file.exists() {
+/// Writes the settings, after copying the file there was; returns the copy.
+fn write_with_backup(file: &Path, settings: &Map<String, Value>) -> io::Result<Option<PathBuf>> {
+    let backup = if file.exists() {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let backup = file.with_extension(format!("json.claudash-{stamp}.bak"));
         fs::copy(file, &backup)?;
-        println!("Backup: {}", backup.display());
-    } else if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir)?;
-    }
+        Some(backup)
+    } else {
+        if let Some(dir) = file.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        None
+    };
     let mut text = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
     text.push('\n');
     let tmp = file.with_extension("json.claudash-tmp");
     fs::write(&tmp, text)?;
-    fs::rename(tmp, file)
+    fs::rename(tmp, file)?;
+    Ok(backup)
 }
 
 #[cfg(test)]
@@ -283,5 +326,31 @@ mod tests {
         let (settings, _) = apply("{}", Mode::Apply);
         let (removed, _) = apply(&settings.to_string(), Mode::Remove);
         assert_eq!(removed, json!({}));
+    }
+    #[test]
+    fn applies_to_a_file_quietly_and_backs_it_up() {
+        let dir = std::env::temp_dir().join(format!("claudash-setup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        fs::write(&file, r#"{"model": "opus"}"#).unwrap();
+
+        let done = apply_to(&file, "/bin/claudash", Mode::Apply).unwrap();
+        assert!(!done.changes.is_empty());
+        let backup = done.backup.expect("the file existed, so it's backed up");
+        assert_eq!(fs::read_to_string(backup).unwrap(), r#"{"model": "opus"}"#);
+        let written: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written["model"], "opus");
+        assert!(written["hooks"]["Stop"].is_array());
+
+        // Nothing left to change: nothing is written or backed up again.
+        let again = apply_to(&file, "/bin/claudash", Mode::Apply).unwrap();
+        assert!(again.changes.is_empty() && again.backup.is_none());
+        // Showing never writes.
+        fs::write(&file, "{}").unwrap();
+        let shown = apply_to(&file, "/bin/claudash", Mode::Show).unwrap();
+        assert!(!shown.changes.is_empty() && shown.backup.is_none());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

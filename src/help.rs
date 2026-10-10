@@ -200,13 +200,19 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
 
     out.push(heading("What changes things"));
     for text in [
-        "Resume and prompt run Claude Code on the session (a prompt adds to its conversation).",
+        "Resume and prompt run Claude Code on the session (a prompt adds to its conversation). Inside \
+         Zellij or tmux a resumed session opens in a new tab or pane (`open_in` in the settings).",
         "Trash moves the session's files out of ~/.claude into claudash's trash; T restores them.",
         "Plugin toggles run `claude plugin enable/disable`; MCP sign-in and sign-out run `claude mcp login/logout`.",
         "Background session actions run `claude attach`, `stop` and `respawn`.",
-        "Worktree removal runs `git worktree remove` without --force; prune runs `git worktree prune`.",
+        "Removing a worktree keeps its branch. It can stop a background session there and unlock it, saying \
+         whose lock it was; it deletes its modified and untracked files only after listing them and a second \
+         D, and names the ignored files that go with it. Prune runs `git worktree prune`.",
         "Branch reviews run `git fetch`, check the branch out in a worktree under claudash's cache \
-         (never in your checkout) and start Claude Code there. Nothing is posted anywhere.",
+         (never in your checkout) and start Claude Code there; several can run at once. Nothing is \
+         posted anywhere.",
+        "Turning snapshots on or off (T in a project's Snapshots) writes the setting to claudash's \
+         config.toml and, if `claudash setup --apply` hasn't been run, does what it does.",
         "`claudash setup --apply` edits ~/.claude/settings.json after backing it up.",
         "Tags, notes, stars and the usage history are claudash's own files; Claude's are untouched.",
         "Resume, prompt and trash are refused while the session is open elsewhere.",

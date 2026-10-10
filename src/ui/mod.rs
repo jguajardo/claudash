@@ -16,8 +16,8 @@ use ratatui::{
 
 use crate::{
     app::{
-        App, CLEANUP_PRESETS, EcoTab, Input, McpSnapshot, Popup, TranscriptRow, TranscriptView,
-        View,
+        App, CLEANUP_PRESETS, EcoTab, Input, McpSnapshot, Popup, ReviewRow, TranscriptRow,
+        TranscriptView, View,
     },
     ecosystem::Item,
     hooks::Activity,
@@ -3062,11 +3062,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     format!(" {} fetching branches…", app.spinner()),
                     Style::new().fg(Color::LightMagenta),
                 ))
-            } else if let Some(branch) = app.reviewing()
+            } else if let Some(reviewing) = app.reviewing()
                 && app.flash.is_none()
             {
                 Line::from(Span::styled(
-                    format!(" {} Claude is reviewing {branch}…", app.spinner()),
+                    format!(" {} {reviewing}", app.spinner()),
                     Style::new().fg(Color::LightMagenta),
                 ))
             } else if app.summarizing() {
@@ -3081,6 +3081,20 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ))
             } else {
                 let mut spans = Vec::new();
+                // Finished reviews stay announced until they're opened.
+                if !app.reviews_ready.is_empty() {
+                    spans.push(Span::styled(
+                        " B ",
+                        Style::new().fg(Color::Black).bg(Color::Green),
+                    ));
+                    spans.push(Span::styled(
+                        format!(
+                            " {} to read  ",
+                            plural(app.reviews_ready.len() as u64, "review")
+                        ),
+                        Style::new().fg(Color::Green),
+                    ));
+                }
                 for b in crate::keys::footer(app.context()) {
                     spans.push(Span::styled(
                         format!(" {} ", b.keys.split("  ").next().unwrap_or(b.keys)),
@@ -3112,9 +3126,124 @@ fn centered(area: Rect, width: Constraint, height: Constraint) -> Rect {
     area
 }
 
+/// The list of branch reviews: running, waiting to be read, then earlier ones.
+fn draw_reviews(frame: &mut Frame, app: &mut App) {
+    let area = centered(
+        frame.area(),
+        Constraint::Percentage(85),
+        Constraint::Percentage(70),
+    );
+    frame.render_widget(Clear, area);
+    let now = chrono::Utc::now().timestamp();
+    let spinner = app.spinner();
+    let rows = app.review_rows();
+    let running = rows
+        .iter()
+        .filter(|r| matches!(r, ReviewRow::Running { .. }))
+        .count();
+    let unread = rows
+        .iter()
+        .filter(|r| matches!(r, ReviewRow::Done { unread: true, .. }))
+        .count();
+    let items: Vec<ListItem<'static>> = rows
+        .iter()
+        .map(|row| match row {
+            ReviewRow::Running { task, started } => ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("{spinner} "), Style::new().fg(Color::LightMagenta)),
+                    Span::styled(task.branch.clone(), Style::new().bold()),
+                    Span::styled(format!("  {}", task.repo_name), dim()),
+                ]),
+                Line::from(Span::styled(
+                    match started {
+                        Some(started) => format!(
+                            "    {} · started {} ago",
+                            task.mode.title().to_lowercase(),
+                            short_age(started.elapsed().as_secs() as i64)
+                        ),
+                        None => format!(
+                            "    {} · in a session of its own",
+                            task.mode.title().to_lowercase()
+                        ),
+                    },
+                    dim(),
+                )),
+            ]),
+            ReviewRow::Done { review, unread } => {
+                let repo = review
+                    .repo
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let findings = &review.result.findings;
+                let high = findings.iter().filter(|f| f.severity == "high").count();
+                let mut found = plural(findings.len() as u64, "finding");
+                if high > 0 {
+                    found.push_str(&format!(" · {high} high"));
+                }
+                let mark = if *unread {
+                    Span::styled("● ", Style::new().fg(Color::Green))
+                } else {
+                    Span::raw("  ")
+                };
+                let name = if *unread {
+                    Style::new().bold()
+                } else {
+                    Style::new()
+                };
+                ListItem::new(vec![
+                    Line::from(vec![
+                        mark,
+                        Span::styled(review.branch.clone(), name),
+                        Span::styled(format!("  {repo}"), dim()),
+                        Span::styled(format!("  {} ago", short_age(now - review.at)), dim()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            format!("    {found}"),
+                            Style::new().fg(if high > 0 { Color::Red } else { Color::Gray }),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  {}",
+                                review.result.summary.lines().next().unwrap_or_default()
+                            ),
+                            dim(),
+                        ),
+                    ]),
+                ])
+            }
+        })
+        .collect();
+    drop(rows);
+    let mut title = " Branch reviews ".to_string();
+    if running > 0 {
+        title.push_str(&format!("· {running} running "));
+    }
+    if unread > 0 {
+        title.push_str(&format!("· {unread} to read "));
+    }
+    let block = panel("", Color::LightMagenta)
+        .title(Line::from(title).bold().fg(Color::LightMagenta))
+        .title_bottom(Line::from(" Enter read · Esc close ").right_aligned());
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::new().fg(Color::White).bg(HIGHLIGHT))
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    if let Some(Popup::Reviews { state, .. }) = &mut app.popup {
+        frame.render_stateful_widget(list, area, state);
+    }
+}
+
 fn draw_popup(frame: &mut Frame, app: &mut App) {
+    if matches!(app.popup, Some(Popup::Reviews { .. })) {
+        return draw_reviews(frame, app);
+    }
     match &mut app.popup {
         None => {}
+        // Drawn above: its rows come from the whole app.
+        Some(Popup::Reviews { .. }) => {}
         Some(Popup::Text {
             title,
             lines,
@@ -3811,16 +3940,29 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
             frame.render_stateful_widget(list, area, state);
         }
         Some(Popup::Confirm {
-            title, lines, yes, ..
+            title,
+            lines,
+            yes,
+            action,
         }) => {
-            let height = lines.len() as u16 + 5;
+            // Long lines wrap: count the rows they take inside the 72 columns.
+            let rows: usize = lines
+                .iter()
+                .map(|l| l.chars().count().div_ceil(68).max(1))
+                .sum();
             let area = centered(
                 frame.area(),
                 Constraint::Length(72),
-                Constraint::Length(height),
+                Constraint::Length(rows as u16 + 5),
             );
             frame.render_widget(Clear, area);
-            let mut text: Vec<Line> = lines
+            let block = panel(title, Color::Red);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            // The keys keep the last row even when the question doesn't fit.
+            let [question, keys] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            let text: Vec<Line> = lines
                 .iter()
                 .enumerate()
                 .map(|(i, l)| {
@@ -3831,17 +3973,19 @@ fn draw_popup(frame: &mut Frame, app: &mut App) {
                     }
                 })
                 .collect();
-            text.push(Line::default());
-            text.push(Line::from(vec![
-                Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red)),
-                Span::raw(format!(" {yes}   ")),
-                Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
-                Span::raw(" cancel"),
-            ]));
-            let paragraph = Paragraph::new(text)
-                .wrap(Wrap { trim: true })
-                .block(panel(title, Color::Red));
-            frame.render_widget(paragraph, area);
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), question);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", action.key()),
+                        Style::new().fg(Color::Black).bg(Color::Red),
+                    ),
+                    Span::raw(format!(" {yes}   ")),
+                    Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
+                    Span::raw(" cancel"),
+                ])),
+                keys,
+            );
         }
     }
 }

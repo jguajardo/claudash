@@ -172,6 +172,13 @@ pub const BINDINGS: &[Binding] = &[
         None,
         ch('r'),
     ),
+    key(
+        Global,
+        "B",
+        "branch reviews: the ones running and the finished ones, of every project",
+        None,
+        ch('B'),
+    ),
     key(Global, "?", "help", Some("help"), ch('?')),
     key(Global, "q  Ctrl+C", "quit", Some("quit"), ch('q')),
     // Now.
@@ -420,9 +427,16 @@ pub const BINDINGS: &[Binding] = &[
     key(
         Worktrees,
         "D",
-        "remove the worktree (git worktree remove, asks first; git refuses if it has work)",
+        "remove the worktree: says what's in the way (a session, a lock, files) and asks first",
         Some("remove"),
         ch('D'),
+    ),
+    key(
+        Worktrees,
+        "C",
+        "clean up: remove every worktree with no changes, session or lock in use (asks first)",
+        Some("clean up"),
+        ch('C'),
     ),
     key(
         Worktrees,
@@ -447,6 +461,13 @@ pub const BINDINGS: &[Binding] = &[
         "put the files back as they were (asks first; snapshots the current state first)",
         Some("restore"),
         ch('U'),
+    ),
+    key(
+        Snapshots,
+        "T",
+        "turn snapshots on or off (asks first; writes the setting for you)",
+        Some("on/off"),
+        ch('T'),
     ),
     key(Snapshots, "Esc  ←", "back to the menu", Some("menu"), None),
     // MCP servers.

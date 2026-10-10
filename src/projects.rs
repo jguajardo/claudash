@@ -6,7 +6,10 @@ use std::{
     path::PathBuf,
 };
 
-use crate::git::{self, Status};
+use crate::{
+    git::{self, Status},
+    worktree::{self, Lock},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Checkout {
@@ -15,7 +18,8 @@ pub struct Checkout {
     pub status: Option<Status>,
     /// The repository's main checkout (not a linked worktree).
     pub main: bool,
-    pub locked: bool,
+    /// Its lock, and whether the process that set it still runs.
+    pub lock: Option<Lock>,
     /// Its directory is gone; `git worktree prune` would drop it.
     pub prunable: bool,
     /// Created by Claude Code (`claude --worktree`, subagents, background sessions).
@@ -91,7 +95,9 @@ pub fn build(dirs: &[PathBuf]) -> (Model, Statuses) {
                     branch: w.branch.clone(),
                     status,
                     main: i == 0,
-                    locked: w.locked,
+                    lock: w
+                        .locked
+                        .then(|| Lock::read(w.lock_reason.as_deref(), worktree::process_alive)),
                     prunable: w.prunable,
                     claude_created: w.path.to_string_lossy().contains("/.claude/worktrees/"),
                     review: crate::review::worktrees_dir()

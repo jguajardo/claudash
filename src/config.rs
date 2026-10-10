@@ -26,6 +26,8 @@ pub struct Config {
     /// Your Claude plan: "pro", "max5x", "max20x" or "api". claudash reads it
     /// from Claude Code's account info when this isn't set.
     pub plan: Option<String>,
+    /// Where sessions open inside Zellij or tmux: "tab", "pane" or "here".
+    pub open_in: Option<String>,
 }
 
 /// `context_limit = 1000000` or `context_limit = "1M"`.
@@ -98,6 +100,12 @@ pub const TEMPLATE: &str = "\
 # Your Claude plan, for Insights › Is your plan worth it: \"pro\", \"max5x\",
 # \"max20x\" or \"api\". Read from Claude Code's account info when not set.
 # plan = \"max5x\"
+
+# Inside Zellij or tmux, where a session you resume, attach to or start from
+# claudash opens: \"tab\" (a new tab; a window in tmux), \"pane\" (next to
+# claudash) or \"here\" (claudash's own terminal, which then waits for it).
+# Outside them it is always here.
+# open_in = \"tab\"
 ";
 
 pub fn path() -> Option<PathBuf> {
@@ -128,6 +136,56 @@ fn parse(text: &str) -> Result<Config, String> {
     Ok(config)
 }
 
+/// `text` with `key = value`: on the line that sets it or has it commented
+/// out, or added at the end. Everything else stays as it is.
+pub fn with_setting(text: &str, key: &str, value: &str) -> String {
+    let sets_it = |line: &str| {
+        line.trim_start()
+            .strip_prefix(key)
+            .is_some_and(|after| after.trim_start().starts_with('='))
+    };
+    let shows_it = |line: &str| {
+        let line = line.trim_start();
+        line.starts_with('#') && sets_it(line.trim_start_matches('#'))
+    };
+    let setting = format!("{key} = {value}");
+    let mut lines: Vec<&str> = text.lines().collect();
+    // The line that sets it wins over a commented example of it: turning
+    // the example on as well would give the file the key twice.
+    let at = lines
+        .iter()
+        .position(|line| sets_it(line))
+        .or_else(|| lines.iter().position(|line| shows_it(line)));
+    match at {
+        Some(at) => lines[at] = &setting,
+        None => lines.push(&setting),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Writes `key = value` to the settings file at `path`; a file that doesn't
+/// exist starts from the commented template.
+fn set_in(path: &std::path::Path, key: &str, value: &str) -> io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(e),
+    };
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, with_setting(&text, key, value))
+}
+
+/// Writes `key = value` to the settings file and returns where that is.
+pub fn set(key: &str, value: &str) -> io::Result<PathBuf> {
+    let path = path().ok_or_else(|| io::Error::other("could not find the config directory"))?;
+    set_in(&path, key, value)?;
+    Ok(path)
+}
+
 /// Writes the commented template, unless a file is already there.
 pub fn init() -> io::Result<PathBuf> {
     let path = path().ok_or_else(|| io::Error::other("could not find the config directory"))?;
@@ -151,6 +209,10 @@ mod tests {
     #[test]
     fn parses_settings_and_rejects_mistakes() {
         assert_eq!(parse(TEMPLATE), Ok(Config::default()));
+        assert_eq!(
+            parse("open_in = \"pane\"\n").unwrap().open_in.as_deref(),
+            Some("pane")
+        );
         let config =
             parse("view = \"Insights\"\ncontext_limit = \"200k\"\nnotify = false\n").unwrap();
         assert_eq!(view_index(config.view.as_deref().unwrap()), Ok(3));
@@ -167,5 +229,60 @@ mod tests {
         assert_eq!(view_index("Usage"), Ok(3));
         assert_eq!(view_index("ecosystem"), Ok(2));
         assert!(parse("colour = \"red\"").is_err());
+    }
+
+    #[test]
+    fn turns_a_setting_on_where_the_file_mentions_it() {
+        // The template has it commented out: that line becomes the setting.
+        let text = with_setting(TEMPLATE, "snapshots", "true");
+        assert_eq!(parse(&text).unwrap().snapshots, Some(true));
+        assert_eq!(text.lines().count(), TEMPLATE.lines().count());
+        assert!(text.contains("\nsnapshots = true\n") && !text.contains("# snapshots"));
+
+        // Already set: the value changes in place, and nothing else does.
+        let off = with_setting(&text, "snapshots", "false");
+        assert_eq!(parse(&off).unwrap().snapshots, Some(false));
+        assert_eq!(off.matches("snapshots =").count(), 1);
+        assert_eq!(with_setting(&off, "snapshots", "true"), text);
+    }
+
+    #[test]
+    fn changes_the_line_that_sets_it_not_a_commented_example() {
+        // The template's example stays a comment when the setting is given below.
+        let text = "# snapshots = false\nview = \"now\"\nsnapshots = true\n";
+        let off = with_setting(text, "snapshots", "false");
+        assert_eq!(
+            off,
+            "# snapshots = false\nview = \"now\"\nsnapshots = false\n"
+        );
+        assert_eq!(parse(&off).unwrap().snapshots, Some(false));
+    }
+
+    #[test]
+    fn adds_a_setting_the_file_doesnt_mention() {
+        let text = with_setting("view = \"now\"", "snapshots", "true");
+        assert_eq!(text, "view = \"now\"\nsnapshots = true\n");
+        // A setting whose name starts the same is another setting.
+        let text = with_setting("plan_note = 1\n", "plan", "\"pro\"");
+        assert_eq!(text, "plan_note = 1\nplan = \"pro\"\n");
+    }
+
+    #[test]
+    fn writes_a_setting_to_a_file_that_may_not_exist() {
+        let dir = std::env::temp_dir().join(format!("claudash-config-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("claudash").join("config.toml");
+        // No file: the commented template, with that setting on.
+        set_in(&file, "snapshots", "true").unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("# claudash settings") && text.contains("\nsnapshots = true\n"));
+        // An existing file keeps everything else.
+        fs::write(&file, "view = \"sessions\"\nsnapshots = true\n").unwrap();
+        set_in(&file, "snapshots", "false").unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "view = \"sessions\"\nsnapshots = false\n"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

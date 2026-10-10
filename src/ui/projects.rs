@@ -23,6 +23,7 @@ use crate::{
     paths,
     sessions::{self, Session, human_tokens},
     specs::Stage,
+    worktree::Holder,
 };
 
 /// Width a card wants; the grid fits as many per row as there's room for.
@@ -714,32 +715,58 @@ fn draw_worktrees(
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| paths::display(&co.path))
             };
-            let mut flags = Vec::new();
-            if co.claude_created {
-                flags.push("Claude Code");
-            }
-            if co.review {
-                flags.push("review");
-            }
-            if co.locked {
-                flags.push("locked");
-            }
-            if co.prunable {
-                flags.push("missing");
-            }
+            // Whose lock it is decides whether `D` can clear it.
+            let lock = match co.lock.as_ref().map(|lock| &lock.holder) {
+                _ if co.prunable => Span::styled("missing", Style::new().fg(Color::Red)),
+                Some(Holder::Running(_)) => {
+                    Span::styled("lock in use", Style::new().fg(Color::Red))
+                }
+                Some(Holder::Ended(_)) => {
+                    Span::styled("stale lock", Style::new().fg(Color::Yellow))
+                }
+                Some(Holder::Unknown) => Span::styled("locked", Style::new().fg(Color::Yellow)),
+                None => Span::raw(""),
+            };
+            let made_by = if co.claude_created {
+                "Claude Code"
+            } else if co.review {
+                "review"
+            } else {
+                ""
+            };
             let git = if co.prunable {
                 Line::from(Span::styled("gone", dim()))
             } else {
-                Line::from(git_summary(co.status.as_ref()))
+                Line::from(worktree_state(co.status.as_ref()))
             };
+            let mut sessions = vec![Span::styled(
+                plural(app.sessions_in(&co.path).len() as u64, "session"),
+                dim(),
+            )];
+            let open = app.open_in_folder(&co.path);
+            if open > 0 {
+                sessions.push(Span::styled(
+                    format!(" · {open} open"),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            // Two lines a row: the branch and what holds it, then where it is.
             Row::new(vec![
-                Cell::from(co.branch.clone().unwrap_or_else(|| "detached".into()))
-                    .style(Style::new().bold()),
-                Cell::from(place).style(dim()),
+                Cell::from(vec![
+                    Line::from(Span::styled(
+                        co.branch.clone().unwrap_or_else(|| "detached".into()),
+                        Style::new().bold(),
+                    )),
+                    Line::from(Span::styled(place, dim())),
+                ]),
                 Cell::from(git),
-                Cell::from(plural(app.sessions_in(&co.path).len() as u64, "session")).style(dim()),
-                Cell::from(flags.join(" · ")).style(Style::new().fg(Color::Magenta)),
+                Cell::from(Line::from(sessions)),
+                Cell::from(vec![
+                    Line::from(lock),
+                    Line::from(Span::styled(made_by, Style::new().fg(Color::Magenta))),
+                ]),
             ])
+            .height(2)
             .bottom_margin(1)
         })
         .collect();
@@ -748,15 +775,14 @@ fn draw_worktrees(
     let table = Table::new(
         rows,
         [
-            Constraint::Fill(2),
-            Constraint::Fill(2),
-            Constraint::Length(18),
-            Constraint::Length(12),
             Constraint::Fill(1),
+            Constraint::Length(28),
+            Constraint::Length(20),
+            Constraint::Length(11),
         ],
     )
     .header(
-        Row::new(["Branch", "Where", "Git", "Sessions", ""])
+        Row::new(["Branch", "Git", "Sessions", ""])
             .style(Style::new().fg(Color::Cyan).bold())
             .bottom_margin(1),
     )
@@ -787,6 +813,34 @@ fn draw_worktrees(
     );
 }
 
+/// "clean", or what the checkout holds that exists nowhere else: modified
+/// and untracked files, and commits not pushed.
+fn worktree_state(status: Option<&crate::git::Status>) -> Vec<Span<'static>> {
+    let Some(s) = status else {
+        return vec![Span::styled("no git data", dim())];
+    };
+    let modified = s.changed.saturating_sub(s.untracked);
+    let mut parts = Vec::new();
+    if modified > 0 {
+        parts.push(format!("{modified} modified"));
+    }
+    if s.untracked > 0 {
+        parts.push(format!("{} untracked", s.untracked));
+    }
+    let mut spans = vec![if parts.is_empty() {
+        Span::styled("clean", Style::new().fg(Color::Green))
+    } else {
+        Span::styled(parts.join(" · "), Style::new().fg(Color::Yellow))
+    }];
+    if s.ahead > 0 {
+        spans.push(Span::styled(
+            format!(" ↑{}", s.ahead),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    spans
+}
+
 fn draw_snapshots(
     frame: &mut Frame,
     app: &mut App,
@@ -796,35 +850,54 @@ fn draw_snapshots(
 ) {
     let title = "Snapshots: undo what /rewind can't";
     if app.snapshots.is_empty() || !app.snapshots_for(dir) {
-        let on = crate::snapshots::enabled();
+        let on = app.snapshots_on;
+        let key = |label: &'static str| {
+            Span::styled(label, Style::new().fg(Color::Black).bg(Color::Gray))
+        };
         let mut lines = vec![
+            Line::from(if on {
+                Span::styled(
+                    "Snapshots are on. None for this project yet.",
+                    Style::new().fg(Color::Green).bold(),
+                )
+            } else {
+                Span::styled("Snapshots are off.", Style::new().fg(Color::Yellow).bold())
+            }),
+            Line::default(),
             Line::from(
-                "Claude Code's checkpoints don't cover files changed by Bash commands or by \
-                 subagents. With snapshots on, claudash's hook copies the project's files to a \
-                 shadow git repository of its own before each prompt and after each reply, so \
-                 you can see what changed and put files back.",
+                "A snapshot is a copy of this project's files, saved before each prompt you \
+                 send and after each reply. When Claude, a command it ran or a subagent changes \
+                 or deletes something you wanted, you pick a moment from the list here, see \
+                 what changed, and put the files back as they were.",
             ),
+            Line::default(),
+            Line::from(Span::styled(
+                "Claude Code's own /rewind doesn't cover what Bash commands and subagents \
+                 change; this does.",
+                dim(),
+            )),
             Line::default(),
         ];
         if on {
             lines.push(Line::from(Span::styled(
-                "Snapshots are on; none for this project yet. They start with the next prompt \
-                 in a session here (git checkouts only).",
+                "The first one is taken with the next prompt you send in a session here \
+                 (git projects only).",
                 dim(),
             )));
+            lines.push(Line::default());
+            lines.push(Line::from(vec![key(" T "), Span::raw(" turn them off")]));
         } else {
             lines.push(Line::from(vec![
-                Span::raw("To turn them on, add "),
-                Span::styled("snapshots = true", Style::new().fg(ACCENT)),
-                Span::raw(" to claudash's config.toml and run "),
-                Span::styled("claudash setup --apply", Style::new().fg(ACCENT)),
-                Span::raw(" so the hook is installed."),
+                key(" T "),
+                Span::raw(" turn them on  "),
+                Span::styled("(Enter does too; it asks first)", dim()),
             ]));
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            "The project's own .git is never touched, and files its .gitignore ignores \
-             (build output, .env) are not copied.",
+            "The copies live in a separate git repository in claudash's data folder. The \
+             project's own .git is never touched, and files its .gitignore ignores (build \
+             output, .env) are not copied.",
             dim(),
         )));
         frame.render_widget(
@@ -861,7 +934,7 @@ fn draw_snapshots(
                 );
             let mut cells = vec![
                 Cell::from(crate::snapshots::when(snap.at)).style(dim()),
-                Cell::from(snap.label.clone()).style(if snap.label == "before restore" {
+                Cell::from(moment(&snap.label)).style(if snap.label == "before restore" {
                     Style::new().fg(Color::Magenta)
                 } else {
                     Style::new().bold()
@@ -879,11 +952,11 @@ fn draw_snapshots(
         Layout::vertical([Constraint::Min(4), Constraint::Length(3)]).areas(area);
     let mut widths = vec![
         Constraint::Length(12),
-        Constraint::Length(14),
-        Constraint::Length(9),
+        Constraint::Length(22),
+        Constraint::Length(10),
         Constraint::Fill(2),
     ];
-    let mut header = vec!["When", "", "Changed", "Session"];
+    let mut header = vec!["When", "Saved", "Changed", "Session"];
     if several {
         widths.push(Constraint::Fill(1));
         header.push("Checkout");
@@ -909,11 +982,11 @@ fn draw_snapshots(
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" Enter ", Style::new().fg(Color::Black).bg(Color::Gray)),
-            Span::styled(" what changed  ", dim()),
+            Span::styled(" what changed since the copy before  ", dim()),
             Span::styled(" U ", Style::new().fg(Color::Black).bg(Color::Gray)),
             Span::styled(
-                " put the files back as they were (asks first; the current state is \
-                 snapshotted too)",
+                " put the files back as they were then (asks first, and saves the current \
+                 state so it can be undone)",
                 dim(),
             ),
         ]))
@@ -921,6 +994,16 @@ fn draw_snapshots(
         .block(card("", Color::Cyan, false)),
         hint,
     );
+}
+
+/// When a snapshot was taken, in words: the hook labels them tersely.
+fn moment(label: &str) -> String {
+    match label {
+        "before prompt" => "before your prompt".to_string(),
+        "after reply" => "after Claude's reply".to_string(),
+        "before restore" => "before a restore".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn draw_project_security(frame: &mut Frame, app: &App, area: Rect, dir: &std::path::Path) {

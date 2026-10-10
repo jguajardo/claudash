@@ -10,7 +10,13 @@ use super::{
     Target, View, paths, specs, token_savers,
 };
 use crate::mcp::{McpServer, McpStatus};
-use crate::{projects::Repo, sessions::Session};
+use crate::{
+    git,
+    projects::{Checkout, Repo},
+    sessions::Session,
+    ui::plural,
+    worktree::{self, Lock, Obstacles, OpenSession, Plan},
+};
 
 /// A project in the Projects grid: a repository or a folder outside git.
 pub struct Card {
@@ -455,6 +461,56 @@ impl App {
         }
     }
 
+    /// Whether `co` is the worktree of a review of `repo` that is running.
+    fn reviewing_in(&self, repo: &Repo, co: &Checkout) -> bool {
+        co.review
+            && self
+                .reviews_in_progress()
+                .filter(|task| task.repo == repo.checkouts[0].path)
+                .any(|task| {
+                    crate::review::worktree_for(&task.repo_name, &task.branch).as_ref()
+                        == Some(&co.path)
+                })
+    }
+
+    /// The sessions Claude Code has open in `dir` or a folder below it, by
+    /// where Claude Code says they are or, failing that, where their
+    /// transcript started.
+    fn sessions_open_under(&self, dir: &Path) -> Vec<OpenSession> {
+        self.live
+            .iter()
+            .filter_map(|(id, live)| {
+                let session = self.sessions.iter().find(|s| &s.id == id);
+                let folder = live
+                    .cwd
+                    .as_deref()
+                    .map(Path::new)
+                    .or_else(|| session.and_then(|s| s.cwd.as_deref()))?;
+                folder.starts_with(dir).then(|| OpenSession {
+                    title: session
+                        .map(|s| s.title.clone())
+                        .or_else(|| live.name.clone())
+                        .unwrap_or_else(|| "A session".to_string()),
+                    // Without its short ID there is nothing to pass to `claude stop`.
+                    background: live.id.clone().filter(|_| live.is_background()),
+                })
+            })
+            .collect()
+    }
+
+    /// What stands in the way of removing `co`, as it is right now.
+    fn worktree_obstacles(&self, co: &Checkout) -> Obstacles {
+        Obstacles {
+            sessions: self.sessions_open_under(&co.path),
+            // The process that held the lock may have ended since the last refresh.
+            lock: co
+                .lock
+                .as_ref()
+                .map(|lock| Lock::read(lock.reason.as_deref(), worktree::process_alive)),
+            changes: git::worktree_changes(&co.path),
+        }
+    }
+
     fn page_dir(&self) -> Option<PathBuf> {
         self.project_page.as_ref().map(|p| p.dir.clone())
     }
@@ -561,7 +617,8 @@ impl App {
                         );
                     }
                 }
-                self.pending_command = Some((vec![next], folder));
+                let title = next.clone();
+                self.open_claude(vec![next], folder, &title);
             }
             KeyCode::Char('v') => {
                 let Some(change) = change else {
@@ -589,7 +646,9 @@ impl App {
     }
 
     fn handle_snapshots_key(&mut self, code: KeyCode) {
-        let n = self.snapshots.len();
+        // The list on screen is this project's only once it has been read.
+        let listed = self.page_dir().is_some_and(|dir| self.snapshots_for(&dir));
+        let n = if listed { self.snapshots.len() } else { 0 };
         let Some(page) = &mut self.project_page else {
             return;
         };
@@ -597,6 +656,7 @@ impl App {
         let selected = self
             .snapshots
             .get(state.selected().unwrap_or(0).min(n.saturating_sub(1)))
+            .filter(|_| listed)
             .cloned();
         match code {
             KeyCode::Esc | KeyCode::Left => page.in_content = false,
@@ -604,6 +664,9 @@ impl App {
                 state.select(Some(state.selected().map_or(0, |i| (i + 1).min(n - 1))))
             }
             KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
+            KeyCode::Char('T') => self.ask_snapshots(!self.snapshots_on),
+            // Nothing to open while they're off: Enter turns them on.
+            KeyCode::Enter if selected.is_none() && !self.snapshots_on => self.ask_snapshots(true),
             KeyCode::Enter => {
                 let Some((root, snap)) = selected else {
                     return;
@@ -647,6 +710,21 @@ impl App {
         }
     }
 
+    /// Asks before turning snapshots on or off, saying what that writes.
+    fn ask_snapshots(&mut self, on: bool) {
+        let file = crate::config::path()
+            .map(|p| paths::display(&p))
+            .unwrap_or_else(|| "claudash's config.toml".to_string());
+        let (statusline, hooks) = crate::setup::installed();
+        let setup_missing = !statusline || hooks < crate::hooks::EVENTS.len();
+        self.popup = Some(Popup::Confirm {
+            title: "Snapshots".into(),
+            lines: snapshots_question(on, &file, setup_missing),
+            yes: if on { "turn them on" } else { "turn them off" }.into(),
+            action: Confirm::Snapshots { on },
+        });
+    }
+
     fn handle_worktrees_key(&mut self, code: KeyCode) {
         let Some(dir) = self.page_dir() else {
             return;
@@ -686,28 +764,100 @@ impl App {
                 if co.main {
                     return self.show_flash("That's the main checkout, not a worktree", true);
                 }
-                if self.open_in_folder(&co.path) > 0 {
-                    return self
-                        .show_flash("A session is open in this worktree; close it first", true);
+                if co.prunable {
+                    return self.show_flash("Its directory is gone; P drops its record", false);
                 }
-                let mut lines = vec![
-                    format!("Remove the worktree {}?", paths::display(&co.path)),
-                    String::new(),
-                    "This runs `git worktree remove` without --force: git refuses when".into(),
-                    "it has uncommitted changes or untracked files, or is locked.".into(),
-                ];
-                if co.status.as_ref().is_some_and(|s| s.ahead > 0) {
-                    lines.push(String::new());
-                    lines
-                        .push("Its branch has unpushed commits; the branch itself is kept.".into());
+                if self.reviewing_in(repo, co) {
+                    return self.show_flash("A review is running in it; wait for it to end", true);
                 }
+                let obstacles = self.worktree_obstacles(co);
+                let steps = match worktree::plan(&obstacles) {
+                    Plan::Blocked(why) => return self.show_flash(why, true),
+                    Plan::Remove(steps) => steps,
+                };
+                let unpushed = co.status.as_ref().map_or(0, |s| s.ahead);
+                let lines = worktree::explain(
+                    &paths::display(&co.path),
+                    co.branch.as_deref(),
+                    unpushed,
+                    &obstacles,
+                    &steps,
+                );
+                let yes = if steps.discard {
+                    "delete them and remove"
+                } else if !steps.stop.is_empty() {
+                    "stop it and remove"
+                } else {
+                    "remove"
+                };
                 self.popup = Some(Popup::Confirm {
                     title: "Remove worktree".into(),
                     lines,
-                    yes: "remove".into(),
+                    yes: yes.into(),
                     action: Confirm::RemoveWorktree {
                         main: repo.checkouts[0].path.clone(),
                         path: co.path.clone(),
+                        steps,
+                    },
+                });
+            }
+            KeyCode::Char('C') => {
+                let repo = &self.projects.repos[r];
+                let busy = |path: &Path| {
+                    !self.sessions_open_under(path).is_empty()
+                        || repo
+                            .checkouts
+                            .iter()
+                            .any(|co| co.path == path && self.reviewing_in(repo, co))
+                };
+                let items = worktree::idle(&repo.checkouts, busy);
+                if items.is_empty() {
+                    return self.show_flash(
+                        "No worktree here is free of changes, sessions and locks; D on one says \
+                         what's in the way",
+                        false,
+                    );
+                }
+                const LISTED: usize = 10;
+                let mut lines = vec![
+                    format!(
+                        "Remove {} nobody is using?",
+                        plural(items.len() as u64, "worktree")
+                    ),
+                    String::new(),
+                ];
+                lines.extend(
+                    items
+                        .iter()
+                        .take(LISTED)
+                        .map(|(path, _)| format!("  {}", paths::display(path))),
+                );
+                if items.len() > LISTED {
+                    lines.push(format!("  … and {} more", items.len() - LISTED));
+                }
+                lines.push(String::new());
+                lines.push(
+                    "None has changes or an open session. Their branches are kept.".to_string(),
+                );
+                let locked = items.iter().filter(|(_, steps)| steps.unlock).count();
+                if locked > 0 {
+                    lines.push(format!(
+                        "{} locked by a process that ended; claudash unlocks {}.",
+                        if locked == 1 {
+                            "One is".to_string()
+                        } else {
+                            format!("{locked} are")
+                        },
+                        if locked == 1 { "it" } else { "them" }
+                    ));
+                }
+                self.popup = Some(Popup::Confirm {
+                    title: "Clean up worktrees".into(),
+                    lines,
+                    yes: "remove them".into(),
+                    action: Confirm::RemoveWorktrees {
+                        main: repo.checkouts[0].path.clone(),
+                        items,
                     },
                 });
             }
@@ -759,5 +909,60 @@ impl App {
         if self.insights == InsightsSection::Tokens && self.token_savers.is_none() {
             self.token_savers = Some(token_savers());
         }
+    }
+}
+
+/// What turning snapshots on or off does and writes, to ask about it first.
+/// `setup_missing`: `claudash setup --apply` hasn't registered everything.
+fn snapshots_question(on: bool, file: &str, setup_missing: bool) -> Vec<String> {
+    if !on {
+        return vec![
+            "Turn snapshots off?".to_string(),
+            String::new(),
+            "No more copies are made. The snapshots already taken are kept: you can still look \
+             at them and put files back from them."
+                .to_string(),
+            String::new(),
+            format!("This writes `snapshots = false` to {file}."),
+        ];
+    }
+    let mut lines = vec![
+        "Turn snapshots on?".to_string(),
+        String::new(),
+        "From then on, claudash's hook saves a copy of a project's files before each prompt \
+         you send and after each reply, when something changed. Only git projects."
+            .to_string(),
+        String::new(),
+        "The copies go to a separate git repository in claudash's data folder. A project's \
+         own .git is never touched, and files its .gitignore ignores aren't copied."
+            .to_string(),
+        String::new(),
+        format!("This writes `snapshots = true` to {file}."),
+    ];
+    if setup_missing {
+        lines.push(
+            "It also does what `claudash setup --apply` does: registers claudash's status line \
+             and hook in Claude Code's settings.json, after backing that file up."
+                .to_string(),
+        );
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn says_everything_turning_snapshots_on_writes() {
+        let on = snapshots_question(true, "~/.config/claudash/config.toml", false).join("\n");
+        assert!(on.contains("before each prompt") && on.contains("snapshots = true"));
+        assert!(!on.contains("status line"));
+        // Without claudash's setup it applies all of it, not only the hook.
+        let with_setup = snapshots_question(true, "config.toml", true).join("\n");
+        assert!(with_setup.contains("status line") && with_setup.contains("hook"));
+        assert!(with_setup.contains("backing"));
+        let off = snapshots_question(false, "config.toml", true).join("\n");
+        assert!(off.contains("are kept") && !off.contains("status line"));
     }
 }

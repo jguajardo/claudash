@@ -25,6 +25,7 @@ use crate::{
     hooks::{self, Activity},
     instructions::{self, Instructions},
     keys::{self, Binding, Context},
+    launch::{self, Launch, Mux, Place},
     library::{self, Library, Trashed},
     mcp::{self, McpResult, McpStatus},
     notify, paths,
@@ -35,6 +36,7 @@ use crate::{
     specs, statusline,
     transcript::{self, Entry, Hit},
     ui,
+    worktree::{self, Steps},
 };
 
 mod pages;
@@ -309,9 +311,64 @@ pub enum Popup {
         hits: Vec<Hit>,
         state: ListState,
     },
+    /// Branch reviews of every project: running, waiting to be read and
+    /// `saved` (the earlier ones, read from disk when the list opens).
+    Reviews {
+        state: ListState,
+        saved: Vec<Review>,
+    },
 }
 
 type BranchesJob = Job<Result<Listing, String>>;
+
+/// Reviews that may run at once: each is a Claude Code session on your plan.
+const MAX_REVIEWS: usize = 4;
+/// Finished reviews the list shows besides the ones waiting to be read.
+const REVIEWS_LISTED: usize = 30;
+
+/// A branch review being set up or run.
+struct RunningReview {
+    task: ReviewTask,
+    started: Instant,
+    job: ReviewJob,
+}
+
+/// A review Claude does in an interactive session, which the user drives.
+struct PendingReview {
+    task: ReviewTask,
+    worktree: PathBuf,
+    /// The session runs in a tab or pane of its own, not in claudash's terminal.
+    elsewhere: bool,
+    /// A file that tab creates when the session ends.
+    done: Option<PathBuf>,
+    /// Claude Code has reported the session open at least once.
+    seen_open: bool,
+}
+
+/// A `claude` command waiting for claudash's own terminal.
+struct PendingCommand {
+    args: Vec<String>,
+    cwd: PathBuf,
+    /// The interactive review this session is, by session ID.
+    review: Option<String>,
+}
+
+/// A line of the list of reviews (`B`).
+pub enum ReviewRow<'a> {
+    Running {
+        task: &'a ReviewTask,
+        /// `None` for a review you drive in a session of its own.
+        started: Option<Instant>,
+    },
+    Done {
+        review: &'a Review,
+        /// Finished and not opened yet.
+        unread: bool,
+    },
+}
+
+/// `launch::open`.
+type Launcher = fn(Mux, Place, &Launch) -> Result<(), String>;
 
 /// The worktree, and the findings when Claude ran headless.
 type ReviewJob = Job<Result<(PathBuf, Option<Findings>), String>>;
@@ -336,9 +393,20 @@ pub enum Confirm {
     Trash(String),
     StopBackground(String),
     RespawnBackground(String),
+    /// Remove one worktree, after clearing what stands in its way.
     RemoveWorktree {
         main: PathBuf,
         path: PathBuf,
+        steps: Steps,
+    },
+    /// Turn snapshots on or off in the settings file.
+    Snapshots {
+        on: bool,
+    },
+    /// Remove the worktrees nobody is using, each with its own steps.
+    RemoveWorktrees {
+        main: PathBuf,
+        items: Vec<(PathBuf, Steps)>,
     },
     PruneWorktrees(PathBuf),
     /// Remove a review's worktree.
@@ -358,6 +426,17 @@ pub enum Confirm {
         root: PathBuf,
         sha: String,
     },
+}
+
+impl Confirm {
+    /// The key that says yes. Deleting files that exist nowhere else takes a
+    /// different one from the questions that lose nothing.
+    pub fn key(&self) -> char {
+        match self {
+            Confirm::RemoveWorktree { steps, .. } if steps.discard => 'D',
+            _ => 'y',
+        }
+    }
 }
 
 /// A line being typed in the footer.
@@ -769,15 +848,27 @@ pub struct App {
     /// Message shown in the panel if sessions could not be loaded.
     pub sessions_error: Option<String>,
     refreshed_at: Instant,
-    /// Session to resume; handled by `run`, which owns the terminal.
-    pending_command: Option<(Vec<String>, PathBuf)>,
+    /// `claude` commands for claudash's own terminal, in the order asked
+    /// for; `run`, which owns the terminal, takes them one at a time.
+    pending_commands: std::collections::VecDeque<PendingCommand>,
+    /// The terminal multiplexer claudash runs in, if any.
+    pub mux: Option<Mux>,
+    /// Where sessions open when there is one (`open_in` in the settings).
+    pub open_in: Place,
+    /// Asks the multiplexer for a tab or pane; replaced in tests.
+    launcher: Launcher,
     /// Open sessions (ID -> "busy"/"idle") from `claude agents --json`.
     pub live: HashMap<String, LiveSession>,
     /// Background sessions, finished ones included (`claude agents --json --all`).
     pub background: Vec<LiveSession>,
     pub activity_focus: ActivityFocus,
     pub background_state: ListState,
-    background_job: Option<(String, Job<Result<String, String>>)>,
+    /// `claude` commands running in the background, by what they do
+    /// ("stop bg7k2", "continue", "mcp logout linear"): any number at once,
+    /// never the same one twice.
+    background_jobs: Vec<(String, Job<Result<String, String>>)>,
+    /// Worktrees being removed; each ends with what to tell the user.
+    removals: Vec<Job<Result<String, String>>>,
     pub logs: LogsView,
     live_job: Option<Job<Result<HashMap<String, LiveSession>, String>>>,
     pub statusline: statusline::Store,
@@ -849,6 +940,8 @@ pub struct App {
     continued: HashSet<String>,
     /// Snapshots of the open project's checkouts, newest first.
     pub snapshots: Vec<(PathBuf, crate::snapshots::Snapshot)>,
+    /// `snapshots = true` in the settings file: the hook takes them.
+    pub snapshots_on: bool,
     /// Which project they were read for, and when.
     snapshots_at: Option<(PathBuf, Instant)>,
     /// No colors (`NO_COLOR` or `colors = false` in the settings file).
@@ -874,8 +967,10 @@ pub struct App {
     // Branch reviews.
     /// Repository main checkout and name, and its branch listing.
     branches_job: Option<(PathBuf, String, BranchesJob)>,
-    /// Preparing the worktree, then (static mode) Claude's review.
-    review_job: Option<(ReviewTask, ReviewJob)>,
+    /// Reviews preparing their worktree or (static mode) being done by Claude.
+    review_jobs: Vec<RunningReview>,
+    /// Finished reviews nobody has opened yet, oldest first.
+    pub reviews_ready: Vec<Review>,
     /// What each session that needs you is waiting on, by session ID, with
     /// the transcript size it was read at.
     pub pending: HashMap<String, (u64, transcript::PendingTool)>,
@@ -884,8 +979,8 @@ pub struct App {
     history_secrets_job: Option<Job<Vec<crate::audit::Secret>>>,
     /// Re-check the project's MCP servers once the running command ends.
     mcp_recheck: bool,
-    /// An interactive review whose session is running in the terminal.
-    pending_review: Option<(ReviewTask, PathBuf)>,
+    /// Interactive reviews whose session hasn't ended.
+    pending_reviews: Vec<PendingReview>,
 
     // Prompt history and daily summary.
     pub prompts: Vec<Prompt>,
@@ -919,12 +1014,16 @@ impl App {
             filter: String::new(),
             sessions_error: None,
             refreshed_at: Instant::now(),
-            pending_command: None,
+            pending_commands: Default::default(),
+            mux: None,
+            open_in: Place::default(),
+            launcher: launch::open,
             live: HashMap::new(),
             background: Vec::new(),
             activity_focus: ActivityFocus::Open,
             background_state: ListState::default(),
-            background_job: None,
+            background_jobs: Vec::new(),
+            removals: Vec::new(),
             logs: LogsView::default(),
             live_job: None,
             statusline: statusline::Store::default(),
@@ -966,6 +1065,7 @@ impl App {
             continue_at_reset: false,
             continued: HashSet::new(),
             snapshots: Vec::new(),
+            snapshots_on: crate::snapshots::enabled(),
             snapshots_at: None,
             no_color: false,
             folder_filter: None,
@@ -980,8 +1080,9 @@ impl App {
             prompts: Vec::new(),
             summary_job: None,
             branches_job: None,
-            review_job: None,
-            pending_review: None,
+            review_jobs: Vec::new(),
+            reviews_ready: Vec::new(),
+            pending_reviews: Vec::new(),
             mcp_recheck: false,
             pending: HashMap::new(),
             history_secrets: Vec::new(),
@@ -1035,9 +1136,11 @@ impl App {
             {
                 self.handle_key(key);
             }
-            if let Some((args, cwd)) = self.pending_command.take() {
-                self.run_claude(terminal, &args, &cwd)?;
-                self.finish_interactive_review();
+            if let Some(command) = self.pending_commands.pop_front() {
+                self.run_claude(terminal, &command.args, &command.cwd)?;
+                if let Some(session_id) = &command.review {
+                    self.settle_review_here(session_id);
+                }
                 if std::mem::take(&mut self.mcp_recheck) {
                     self.recheck_mcp();
                 }
@@ -1103,12 +1206,12 @@ impl App {
         if ready.is_empty() {
             return self.show_flash("No stopped session can be continued yet", true);
         }
-        if self.background_job.is_some() {
-            return self.show_flash("Another background command is running", true);
+        if self.background_running("continue") {
+            return self.show_flash("Those sessions are already being continued", true);
         }
         self.continued
             .extend(ready.iter().map(|(id, _, _)| id.clone()));
-        self.background_job = Some((
+        self.background_jobs.push((
             "continue".into(),
             Job::spawn(move || crate::stopped::continue_all(&ready)),
         ));
@@ -1118,7 +1221,7 @@ impl App {
     /// on the alert) or `auto_continue` is on. Waits half a minute past the
     /// reset so the new window is open.
     fn maybe_continue_stopped(&mut self) {
-        if !(self.continue_at_reset || self.auto_continue) || self.background_job.is_some() {
+        if !(self.continue_at_reset || self.auto_continue) || self.background_running("continue") {
             return;
         }
         let later = chrono::Utc::now().timestamp() - 30;
@@ -1411,15 +1514,70 @@ impl App {
             Confirm::Trash(id) => self.delete_session(&id),
             Confirm::StopBackground(id) => self.start_background_command("stop", &id),
             Confirm::RespawnBackground(id) => self.start_background_command("respawn", &id),
-            Confirm::RemoveWorktree { main, path } => {
-                match git::remove_worktree(&main, &path) {
-                    Ok(()) => self
-                        .show_flash(format!("Removed worktree {}", paths::display(&path)), false),
-                    Err(e) => self.show_flash(format!("git refused: {e}"), true),
-                }
-                self.git_at = None;
+            Confirm::RemoveWorktree { main, path, steps } => {
+                let place = paths::display(&path);
+                self.show_flash(format!("Removing {place}…"), false);
+                self.removals.push(Job::spawn(move || {
+                    worktree::remove(&main, &path, &steps)
+                        .map(|()| format!("Removed worktree {place}"))
+                        .map_err(|e| format!("{place} was not removed: {e}"))
+                }));
+            }
+            Confirm::RemoveWorktrees { main, items } => {
+                self.show_flash(
+                    format!("Removing {}…", ui::plural(items.len() as u64, "worktree")),
+                    false,
+                );
+                self.removals.push(Job::spawn(move || {
+                    let mut removed = 0;
+                    let mut refused = Vec::new();
+                    for (path, steps) in &items {
+                        match worktree::remove(&main, path, steps) {
+                            Ok(()) => removed += 1,
+                            Err(e) => refused.push(format!("{}: {e}", paths::display(path))),
+                        }
+                    }
+                    let done = format!("Removed {}", ui::plural(removed, "worktree"));
+                    match refused.first() {
+                        None => Ok(done),
+                        Some(first) => Err(format!("{done}; {} left ({first})", refused.len())),
+                    }
+                }));
             }
             Confirm::ContinueStopped => self.continue_stopped(),
+            Confirm::Snapshots { on } => {
+                let value = if on { "true" } else { "false" };
+                // The setting first: without it the hook has nothing to do.
+                let done = crate::config::set("snapshots", value).and_then(|_| {
+                    let (statusline, hooked) = crate::setup::installed();
+                    if on && (!statusline || hooked < hooks::EVENTS.len()) {
+                        crate::setup::apply(crate::setup::Mode::Apply).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                });
+                match done {
+                    Ok(()) => {
+                        self.snapshots_on = on;
+                        self.show_flash(
+                            if on {
+                                "Snapshots are on: the first is taken with your next prompt in \
+                                 a session of a git project"
+                            } else {
+                                "Snapshots are off; the ones already taken are kept"
+                            },
+                            false,
+                        );
+                    }
+                    Err(e) => self.show_flash(
+                        format!(
+                            "Could not turn snapshots {}: {e}",
+                            if on { "on" } else { "off" }
+                        ),
+                        true,
+                    ),
+                }
+            }
             Confirm::RestoreSnapshot { root, sha } => {
                 match crate::snapshots::restore(&root, &sha) {
                     Ok(()) => self.show_flash(
@@ -1436,17 +1594,17 @@ impl App {
                 self.git_at = None;
             }
             Confirm::McpLogout { server, cwd } => {
-                if self.background_job.is_some() {
-                    return self.show_flash("Another command is running", true);
-                }
                 let what = format!("mcp logout {server}");
-                self.background_job = Some((
+                if self.background_running(&what) {
+                    return self.show_flash(format!("claude {what} is already running"), true);
+                }
+                self.background_jobs.push((
                     what,
                     Job::spawn(move || claude_cli::mcp_logout(&server, &cwd)),
                 ));
             }
             Confirm::RemoveReviewWorktree { main, path } => {
-                match git::remove_worktree(&main, &path) {
+                match git::remove_worktree(&main, &path, git::Removal::default()) {
                     Ok(()) => self.show_flash("Removed the review worktree", false),
                     Err(e) => self.show_flash(format!("git refused: {e}"), true),
                 }
@@ -1464,14 +1622,19 @@ impl App {
 
     /// `claude stop|respawn <id>` in the background; the result shows as a notice.
     fn start_background_command(&mut self, command: &'static str, id: &str) {
-        if self.background_job.is_some() {
-            return self.show_flash("Another background command is running", true);
+        let what = format!("{command} {id}");
+        if self.background_running(&what) {
+            return self.show_flash(format!("claude {what} is already running"), true);
         }
         let job_id = id.to_string();
-        self.background_job = Some((
-            format!("{command} {id}"),
+        self.background_jobs.push((
+            what,
             Job::spawn(move || claude_cli::background(command, &job_id)),
         ));
+    }
+
+    fn background_running(&self, what: &str) -> bool {
+        self.background_jobs.iter().any(|(w, _)| w == what)
     }
 
     pub fn selected_background(&self) -> Option<&LiveSession> {
@@ -1524,7 +1687,8 @@ impl App {
                     .filter(|d| d.is_dir())
                     .or_else(dirs::home_dir)
                     .unwrap_or_else(|| PathBuf::from("."));
-                self.pending_command = Some((vec!["attach".into(), id], cwd));
+                let title = bg.name.clone().unwrap_or_else(|| id.clone());
+                self.open_claude(vec!["attach".into(), id], cwd, &title);
             }
             _ => {}
         }
@@ -2099,19 +2263,85 @@ impl App {
 
     /// Queues the selected session to be resumed with `claude --resume`.
     fn request_resume(&mut self) {
-        let (id, cwd) = match self
+        let (id, title, cwd) = match self
             .selected_session()
             .map(|s| (s, self.open_elsewhere(s, "resume it here")))
         {
             None => return,
             Some((_, Some(msg))) => return self.show_flash(msg, true),
-            Some((s, None)) => (s.id.clone(), self.selected_project_dir()),
+            Some((s, None)) => (s.id.clone(), s.title.clone(), self.selected_project_dir()),
         };
         match cwd {
             Ok(cwd) => {
-                self.pending_command = Some((vec!["--resume".into(), id], cwd.to_path_buf()))
+                let cwd = cwd.to_path_buf();
+                self.open_claude(vec!["--resume".into(), id], cwd, &title);
             }
             Err(msg) => self.show_flash(msg, true),
+        }
+    }
+
+    /// Opens an interactive `claude <args>` in `cwd`: in a new tab or pane of
+    /// the multiplexer claudash runs in, so claudash stays on screen and other
+    /// sessions can be opened meanwhile; otherwise in claudash's own terminal.
+    pub(crate) fn open_claude(&mut self, args: Vec<String>, cwd: PathBuf, title: &str) {
+        if !self.open_elsewhere_in(&args, &cwd, title, None) {
+            self.pending_commands.push_back(PendingCommand {
+                args,
+                cwd,
+                review: None,
+            });
+        }
+    }
+
+    /// Asks the multiplexer, when there is one and the settings allow it, for
+    /// a tab or pane running `claude <args>`; `done` is a file for it to
+    /// create when the session ends. `false` means the session has to run in
+    /// claudash's own terminal.
+    fn open_elsewhere_in(
+        &mut self,
+        args: &[String],
+        cwd: &Path,
+        title: &str,
+        done: Option<&Path>,
+    ) -> bool {
+        let Some(mux) = self.mux.filter(|_| self.open_in != Place::Here) else {
+            return false;
+        };
+        let program = claude_cli::path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "claude".to_string());
+        let name = launch::tab_name(title);
+        let unit = mux.unit(self.open_in);
+        // The tab inherits the multiplexer's environment, not claudash's.
+        let env: Vec<(String, String)> = std::env::var("CLAUDE_CONFIG_DIR")
+            .ok()
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir))
+            .into_iter()
+            .collect();
+        let launch = Launch {
+            program: &program,
+            args,
+            cwd,
+            name: &name,
+            env: &env,
+            done,
+        };
+        match (self.launcher)(mux, self.open_in, &launch) {
+            Ok(()) => {
+                self.show_flash(
+                    format!("Opened \"{name}\" in a new {} {unit}", mux.name()),
+                    false,
+                );
+                true
+            }
+            Err(e) => {
+                self.show_flash(
+                    format!("No new {} {unit} ({e}); opening it here", mux.name()),
+                    true,
+                );
+                false
+            }
         }
     }
 
@@ -2435,11 +2665,119 @@ impl App {
         self.branches_job.is_some()
     }
 
-    pub fn reviewing(&self) -> Option<&str> {
-        self.review_job
-            .as_ref()
-            .filter(|(task, _)| task.mode == Mode::Static)
-            .map(|(task, _)| task.branch.as_str())
+    /// What the status line says while Claude reviews in the background.
+    pub fn reviewing(&self) -> Option<String> {
+        let branches: Vec<&str> = self
+            .review_jobs
+            .iter()
+            .filter(|r| r.task.mode == Mode::Static)
+            .map(|r| r.task.branch.as_str())
+            .collect();
+        match branches.as_slice() {
+            [] => None,
+            [one] => Some(format!("Claude is reviewing {one}…")),
+            many => Some(format!("Claude is reviewing {} branches…", many.len())),
+        }
+    }
+
+    /// Reviews being set up, run by Claude, or driven by you in a session.
+    pub(crate) fn reviews_in_progress(&self) -> impl Iterator<Item = &ReviewTask> {
+        self.review_jobs
+            .iter()
+            .map(|r| &r.task)
+            .chain(self.pending_reviews.iter().map(|p| &p.task))
+    }
+
+    /// The list of reviews: the ones running, the ones waiting to be read
+    /// (newest first), then earlier ones when the list is open.
+    pub fn review_rows(&self) -> Vec<ReviewRow<'_>> {
+        let saved: &[Review] = match &self.popup {
+            Some(Popup::Reviews { saved, .. }) => saved,
+            _ => &[],
+        };
+        let waiting = |review: &Review| {
+            self.reviews_ready
+                .iter()
+                .any(|r| r.session_id == review.session_id)
+        };
+        let running = self
+            .review_jobs
+            .iter()
+            .map(|r| (&r.task, r.started))
+            .map(|(task, started)| (task, Some(started)))
+            .chain(self.pending_reviews.iter().map(|p| (&p.task, None)))
+            .map(|(task, started)| ReviewRow::Running { task, started });
+        let unread = self
+            .reviews_ready
+            .iter()
+            .rev()
+            .map(|review| ReviewRow::Done {
+                review,
+                unread: true,
+            });
+        let read = saved
+            .iter()
+            .filter(|review| !waiting(review))
+            .map(|review| ReviewRow::Done {
+                review,
+                unread: false,
+            });
+        running.chain(unread).chain(read).collect()
+    }
+
+    /// `B`: every project's reviews, running and finished.
+    fn open_reviews(&mut self) {
+        let saved = review::recent(REVIEWS_LISTED);
+        if saved.is_empty()
+            && self.reviews_ready.is_empty()
+            && self.reviews_in_progress().next().is_none()
+        {
+            return self.show_flash(
+                "No reviews yet: b on a project reviews one of its branches",
+                false,
+            );
+        }
+        self.popup = Some(Popup::Reviews {
+            state: ListState::default().with_selected(Some(0)),
+            saved,
+        });
+    }
+
+    fn handle_reviews_key(&mut self, code: KeyCode) {
+        let rows = self.review_rows().len();
+        let Some(Popup::Reviews { state, .. }) = &mut self.popup else {
+            return;
+        };
+        let selected = state.selected().unwrap_or(0).min(rows.saturating_sub(1));
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+            KeyCode::Down | KeyCode::Char('j') if rows > 0 => {
+                state.select(Some((selected + 1).min(rows - 1)))
+            }
+            KeyCode::Up | KeyCode::Char('k') => state.select(Some(selected.saturating_sub(1))),
+            KeyCode::Enter => {
+                let opened = match self.review_rows().get(selected) {
+                    Some(ReviewRow::Done { review, .. }) => Ok((*review).clone()),
+                    Some(ReviewRow::Running { task, .. }) => {
+                        Err(format!("{} is still being reviewed", task.branch))
+                    }
+                    None => return,
+                };
+                match opened {
+                    Ok(review) => {
+                        self.reviews_ready
+                            .retain(|r| r.session_id != review.session_id);
+                        self.popup = Some(Popup::Findings {
+                            review,
+                            state: ListState::default().with_selected(Some(0)),
+                            detail: None,
+                        });
+                    }
+                    Err(msg) => self.show_flash(msg, false),
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Enter on a branch: its size against the base, and how to review it.
@@ -2466,8 +2804,20 @@ impl App {
 
     /// Makes the worktree and, in static mode, runs the review, off the UI thread.
     fn start_review(&mut self, task: ReviewTask) {
-        if self.review_job.is_some() {
-            return self.show_flash("A review is already running", true);
+        // Reviews that would share a worktree in the cache can't overlap: the
+        // second would check its branch out under the first.
+        let folder = review::worktree_key(&task.repo_name, &task.branch);
+        let same = |t: &ReviewTask| review::worktree_key(&t.repo_name, &t.branch) == folder;
+        if self.review_jobs.iter().any(|r| same(&r.task))
+            || self.pending_reviews.iter().any(|p| same(&p.task))
+        {
+            return self.show_flash(format!("{} is already being reviewed", task.branch), true);
+        }
+        if self.review_jobs.len() >= MAX_REVIEWS {
+            return self.show_flash(
+                format!("{MAX_REVIEWS} reviews are running; wait for one to end"),
+                true,
+            );
         }
         let t = task.clone();
         let job = Job::spawn(move || {
@@ -2480,16 +2830,33 @@ impl App {
                 .map(|findings| (worktree, Some(findings)))
         });
         if task.mode == Mode::Static {
+            let others = match self.review_jobs.len() {
+                0 => String::new(),
+                n => format!(" ({} running; B lists them)", n + 1),
+            };
             self.show_flash(
-                format!("Reviewing {} in the background…", task.branch),
+                format!("Reviewing {} in the background…{others}", task.branch),
                 false,
             );
         }
-        self.review_job = Some((task, job));
+        self.review_jobs.push(RunningReview {
+            task,
+            started: Instant::now(),
+            job,
+        });
     }
 
-    /// Saves a finished review and shows its findings.
-    fn show_review(&mut self, task: &ReviewTask, worktree: PathBuf, result: Findings) {
+    /// Saves a finished review. Its findings open right away only when it's
+    /// the one thing going on (`alone`, nothing on screen, nothing waiting);
+    /// otherwise it waits in the list (`B`), so reviews don't open over each
+    /// other or over what you're doing.
+    fn deliver_review(
+        &mut self,
+        task: &ReviewTask,
+        worktree: PathBuf,
+        result: Findings,
+        alone: bool,
+    ) {
         let review = Review {
             session_id: task.session_id.clone(),
             repo: task.repo.clone(),
@@ -2500,22 +2867,68 @@ impl App {
             at: chrono::Utc::now().timestamp(),
             result,
         };
-        if let Err(e) = review::save(&review) {
+        let saved = review::save(&review);
+        self.git_at = None;
+        if alone && self.popup.is_none() && self.reviews_ready.is_empty() {
+            self.alert(
+                "Review ready",
+                &format!("{} has been reviewed", task.branch),
+            );
+            self.popup = Some(Popup::Findings {
+                review,
+                state: ListState::default().with_selected(Some(0)),
+                detail: None,
+            });
+        } else {
+            self.reviews_ready.push(review);
+            self.alert(
+                "Review ready",
+                &format!("{} in {} · B lists reviews", task.branch, task.repo_name),
+            );
+        }
+        if let Err(e) = saved {
             self.show_flash(format!("Could not save the review: {e}"), true);
         }
-        self.popup = Some(Popup::Findings {
-            review,
-            state: ListState::default().with_selected(Some(0)),
-            detail: None,
-        });
-        self.git_at = None;
     }
 
-    /// After an interactive review session: its findings, from its last reply.
-    fn finish_interactive_review(&mut self) {
-        let Some((task, worktree)) = self.pending_review.take() else {
-            return;
-        };
+    /// Interactive reviews in a tab or pane of their own whose session has
+    /// ended: the tab marked it, or Claude Code, asked successfully
+    /// (`live_known`), no longer reports a session it once did. A poll that
+    /// failed says nothing about which sessions are open.
+    fn settle_reviews(&mut self, live_known: bool) {
+        for mut pending in std::mem::take(&mut self.pending_reviews) {
+            let open = self.live.contains_key(&pending.task.session_id);
+            pending.seen_open |= open;
+            let marked = pending.done.as_ref().is_some_and(|file| file.exists());
+            let gone = live_known && pending.seen_open && !open;
+            if pending.elsewhere && (marked || gone) {
+                if let Some(file) = &pending.done {
+                    let _ = std::fs::remove_file(file);
+                }
+                self.reload_sessions();
+                self.finish_review(pending, false);
+            } else {
+                self.pending_reviews.push(pending);
+            }
+        }
+    }
+
+    /// The interactive review that ran in claudash's own terminal just ended.
+    fn settle_review_here(&mut self, session_id: &str) {
+        if let Some(at) = self
+            .pending_reviews
+            .iter()
+            .position(|p| !p.elsewhere && p.task.session_id == session_id)
+        {
+            let pending = self.pending_reviews.remove(at);
+            self.finish_review(pending, true);
+        }
+    }
+
+    /// The findings of an interactive review, read from its session's last
+    /// reply. `alone`: nothing else was going on while it ran.
+    fn finish_review(&mut self, pending: PendingReview, alone: bool) {
+        let PendingReview { task, worktree, .. } = pending;
         let Some(path) = self
             .sessions
             .iter()
@@ -2531,7 +2944,7 @@ impl App {
             .filter(|e| e.kind == transcript::Kind::Assistant)
             .find_map(|e| review::from_reply(&e.text));
         match found {
-            Some(result) => self.show_review(&task, worktree, result),
+            Some(result) => self.deliver_review(&task, worktree, result, alone),
             None => self.show_flash(
                 "No review found in the session's replies; read it with v in Sessions",
                 true,
@@ -3116,19 +3529,24 @@ impl App {
             }
         }
 
-        if let Some((task, job)) = &self.review_job
-            && let Some(result) = job.poll()
-        {
-            let task = task.clone();
-            self.review_job = None;
-            match result.unwrap_or_else(|()| Err("No result".into())) {
+        let mut ended = Vec::new();
+        let mut i = 0;
+        while i < self.review_jobs.len() {
+            match self.review_jobs[i].job.poll() {
+                Some(result) => {
+                    let task = self.review_jobs.remove(i).task;
+                    ended.push((task, result.unwrap_or_else(|()| Err("No result".into()))));
+                }
+                None => i += 1,
+            }
+        }
+        // One that ends while nothing else runs may open its findings itself.
+        let alone = ended.len() == 1 && self.review_jobs.is_empty();
+        for (task, result) in ended {
+            match result {
                 Ok((worktree, Some(findings))) => {
-                    self.alert(
-                        "Review ready",
-                        &format!("{} has been reviewed", task.branch),
-                    );
                     self.reload_sessions();
-                    self.show_review(&task, worktree, findings);
+                    self.deliver_review(&task, worktree, findings, alone);
                 }
                 Ok((worktree, None)) => {
                     let args = review::interactive_args(
@@ -3137,8 +3555,24 @@ impl App {
                         &task.base,
                         &task.session_id,
                     );
-                    self.pending_command = Some((args, worktree.clone()));
-                    self.pending_review = Some((task, worktree));
+                    let title = format!("review {}", task.branch);
+                    let done = review::ended_marker(&task.session_id);
+                    let elsewhere =
+                        self.open_elsewhere_in(&args, &worktree, &title, done.as_deref());
+                    if !elsewhere {
+                        self.pending_commands.push_back(PendingCommand {
+                            args,
+                            cwd: worktree.clone(),
+                            review: Some(task.session_id.clone()),
+                        });
+                    }
+                    self.pending_reviews.push(PendingReview {
+                        task,
+                        worktree,
+                        elsewhere,
+                        done: done.filter(|_| elsewhere),
+                        seen_open: false,
+                    });
                 }
                 Err(e) => self.show_flash(format!("Review of {}: {e}", task.branch), true),
             }
@@ -3159,11 +3593,34 @@ impl App {
             }
         }
 
-        if let Some((what, job)) = &self.background_job
-            && let Some(result) = job.poll()
-        {
-            let what = what.clone();
-            self.background_job = None;
+        let mut removed = Vec::new();
+        self.removals.retain(|job| match job.poll() {
+            Some(result) => {
+                removed.push(result.unwrap_or_else(|()| Err("No result".into())));
+                false
+            }
+            None => true,
+        });
+        for result in removed {
+            match result {
+                Ok(msg) => self.show_flash(msg, false),
+                Err(e) => self.show_flash(e, true),
+            }
+            // Checkouts changed, and a session may have been stopped.
+            self.git_at = None;
+            self.live_job = None;
+            self.refreshed_at = Instant::now() - REFRESH_EVERY;
+        }
+
+        let mut finished = Vec::new();
+        let mut i = 0;
+        while i < self.background_jobs.len() {
+            match self.background_jobs[i].1.poll() {
+                Some(result) => finished.push((self.background_jobs.remove(i).0, result)),
+                None => i += 1,
+            }
+        }
+        for (what, result) in finished {
             match result.unwrap_or_else(|()| Err("No result".into())) {
                 Ok(msg) if what == "continue" => {
                     self.alert("Claude plan: limit reset", &msg);
@@ -3260,7 +3717,9 @@ impl App {
             && let Some(result) = job.poll()
         {
             // If `claude agents` fails (older Claude Code), just show no live marks.
-            let all = result.ok().and_then(Result::ok).unwrap_or_default();
+            let all = result.ok().and_then(Result::ok);
+            let live_known = all.is_some();
+            let all = all.unwrap_or_default();
             let mut background: Vec<LiveSession> = all
                 .values()
                 .filter(|s| s.is_background())
@@ -3272,6 +3731,7 @@ impl App {
             self.live = all.into_iter().filter(|(_, s)| s.is_running()).collect();
             self.live_job = None;
             self.check_activity_changes();
+            self.settle_reviews(live_known);
         }
 
         if let Some((project, job)) = &self.eco_job
@@ -3414,6 +3874,7 @@ impl App {
                 return;
             }
             KeyCode::Char('r') => return self.refresh_all(),
+            KeyCode::Char('B') => return self.open_reviews(),
             KeyCode::Char('?') => return self.toggle_help(),
             _ => {}
         }
@@ -3612,7 +4073,11 @@ impl App {
                 };
                 let (name, cwd) = (server.full_name.clone(), project.cwd.clone());
                 if code == KeyCode::Char('a') {
-                    self.pending_command = Some((vec!["mcp".into(), "login".into(), name], cwd));
+                    self.pending_commands.push_back(PendingCommand {
+                        args: vec!["mcp".into(), "login".into(), name],
+                        cwd,
+                        review: None,
+                    });
                     self.mcp_recheck = true;
                 } else {
                     self.popup = Some(Popup::Confirm {
@@ -3666,7 +4131,12 @@ impl App {
     }
 
     fn handle_popup_key(&mut self, code: KeyCode) {
+        if matches!(self.popup, Some(Popup::Reviews { .. })) {
+            return self.handle_reviews_key(code);
+        }
         match &mut self.popup {
+            // Handled above: its rows are computed from the whole app.
+            Some(Popup::Reviews { .. }) => {}
             Some(Popup::Wrapped { month, redact }) => match code {
                 KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
                 KeyCode::Tab => *month = !*month,
@@ -4005,7 +4475,8 @@ impl App {
             },
             Some(Popup::Confirm { action, .. }) => {
                 let action = action.clone();
-                if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                let yes = action.key();
+                if matches!(code, KeyCode::Char(c) if c == yes || (yes == 'y' && c == 'Y')) {
                     self.popup = None;
                     self.confirmed(action);
                 } else if matches!(code, KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q')) {
@@ -4664,6 +5135,91 @@ mod tests {
     }
 
     #[test]
+    fn draws_worktrees_and_the_list_of_reviews_at_any_size() {
+        use crate::{
+            projects::{Checkout, Repo},
+            worktree::{Holder, Lock},
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = App::new(1_000_000, false);
+        let checkout = |path: &str, holder: Option<Holder>, prunable: bool| Checkout {
+            path: PathBuf::from(path),
+            branch: Some("a-branch-with-quite-a-long-name/for-a-narrow-terminal".into()),
+            status: (!prunable).then(|| git::Status {
+                changed: 12,
+                untracked: 5,
+                ahead: 3,
+                ..Default::default()
+            }),
+            main: path == "/r",
+            lock: holder.map(|holder| Lock {
+                reason: Some("claude agent agent-a1 (pid 4242)".into()),
+                holder,
+            }),
+            prunable,
+            claude_created: path.contains("/.claude/"),
+            review: path.contains("/reviews/"),
+        };
+        app.projects.repos = vec![Repo {
+            name: "r".into(),
+            checkouts: vec![
+                checkout("/r", None, false),
+                checkout("/r/.claude/worktrees/a", Some(Holder::Running(4242)), false),
+                checkout("/r/.claude/worktrees/b", Some(Holder::Ended(4242)), false),
+                checkout("/cache/reviews/r/c", Some(Holder::Unknown), false),
+                checkout("/gone", None, true),
+            ],
+        }];
+        let done = Review {
+            session_id: "s1".into(),
+            repo: PathBuf::from("/r"),
+            branch: "feature/with-a-long-name".into(),
+            base: "origin/main".into(),
+            worktree: PathBuf::from("/cache/reviews/r/c"),
+            mode: Mode::Static,
+            at: 1_759_000_000,
+            result: Findings {
+                summary: "A summary long enough to run past the edge of a small terminal.".into(),
+                findings: vec![review::Finding {
+                    file: "src/lib.rs".into(),
+                    severity: "high".into(),
+                    comment: "A comment.".into(),
+                    ..Default::default()
+                }],
+            },
+        };
+        app.reviews_ready = vec![done.clone()];
+        app.review_jobs.push(RunningReview {
+            task: review_task("/r", "feat/x"),
+            started: Instant::now(),
+            job: Job::spawn(|| Err("never polled".into())),
+        });
+        for (w, h) in [(1, 1), (10, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
+            for popup in [false, true] {
+                app.view = View::Projects;
+                app.project_page = Some(ProjectPage {
+                    dir: PathBuf::from("/r"),
+                    section: Section::Worktrees,
+                    in_content: true,
+                    sessions_state: Default::default(),
+                    worktrees_state: ratatui::widgets::TableState::default().with_selected(Some(4)),
+                    snapshots_state: Default::default(),
+                    scroll: 0,
+                });
+                app.popup = popup.then(|| Popup::Reviews {
+                    state: ListState::default().with_selected(Some(2)),
+                    saved: vec![Review {
+                        session_id: "s2".into(),
+                        ..done.clone()
+                    }],
+                });
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn notifies_only_on_changes_of_known_sessions() {
         let mut app = App::new(1_000_000, false);
         let id = "11111111-2222-3333-4444-555555555555".to_string();
@@ -4942,7 +5498,7 @@ mod tests {
                 ..Default::default()
             }),
             main,
-            locked: false,
+            lock: None,
             prunable,
             claude_created: false,
             review: false,
@@ -4978,5 +5534,485 @@ mod tests {
                 .any(|p| matches!(p, Problem::MissingWorktree { .. }))
         );
         assert_eq!(problems.len(), 4);
+    }
+
+    #[test]
+    fn opens_sessions_in_a_tab_when_a_multiplexer_is_there() {
+        use crate::launch::{Mux, Place};
+        let mut app = App::new(1_000_000, false);
+        let args = vec!["--resume".to_string(), "abc".to_string()];
+        let queued = |app: &App| -> Vec<Vec<String>> {
+            app.pending_commands
+                .iter()
+                .map(|c| c.args.clone())
+                .collect()
+        };
+
+        // No multiplexer: claudash hands its own terminal over, as always.
+        app.open_claude(args.clone(), PathBuf::from("/tmp"), "Fix login");
+        assert_eq!(queued(&app), std::slice::from_ref(&args));
+        // A second one waits its turn instead of replacing the first.
+        let other = vec!["attach".to_string(), "bg1".to_string()];
+        app.open_claude(other.clone(), PathBuf::from("/tmp"), "Background");
+        assert_eq!(queued(&app), [args.clone(), other]);
+
+        // In Zellij it asks for a tab and stays on screen.
+        app.pending_commands.clear();
+        app.mux = Some(Mux::Zellij);
+        app.launcher = |_, _, _| Ok(());
+        app.open_claude(args.clone(), PathBuf::from("/tmp"), "Fix login");
+        assert!(app.pending_commands.is_empty());
+        let (message, is_error, _) = app.flash.clone().expect("says where it went");
+        assert!(!is_error && message.contains("Fix login") && message.contains("Zellij tab"));
+
+        // `open_in = "here"` keeps the old way.
+        app.open_in = Place::Here;
+        app.open_claude(args.clone(), PathBuf::from("/tmp"), "Fix login");
+        assert_eq!(queued(&app), std::slice::from_ref(&args));
+
+        // The multiplexer refused: it opens here and says why.
+        app.pending_commands.clear();
+        app.open_in = Place::Tab;
+        app.launcher = |_, _, _| Err("no active session".into());
+        app.open_claude(args.clone(), PathBuf::from("/tmp"), "Fix login");
+        assert_eq!(queued(&app), std::slice::from_ref(&args));
+        let (message, is_error, _) = app.flash.clone().expect("says why");
+        assert!(
+            is_error && message.contains("no active session"),
+            "{message}"
+        );
+    }
+
+    fn review_task(repo: &str, branch: &str) -> ReviewTask {
+        ReviewTask {
+            repo: PathBuf::from(repo),
+            repo_name: repo.trim_start_matches('/').to_string(),
+            branch: branch.into(),
+            reference: format!("origin/{branch}"),
+            base: "origin/main".into(),
+            mode: Mode::Static,
+            session_id: format!("session-{branch}"),
+        }
+    }
+
+    /// A static review of `branch` that has just finished, with one finding.
+    fn finished_review(app: &mut App, repo: &str, branch: &str) {
+        let findings = Findings {
+            summary: format!("About {branch}."),
+            findings: vec![review::Finding {
+                file: "src/lib.rs".into(),
+                comment: "A comment.".into(),
+                ..Default::default()
+            }],
+        };
+        app.review_jobs.push(RunningReview {
+            task: review_task(repo, branch),
+            started: Instant::now(),
+            job: Job::spawn(move || Ok((PathBuf::from("/wt"), Some(findings)))),
+        });
+    }
+
+    fn finish_reviews(app: &mut App) {
+        let started = Instant::now();
+        while !app.review_jobs.is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "review never finished"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_jobs();
+        }
+    }
+
+    #[test]
+    fn reviews_several_branches_at_once_but_each_only_once() {
+        let mut app = App::new(1_000_000, false);
+        app.start_review(review_task("/api", "feat/x"));
+        app.start_review(review_task("/web", "feat/y"));
+        assert_eq!(app.review_jobs.len(), 2);
+
+        // The same branch of the same repository shares one worktree.
+        app.start_review(review_task("/api", "feat/x"));
+        assert_eq!(app.review_jobs.len(), 2);
+        let (message, is_error, _) = app.flash.clone().expect("says why not");
+        assert!(is_error && message.contains("feat/x"), "{message}");
+
+        // So do two that would land in the same folder of the cache: another
+        // repository called the same, a branch whose name differs in a slash.
+        let twin = ReviewTask {
+            repo: PathBuf::from("/elsewhere/api"),
+            branch: "feat-x".into(),
+            ..review_task("/api", "feat/x")
+        };
+        app.start_review(twin);
+        assert_eq!(app.review_jobs.len(), 2);
+
+        for branch in ["a", "b"] {
+            app.start_review(review_task("/cli", branch));
+        }
+        assert_eq!(app.review_jobs.len(), MAX_REVIEWS);
+        app.start_review(review_task("/cli", "c"));
+        assert_eq!(app.review_jobs.len(), MAX_REVIEWS);
+    }
+
+    #[test]
+    fn a_review_that_ends_alone_opens_and_the_rest_wait_in_the_list() {
+        let mut app = App::new(1_000_000, false);
+        finished_review(&mut app, "/api", "feat/x");
+        finish_reviews(&mut app);
+        assert!(
+            matches!(&app.popup, Some(Popup::Findings { review, .. }) if review.branch == "feat/x")
+        );
+        assert!(app.reviews_ready.is_empty());
+
+        // Two more end while that one is being read: nothing opens over it.
+        finished_review(&mut app, "/api", "feat/y");
+        finished_review(&mut app, "/web", "fix/z");
+        finish_reviews(&mut app);
+        assert!(
+            matches!(&app.popup, Some(Popup::Findings { review, .. }) if review.branch == "feat/x")
+        );
+        assert_eq!(app.reviews_ready.len(), 2);
+
+        // `B` lists them; Enter opens one, which stops waiting.
+        app.popup = None;
+        press(&mut app, 'B');
+        let Some(Popup::Reviews { state, .. }) = &app.popup else {
+            panic!("the list of reviews");
+        };
+        assert_eq!(state.selected(), Some(0));
+        assert_eq!(app.review_rows().len(), 2);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&app.popup, Some(Popup::Findings { .. })));
+        assert_eq!(app.reviews_ready.len(), 1);
+    }
+
+    #[test]
+    fn two_reviews_running_together_both_wait_to_be_read() {
+        let mut app = App::new(1_000_000, false);
+        finished_review(&mut app, "/api", "feat/x");
+        finished_review(&mut app, "/web", "fix/z");
+        finish_reviews(&mut app);
+        // Neither takes the screen from the other: both wait in the list.
+        assert!(app.popup.is_none());
+        assert_eq!(app.reviews_ready.len(), 2);
+    }
+
+    #[test]
+    fn background_commands_run_side_by_side_but_not_twice() {
+        let mut app = App::new(1_000_000, false);
+        app.start_background_command("stop", "bg1");
+        app.start_background_command("stop", "bg2");
+        assert_eq!(app.background_jobs.len(), 2);
+
+        // The same command for the same session is already on its way.
+        app.start_background_command("stop", "bg1");
+        assert_eq!(app.background_jobs.len(), 2);
+        let (message, is_error, _) = app.flash.clone().expect("says why not");
+        assert!(is_error && message.contains("bg1"), "{message}");
+    }
+
+    #[test]
+    fn snapshots_are_turned_on_and_off_from_their_section() {
+        let mut app = App::new(1_000_000, false);
+        app.view = View::Projects;
+        app.project_page = Some(ProjectPage {
+            dir: PathBuf::from("/r"),
+            section: Section::Snapshots,
+            in_content: true,
+            sessions_state: Default::default(),
+            worktrees_state: Default::default(),
+            snapshots_state: Default::default(),
+            scroll: 0,
+        });
+        assert!(!app.snapshots_on);
+
+        press(&mut app, 'T');
+        let Some(Popup::Confirm { lines, action, .. }) = &app.popup else {
+            panic!("it asks first");
+        };
+        assert_eq!(*action, Confirm::Snapshots { on: true });
+        let text = lines.join("\n");
+        assert!(text.contains("before each prompt") && text.contains("config.toml"));
+
+        // Tests have no settings file to write: it says so and stays off.
+        press(&mut app, 'y');
+        assert!(!app.snapshots_on);
+        assert!(app.flash.as_ref().is_some_and(|(_, is_error, _)| *is_error));
+
+        // With no snapshot to open, Enter offers the same.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::Confirm {
+                action: Confirm::Snapshots { on: true },
+                ..
+            })
+        ));
+
+        // On: the same key turns them off, and says the ones taken are kept.
+        app.popup = None;
+        app.snapshots_on = true;
+        press(&mut app, 'T');
+        let Some(Popup::Confirm { lines, action, .. }) = &app.popup else {
+            panic!("it asks first");
+        };
+        assert_eq!(*action, Confirm::Snapshots { on: false });
+        assert!(lines.join("\n").contains("are kept"));
+    }
+
+    /// An app on the Worktrees of the repository at `root`, the cursor on
+    /// the checkout whose folder is called `name`.
+    fn app_on_worktree(root: &Path, name: &str) -> App {
+        let mut app = App::new(1_000_000, false);
+        let (model, statuses) = crate::projects::build(&[root.to_path_buf()]);
+        let selected = model.repos[0]
+            .checkouts
+            .iter()
+            .position(|c| c.path.ends_with(name))
+            .expect("a checkout with that name");
+        // The folder as git spells it, which is how the app knows projects.
+        let dir = model.repos[0].checkouts[0].path.clone();
+        app.projects = model;
+        app.git = statuses;
+        app.view = View::Projects;
+        app.project_page = Some(ProjectPage {
+            dir,
+            section: Section::Worktrees,
+            in_content: true,
+            sessions_state: Default::default(),
+            worktrees_state: ratatui::widgets::TableState::default().with_selected(Some(selected)),
+            snapshots_state: Default::default(),
+            scroll: 0,
+        });
+        app
+    }
+
+    fn press(app: &mut App, key: char) {
+        app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+    }
+
+    fn finish_removals(app: &mut App) {
+        let started = Instant::now();
+        while !app.removals.is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "removal never finished"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            app.poll_jobs();
+        }
+    }
+
+    #[test]
+    fn removing_a_worktree_with_work_lists_it_and_asks_with_another_key() {
+        let Some((root, run)) = crate::git::testing::scratch_repo("app-remove") else {
+            return;
+        };
+        assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"]));
+        assert!(run(&["worktree", "add", "-q", "wt", "-b", "spike"]));
+        std::fs::write(root.join("wt/notes.txt"), "work").unwrap();
+        let mut app = app_on_worktree(&root, "wt");
+
+        press(&mut app, 'D');
+        let Some(Popup::Confirm { lines, action, .. }) = &app.popup else {
+            panic!("it asks first");
+        };
+        assert!(lines.iter().any(|l| l.contains("untracked  notes.txt")));
+        assert!(lines.iter().any(|l| l.contains("spike")));
+        assert_eq!(action.key(), 'D');
+        // `y` answers questions that lose nothing; this one deletes a file.
+        press(&mut app, 'y');
+        assert!(app.popup.is_some() && root.join("wt/notes.txt").exists());
+        press(&mut app, 'D');
+        assert!(app.popup.is_none());
+        finish_removals(&mut app);
+        assert!(!root.join("wt").exists());
+        let (message, is_error, _) = app.flash.as_ref().expect("says what happened");
+        assert!(!is_error && message.contains("Removed"), "{message}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_worktree_open_in_another_terminal_names_the_session() {
+        let Some((root, run)) = crate::git::testing::scratch_repo("app-open") else {
+            return;
+        };
+        assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"]));
+        assert!(run(&["worktree", "add", "-q", "wt", "-b", "spike"]));
+        let mut app = app_on_worktree(&root, "wt");
+        let worktree = app.projects.repos[0]
+            .checkouts
+            .iter()
+            .find(|c| c.path.ends_with("wt"))
+            .map(|c| c.path.clone())
+            .unwrap();
+        app.sessions = vec![Session {
+            id: "s1".into(),
+            path: PathBuf::from("/t/s1.jsonl"),
+            title: "Add OAuth login".into(),
+            project_path: "~/repo".into(),
+            cwd: Some(worktree),
+            git_branch: None,
+            modified: std::time::SystemTime::now(),
+            size: 0,
+            tokens: Default::default(),
+        }];
+        let live = LiveSession {
+            session_id: "s1".into(),
+            kind: "interactive".into(),
+            status: "idle".into(),
+            pid: Some(std::process::id()),
+            ..Default::default()
+        };
+        app.live = HashMap::from([("s1".to_string(), live)]);
+
+        press(&mut app, 'D');
+        assert!(app.popup.is_none());
+        let (message, is_error, _) = app.flash.as_ref().expect("says why not");
+        assert!(
+            *is_error && message.contains("Add OAuth login"),
+            "{message}"
+        );
+        assert!(root.join("wt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_session_claude_code_reports_inside_a_worktree_keeps_it() {
+        let Some((root, run)) = crate::git::testing::scratch_repo("app-live") else {
+            return;
+        };
+        assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"]));
+        assert!(run(&["worktree", "add", "-q", "wt", "-b", "spike"]));
+        let mut app = app_on_worktree(&root, "wt");
+        let worktree = app.projects.repos[0]
+            .checkouts
+            .iter()
+            .find(|c| c.path.ends_with("wt"))
+            .map(|c| c.path.clone())
+            .unwrap();
+        // No transcript loaded for it yet, and it works in a folder below.
+        let live = LiveSession {
+            session_id: "s9".into(),
+            kind: "interactive".into(),
+            status: "busy".into(),
+            pid: Some(std::process::id()),
+            name: Some("Port the importer".into()),
+            cwd: Some(worktree.join("src").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        app.live = HashMap::from([("s9".to_string(), live)]);
+
+        press(&mut app, 'D');
+        assert!(app.popup.is_none());
+        let (message, is_error, _) = app.flash.clone().expect("says why not");
+        assert!(
+            is_error && message.contains("Port the importer"),
+            "{message}"
+        );
+        // The cleanup leaves it out too.
+        press(&mut app, 'C');
+        assert!(app.popup.is_none() && root.join("wt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_review_in_a_tab_ends_with_its_session_not_with_a_failed_poll() {
+        let mut app = App::new(1_000_000, false);
+        let dir = std::env::temp_dir().join(format!("claudash-ended-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pending = |done: Option<PathBuf>, seen_open: bool| PendingReview {
+            task: review_task("/api", "feat/x"),
+            worktree: PathBuf::from("/wt"),
+            elsewhere: true,
+            done,
+            seen_open,
+        };
+
+        // Seen open before; now Claude Code couldn't say which sessions are
+        // open, which settles nothing.
+        app.pending_reviews.push(pending(None, true));
+        app.settle_reviews(false);
+        assert_eq!(app.pending_reviews.len(), 1);
+        // It could, and the session isn't among them: it ended.
+        app.settle_reviews(true);
+        assert!(app.pending_reviews.is_empty());
+
+        // The session's own tab says when it ends, whatever the polls say.
+        let done = dir.join("session-feat-x");
+        app.pending_reviews.push(pending(Some(done.clone()), false));
+        app.settle_reviews(true);
+        assert_eq!(
+            app.pending_reviews.len(),
+            1,
+            "never seen open, not marked ended"
+        );
+        std::fs::write(&done, "").unwrap();
+        app.settle_reviews(false);
+        assert!(app.pending_reviews.is_empty() && !done.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_long_question_keeps_its_keys_on_screen() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = App::new(1_000_000, false);
+        app.popup = Some(Popup::Confirm {
+            title: "Remove worktree".into(),
+            lines: (0..40)
+                .map(|i| format!("line {i} of a long list"))
+                .collect(),
+            yes: "delete them and remove".into(),
+            action: Confirm::Trash("x".into()),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("delete them and remove") && screen.contains("cancel"));
+    }
+
+    #[test]
+    fn cleans_up_the_worktrees_nobody_uses_in_one_go() {
+        let Some((root, run)) = crate::git::testing::scratch_repo("app-cleanup") else {
+            return;
+        };
+        assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"]));
+        for name in ["one", "two", "busy"] {
+            assert!(run(&["worktree", "add", "-q", name, "-b", name]));
+        }
+        std::fs::write(root.join("busy/notes.txt"), "work").unwrap();
+        let mut app = app_on_worktree(&root, "one");
+
+        press(&mut app, 'C');
+        let Some(Popup::Confirm { lines, action, .. }) = &app.popup else {
+            panic!("it asks first");
+        };
+        let text = lines.join("\n");
+        assert!(text.contains("2 worktrees") && text.contains("one") && text.contains("two"));
+        assert!(!text.contains("busy"));
+        assert_eq!(action.key(), 'y');
+        press(&mut app, 'y');
+        finish_removals(&mut app);
+        assert!(!root.join("one").exists() && !root.join("two").exists());
+        assert!(root.join("busy/notes.txt").exists());
+        let (message, is_error, _) = app.flash.as_ref().expect("says what happened");
+        assert!(
+            !is_error && message.contains("Removed 2 worktrees"),
+            "{message}"
+        );
+
+        // Nothing left that is free: it says so instead of asking.
+        let mut app = app_on_worktree(&root, "busy");
+        press(&mut app, 'C');
+        assert!(app.popup.is_none() && app.flash.is_some());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

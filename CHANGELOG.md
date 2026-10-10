@@ -2,6 +2,16 @@
 
 What changed in each release of claudash. Install or update with `brew upgrade claudash`, `cargo binstall claudash` or the installers on the [releases page](https://github.com/jguajardo/claudash/releases).
 
+## 1.2.0 — 2026-10-10
+
+Doing several things at once, the way you do with terminal tabs.
+
+- **Sessions open in a tab of their own.** Inside Zellij or tmux, resuming a session, attaching to a background one, running a spec's next step and the interactive branch reviews open in a new tab (a window, in tmux), so claudash stays on screen and you can open the next one. `open_in = "pane"` opens a pane next to claudash; `open_in = "here"` keeps the old behavior, which is also what happens outside a multiplexer.
+- **Several branch reviews at once**, of one project or of several (up to four, one per branch). A review that ends while nothing else is going on opens its findings; the others wait, announced in the footer. `B` lists every project's reviews: running, waiting to be read, and earlier ones.
+- **Removing worktrees no longer dead-ends.** The list shows what each worktree holds (modified and untracked files, unpushed commits), how many sessions are open in it and whether its lock is in use or left over. `D` says what stands in the way and what it will do: stop a background session there, unlock a lock whose process has ended or that was set by hand, and, after listing them and a second `D`, delete its modified and untracked files; it names the ignored files that go with it. `C` removes every worktree nobody is using in one go. Removal runs in the background, and the branch is always kept.
+- **Snapshots you can turn on from the dashboard.** `T` in a project's Snapshots writes the setting for you (and applies claudash's setup if it wasn't), and the section says in plain words what a snapshot is and what each row and key does.
+- Background commands (`claude stop`, `respawn`, MCP sign-out, continuing stopped sessions) run side by side instead of one at a time.
+
 ## 1.1.2 — 2026-10-04
 
 - The README and the recordings lead with sessions and projects: new recordings of a project's page with an MCP sign-in, a branch review and a conversation, and a comparison by area.

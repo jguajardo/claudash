@@ -11,6 +11,7 @@ mod history;
 mod hooks;
 mod instructions;
 mod keys;
+mod launch;
 mod library;
 mod mcp;
 mod notify;
@@ -32,6 +33,7 @@ mod stopped;
 mod summary;
 mod transcript;
 mod ui;
+mod worktree;
 mod wrapped;
 
 /// Context window used when the status line hasn't reported one; override with
@@ -415,6 +417,8 @@ fn main() -> std::io::Result<()> {
     app.auto_continue = settings
         .as_ref()
         .is_ok_and(|s| s.auto_continue == Some(true));
+    app.mux = launch::Mux::detect(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
+    app.open_in = launch::Place::parse(settings.as_ref().ok().and_then(|s| s.open_in.as_deref()));
     app.switch_view(app::VIEW_KEYS[view]);
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -543,6 +547,7 @@ mod tests {
             snapshots: None,
             auto_continue: None,
             plan: None,
+            open_in: None,
         };
         let parse = |list: &[&str], env: Option<&str>| {
             parse_args(args(list), env.map(str::to_owned), &settings)

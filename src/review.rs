@@ -218,6 +218,10 @@ fn parse_shortstat(text: &str, commits: u32) -> DiffStat {
 /// Where claudash keeps review worktrees: outside the repository, so they
 /// never show up in its `git status`.
 pub fn worktrees_dir() -> Option<PathBuf> {
+    // Tests never make worktrees in the real cache.
+    if cfg!(test) {
+        return None;
+    }
     crate::paths::claudash_cache().map(|dir| dir.join("reviews"))
 }
 
@@ -229,6 +233,27 @@ fn slug(text: &str) -> String {
         .to_string()
 }
 
+/// What tells one review worktree from another: two reviews with the same
+/// key use the same folder of the cache.
+pub fn worktree_key(repo_name: &str, branch: &str) -> (String, String) {
+    (slug(repo_name), slug(branch))
+}
+
+/// Where the review of `branch` of the repository called `repo_name` has its
+/// worktree.
+pub fn worktree_for(repo_name: &str, branch: &str) -> Option<PathBuf> {
+    let (repo, branch) = worktree_key(repo_name, branch);
+    Some(worktrees_dir()?.join(repo).join(branch))
+}
+
+/// A file the tab of an interactive review creates when its session ends.
+/// Its folder is made here, so the tab only has to write the file.
+pub fn ended_marker(session_id: &str) -> Option<PathBuf> {
+    let dir = worktrees_dir()?.parent()?.join("ended");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(slug(session_id)))
+}
+
 /// A worktree with the branch checked out (detached, so no local branch is
 /// created), made or updated for this review.
 pub fn prepare_worktree(
@@ -237,10 +262,7 @@ pub fn prepare_worktree(
     branch: &str,
     reference: &str,
 ) -> Result<PathBuf, String> {
-    let dir = worktrees_dir()
-        .ok_or("Could not find the cache directory")?
-        .join(slug(repo_name))
-        .join(slug(branch));
+    let dir = worktree_for(repo_name, branch).ok_or("Could not find the cache directory")?;
     if dir.join(".git").exists() {
         git(&dir, &["checkout", "--quiet", "--detach", reference])?;
     } else {
@@ -282,17 +304,18 @@ impl Mode {
         match self {
             Mode::Static => {
                 "Claude reads the commits, the diff and the code around it; nothing runs and no \
-                 file changes. Runs in the background; the findings open when it's done."
+                 file changes. Runs in the background, and several can run at once; the findings \
+                 open when it's done, or wait under B while you do something else."
             }
             Mode::Tests => {
                 "Opens Claude Code in the review worktree: it reviews, finds how the project runs \
-                 its tests and runs them, asking you before each command. Findings show when you \
-                 exit."
+                 its tests and runs them, asking you before each command. Findings show when \
+                 that session ends."
             }
             Mode::Run => {
                 "Opens Claude Code in the review worktree: it reviews, finds how to start the \
                  project, starts it and checks it works, asking you before each command. Findings \
-                 show when you exit."
+                 show when that session ends."
             }
         }
     }
@@ -466,8 +489,8 @@ pub fn save(review: &Review) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Saved reviews of a repository, newest first.
-pub fn saved(repo: &Path) -> Vec<Review> {
+/// Every saved review, newest first.
+fn all() -> Vec<Review> {
     let mut reviews: Vec<Review> = store_dir()
         .and_then(|dir| fs::read_dir(dir).ok())
         .into_iter()
@@ -475,9 +498,22 @@ pub fn saved(repo: &Path) -> Vec<Review> {
         .flatten()
         .filter_map(|e| fs::read(e.path()).ok())
         .filter_map(|raw| serde_json::from_slice::<Review>(&raw).ok())
-        .filter(|r| r.repo == repo)
         .collect();
     reviews.sort_by_key(|r| std::cmp::Reverse(r.at));
+    reviews
+}
+
+/// Saved reviews of a repository, newest first.
+pub fn saved(repo: &Path) -> Vec<Review> {
+    let mut reviews = all();
+    reviews.retain(|r| r.repo == repo);
+    reviews
+}
+
+/// The latest saved reviews of every repository, newest first.
+pub fn recent(limit: usize) -> Vec<Review> {
+    let mut reviews = all();
+    reviews.truncate(limit);
     reviews
 }
 
